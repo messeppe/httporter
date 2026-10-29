@@ -1191,3 +1191,189 @@ fn a_site_whose_last_request_failed_is_described_as_such() {
     assert_eq!(description("example-shop.com"), "");
     assert_eq!(description("media-archive"), "Last request failed");
 }
+
+// ---- Fix round 1: error announcements, error focus, outlines, placeholder ----
+
+#[test]
+fn error_lines_are_assertive_live_regions() {
+    let b = bed();
+    b.open();
+    let messages = [
+        ("Zone names can't contain spaces.", 0),
+        ("Choose a region.", 1),
+        ("Enter the zone's password.", 2),
+    ];
+    for (message, which) in messages {
+        match which {
+            0 => b.w.set_add_site_zone_error(message.into()),
+            1 => b.w.set_add_site_region_error(message.into()),
+            _ => b.w.set_add_site_password_error(message.into()),
+        }
+        let line = b.control(AccessibleRole::Text, message);
+        assert_eq!(
+            line.accessible_live_region(),
+            Some(AccessibleLiveness::Assertive),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn showing_a_field_error_moves_the_focus_to_that_field() {
+    let show = |b: &Bed, error: FieldError| {
+        show_field_error(&b.w, Some(&error));
+        slint::platform::update_timers_and_animations();
+    };
+
+    // Storage zone: typing lands in it.
+    let b = bed();
+    b.open();
+    b.tab(ADD);
+    show(&b, FieldError::Zone("Enter the storage zone name.".into()));
+    b.type_text("z");
+    assert_eq!(b.value("Storage zone"), "z");
+
+    // Region: Down changes the region.
+    let b = bed();
+    b.open();
+    b.tab(ADD);
+    show(&b, FieldError::Region("Choose a region.".into()));
+    b.told();
+    b.tap(Key::DownArrow);
+    assert_eq!(b.told(), vec!["changed |1"]);
+
+    // Password: typing lands in it, and Return then sends it.
+    let b = bed();
+    b.open();
+    b.tab(ADD);
+    show(
+        &b,
+        FieldError::Password("Enter the zone's password.".into()),
+    );
+    b.type_text("p");
+    b.told();
+    b.tap(Key::Return);
+    assert_eq!(b.told(), vec!["save ||0|p"]);
+
+    // The same error shown again (nothing was edited) still brings the focus back.
+    let b = bed();
+    b.open();
+    let again = || FieldError::Zone("Enter the storage zone name.".into());
+    b.tab(ADD);
+    show(&b, again());
+    b.tab(2);
+    show(&b, again());
+    b.type_text("z");
+    assert_eq!(b.value("Storage zone"), "z");
+
+    // Clearing the errors does not move the focus.
+    let b = bed();
+    b.open();
+    b.tab(ADD);
+    show_field_error(&b.w, None);
+    slint::platform::update_timers_and_animations();
+    b.told();
+    b.tap(Key::Return);
+    assert_eq!(b.told(), vec!["save ||0|"]);
+}
+
+#[test]
+fn an_empty_form_walks_the_user_to_each_problem() {
+    use crate::add_site::{AddSiteForm, ValidSite};
+    // The app side of Task 15, in miniature: validate on save, show the error.
+    let b = bed();
+    let saved: Rc<RefCell<Option<ValidSite>>> = Rc::default();
+    let weak = b.w.as_weak();
+    b.w.on_add_site_save({
+        let saved = saved.clone();
+        move |name, zone, region, password| {
+            let form = AddSiteForm {
+                name: name.into(),
+                zone: zone.into(),
+                region_index: region,
+                password: password.into(),
+            };
+            let ui = weak.upgrade().unwrap();
+            match form.validate(&["de", "sg", "uk"]) {
+                Ok(site) => *saved.borrow_mut() = Some(site),
+                Err(error) => show_field_error(&ui, Some(&error)),
+            }
+        }
+    });
+    b.open();
+    b.tab(ADD);
+    b.tap(Key::Return); // empty form: the zone is missing
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        b.w.get_add_site_zone_error(),
+        "Enter the storage zone name."
+    );
+    b.type_text("z"); // the focus is already in the zone field
+    b.tap(Key::Return); // password missing
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        b.w.get_add_site_password_error(),
+        "Enter the zone's password."
+    );
+    assert_eq!(b.w.get_add_site_zone_error(), "");
+    b.type_text("p"); // the focus is already in the password field
+    assert!(saved.borrow().is_none());
+    b.tap(Key::Return);
+    let site = saved.borrow().clone().expect("saved");
+    assert_eq!(
+        (
+            site.zone.as_str(),
+            site.region_code.as_str(),
+            site.password.as_str()
+        ),
+        ("z", "de", "p")
+    );
+}
+
+slint::slint! {
+    #[style = "cupertino"]
+    import { CapsuleButton } from "../ui/components/buttons.slint";
+    import { Theme } from "../ui/theme.slint";
+
+    // A plain and a primary button, exposing their outlines.
+    export component EdgeBed inherits Window {
+        out property <color> field-border: Theme.field-border;
+        out property <color> plain-color: plain.border-color;
+        out property <length> plain-width: plain.border-width;
+        out property <color> primary-color: primary.border-color;
+        out property <length> primary-width: primary.border-width;
+
+        HorizontalLayout {
+            plain := CapsuleButton { text: "Plain"; }
+            primary := CapsuleButton { text: "Primary"; primary: true; }
+        }
+    }
+}
+
+#[test]
+fn a_plain_button_is_outlined_in_the_field_border_and_the_primary_one_is_not() {
+    testing::init_no_event_loop();
+    let bed = EdgeBed::new().unwrap();
+    assert_eq!(bed.get_plain_width(), 1.0);
+    assert_eq!(bed.get_plain_color(), bed.get_field_border());
+    assert_ne!(bed.get_field_border().alpha(), 0);
+    assert_eq!(bed.get_primary_width(), 0.5);
+    assert_eq!(bed.get_primary_color().alpha(), 0);
+}
+
+#[test]
+fn the_placeholder_is_set_in_the_secondary_label_colour() {
+    // `label3` is only about 3:1 on the field; the placeholder carries real information (what
+    // the site name will be), so it uses `label2`.
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/components/add_site.slint");
+    let source = std::fs::read_to_string(path).unwrap();
+    let lines: Vec<_> = source.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == "text: root.placeholder;")
+        .expect("the placeholder text");
+    let after = &lines[at + 1..at + 5];
+    assert!(after.contains(&"color: Theme.label2;"), "{after:?}");
+    assert!(!after.iter().any(|l| l.contains("label3")), "{after:?}");
+}

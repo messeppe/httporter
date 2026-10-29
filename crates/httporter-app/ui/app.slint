@@ -96,6 +96,8 @@ export component AppWindow inherits Window {
     in-out property <string> add-site-zone-error;
     in-out property <string> add-site-region-error;
     in-out property <string> add-site-password-error;
+    // Bumped by `show_field_error` each time it shows an error; the sheet then focuses that field.
+    in property <int> add-site-error-serial;
 
     callback site-selected(int);
     callback add-site();
@@ -242,6 +244,7 @@ export component AppWindow inherits Window {
         zone-error <=> root.add-site-zone-error;
         region-error <=> root.add-site-region-error;
         password-error <=> root.add-site-password-error;
+        error-serial: root.add-site-error-serial;
         changed(zone, region) => { root.add-site-changed(zone, region); }
         test(name, zone, region, password) => { root.add-site-test(name, zone, region, password); }
         save(name, zone, region, password) => { root.add-site-save(name, zone, region, password); }

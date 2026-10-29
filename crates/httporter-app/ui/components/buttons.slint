@@ -97,8 +97,10 @@ export component CapsuleButton inherits Rectangle {
     height: 28px;
     border-radius: self.height / 2;
     background: root.primary ? Theme.accent : Theme.control;
-    border-width: 0.5px;
-    border-color: root.primary ? transparent : Theme.control-border;
+    // A plain button is outlined in `field-border` (3:1 against the surface in both themes): the
+    // white face of `control` has no other edge on a white sheet. The primary one is a fill.
+    border-width: root.primary ? 0.5px : 1px;
+    border-color: root.primary ? transparent : Theme.field-border;
     opacity: root.enabled ? 1 : 0.45;
     forward-focus: key-focus;
     accessible-role: button;

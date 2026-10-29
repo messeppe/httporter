@@ -49,7 +49,7 @@ component Field inherits Rectangle {
             height: 100%;
             text: root.placeholder;
             visible: input.text == "" && input.preedit-text == "";
-            color: Theme.label3;
+            color: Theme.label2;
             font-size: Theme.font-body;
             vertical-alignment: center;
             overflow: elide;
@@ -138,26 +138,34 @@ component Field inherits Rectangle {
 }
 
 // One line of red text under a field, with a warning mark so that colour is not the only cue.
-component ErrorLine inherits HorizontalLayout {
+// An assertive live region, so assistive technology announces a new error at once.
+component ErrorLine inherits Rectangle {
     in property <string> text;
 
-    spacing: 4px;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    accessible-live-region: assertive;
 
-    VCenter {
-        Image {
-            source: Icons.warn;
-            colorize: Theme.red;
-            width: 12px;
-            height: 12px;
+    HorizontalLayout {
+        spacing: 4px;
+
+        VCenter {
+            Image {
+                source: Icons.warn;
+                colorize: Theme.red;
+                width: 12px;
+                height: 12px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.red;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+            vertical-alignment: center;
             accessible-role: none;
         }
-    }
-    Text {
-        text: root.text;
-        color: Theme.red;
-        font-size: Theme.font-small;
-        wrap: word-wrap;
-        vertical-alignment: center;
     }
 }
 
@@ -564,6 +572,9 @@ export component AddSiteSheet inherits Rectangle {
     in-out property <string> zone-error;
     in-out property <string> region-error;
     in-out property <string> password-error;
+    // Counts the times the app showed an error: each one moves the focus to the first field that
+    // has a message, so that the user lands where the problem is (and hears it).
+    in property <int> error-serial;
 
     // The zone or region changed, so the endpoint shown has to be worked out again.
     callback changed(string /* zone */, int /* region */);
@@ -580,6 +591,16 @@ export component AddSiteSheet inherits Rectangle {
     function submit() {
         if (!root.busy) {
             root.save(name-field.text, zone-field.text, region-box.current-index, password-field.text);
+        }
+    }
+
+    changed error-serial => {
+        if (root.zone-error != "") {
+            zone-field.focus();
+        } else if (root.region-error != "") {
+            region-box.focus();
+        } else if (root.password-error != "") {
+            password-field.focus();
         }
     }
 

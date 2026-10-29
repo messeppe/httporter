@@ -111,6 +111,7 @@ impl AddSiteForm {
 }
 
 /// Shows `error` under its field on the open sheet and clears the other two; `None` clears all.
+/// Showing an error also puts the keyboard focus in that field.
 pub fn show_field_error(ui: &AppWindow, error: Option<&FieldError>) {
     let message_if = |wanted: bool| -> SharedString {
         match error {
@@ -121,6 +122,10 @@ pub fn show_field_error(ui: &AppWindow, error: Option<&FieldError>) {
     ui.set_add_site_zone_error(message_if(matches!(error, Some(FieldError::Zone(_)))));
     ui.set_add_site_region_error(message_if(matches!(error, Some(FieldError::Region(_)))));
     ui.set_add_site_password_error(message_if(matches!(error, Some(FieldError::Password(_)))));
+    if error.is_some() {
+        // Every error moves the keyboard focus to its field, also a repeat of the same one.
+        ui.set_add_site_error_serial(ui.get_add_site_error_serial().wrapping_add(1));
+    }
 }
 
 #[cfg(test)]
