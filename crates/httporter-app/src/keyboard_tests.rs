@@ -671,7 +671,9 @@ fn the_panes_sit_side_by_side_when_wide_and_stack_when_narrow() {
     let (l, r) = (local.absolute_position(), remote.absolute_position());
     assert_eq!(l.y, r.y);
     assert!(r.x > l.x + 400.0);
+    assert!(!w.get_panes_stacked());
     assert_eq!(w.get_pane_split(), r.x);
+    assert_eq!(w.get_remote_pane_y(), r.y);
 
     // At the minimum width the sidebar leaves too little for that: one above the other.
     w.window().set_size(slint::LogicalSize::new(960.0, 700.0));
@@ -679,7 +681,188 @@ fn the_panes_sit_side_by_side_when_wide_and_stack_when_narrow() {
     assert_eq!(l.x, r.x);
     assert!(r.y > l.y + local.size().height);
     assert_eq!(local.size().width, remote.size().width);
+    assert!(w.get_panes_stacked());
     assert_eq!(w.get_pane_split(), r.x);
+    assert_eq!(w.get_remote_pane_y(), r.y);
+
+    // Back to wide: the three values follow.
+    w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    let r = remote.absolute_position();
+    assert!(!w.get_panes_stacked());
+    assert_eq!((w.get_pane_split(), w.get_remote_pane_y()), (r.x, r.y));
+}
+
+#[test]
+fn the_pane_position_outputs_tell_which_pane_a_point_is_over() {
+    // The rule Task 14 applies to a dropped file's position.
+    let over_cloud = |w: &AppWindow, x: f32, y: f32| {
+        if w.get_panes_stacked() {
+            y >= w.get_remote_pane_y()
+        } else {
+            x >= w.get_pane_split()
+        }
+    };
+    let w = window_with_panes(3, 3);
+    let (local, remote) = (
+        pane_named(&w, "This PC"),
+        pane_named(&w, "No site selected"),
+    );
+    for (width, height) in [(1280.0, 800.0), (960.0, 700.0)] {
+        w.window().set_size(slint::LogicalSize::new(width, height));
+        let (lc, rc) = (center(&local), center(&remote));
+        assert!(!over_cloud(&w, lc.x, lc.y), "{width}: centre of This PC");
+        assert!(
+            over_cloud(&w, rc.x, rc.y),
+            "{width}: centre of the cloud pane"
+        );
+    }
+}
+
+fn crumb_names(names: &[&str]) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(
+        names
+            .iter()
+            .map(|n| (*n).into())
+            .collect::<Vec<SharedString>>(),
+    ))
+}
+
+fn crumb_button(w: &AppWindow, name: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(w, &format!("Go to {name}")).next()
+}
+
+/// Records the index every `local-crumb-clicked` reports.
+fn record_local_crumbs(w: &AppWindow) -> Rc<std::cell::RefCell<Vec<i32>>> {
+    let clicked = Rc::new(std::cell::RefCell::new(Vec::new()));
+    w.on_local_crumb_clicked({
+        let clicked = clicked.clone();
+        move |i| clicked.borrow_mut().push(i)
+    });
+    clicked
+}
+
+#[test]
+fn every_breadcrumb_but_the_last_is_a_button_that_reports_its_index() {
+    let w = window_with_panes(3, 3);
+    w.set_local_crumbs(crumb_names(&["D:", "sites", "exampleshop", "uploads"]));
+    let clicked = record_local_crumbs(&w);
+
+    for name in ["D:", "sites", "exampleshop"] {
+        let button = crumb_button(&w, name).unwrap_or_else(|| panic!("no button for {name}"));
+        assert_eq!(button.accessible_role(), Some(AccessibleRole::Button));
+    }
+    // The current folder is plain text.
+    assert!(crumb_button(&w, "uploads").is_none());
+
+    click(w.window(), center(&crumb_button(&w, "exampleshop").unwrap()), 1);
+    click(w.window(), center(&crumb_button(&w, "D:").unwrap()), 1);
+    click(w.window(), center(&crumb_button(&w, "sites").unwrap()), 1);
+    assert_eq!(*clicked.borrow(), [2, 0, 1]);
+    // Clicking does not select a row or sort.
+    assert_eq!(w.get_local_selected(), -1);
+}
+
+#[test]
+fn clicking_the_current_folder_does_nothing() {
+    let w = window_with_panes(3, 3);
+    w.set_local_crumbs(crumb_names(&["D:", "sites", "uploads"]));
+    let clicked = record_local_crumbs(&w);
+    let last = ElementHandle::find_by_accessible_label(&w, "uploads")
+        .next()
+        .expect("the current folder is shown");
+    assert_ne!(last.accessible_role(), Some(AccessibleRole::Button));
+    click(w.window(), center(&last), 2);
+    assert!(clicked.borrow().is_empty());
+}
+
+#[test]
+fn breadcrumbs_work_from_the_keyboard_and_the_last_is_not_a_tab_stop() {
+    let w = window_with_panes(3, 3);
+    w.set_local_crumbs(crumb_names(&["D:", "sites", "uploads"]));
+    let clicked = record_local_crumbs(&w);
+    let sorted = Rc::new(Cell::new(-1));
+    w.on_sort_local({
+        let sorted = sorted.clone();
+        move |c| sorted.set(c)
+    });
+
+    // Tab order in the pane: list, then the crumbs that are buttons, then the column headers.
+    tab(&w, LOCAL_LIST + 1);
+    tap(w.window(), Key::Return);
+    assert_eq!(*clicked.borrow(), [0]);
+    tab(&w, 1);
+    tap(w.window(), Key::Space);
+    assert_eq!(*clicked.borrow(), [0, 1]);
+    // Key repeat does not press it again.
+    w.window().dispatch_event(WindowEvent::KeyPressRepeated {
+        text: Key::Return.into(),
+    });
+    assert_eq!(*clicked.borrow(), [0, 1]);
+
+    // The next stop is the Name column header, not the current folder.
+    tab(&w, 1);
+    tap(w.window(), Key::Return);
+    assert_eq!(*clicked.borrow(), [0, 1]);
+    assert_eq!(sorted.get(), 0);
+}
+
+#[test]
+fn assistive_technology_can_press_a_breadcrumb() {
+    let w = window_with_panes(3, 3);
+    w.set_local_crumbs(crumb_names(&["D:", "sites", "uploads"]));
+    let clicked = record_local_crumbs(&w);
+    crumb_button(&w, "sites")
+        .unwrap()
+        .invoke_accessible_default_action();
+    assert_eq!(*clicked.borrow(), [1]);
+}
+
+#[test]
+fn the_cloud_pane_reports_its_own_breadcrumbs() {
+    let w = window_with_panes(3, 3);
+    w.set_remote_crumbs(crumb_names(&["exampleshop", "wp-content", "uploads"]));
+    let remote = Rc::new(std::cell::RefCell::new(Vec::new()));
+    w.on_remote_crumb_clicked({
+        let remote = remote.clone();
+        move |i| remote.borrow_mut().push(i)
+    });
+    let local = record_local_crumbs(&w);
+    click(
+        w.window(),
+        center(&crumb_button(&w, "wp-content").unwrap()),
+        1,
+    );
+    click(
+        w.window(),
+        center(&crumb_button(&w, "exampleshop").unwrap()),
+        1,
+    );
+    assert_eq!(*remote.borrow(), [1, 0]);
+    assert!(local.borrow().is_empty());
+}
+
+#[test]
+fn a_long_path_stays_inside_the_pane_header() {
+    let w = window_with_panes(3, 3);
+    let names: Vec<String> = (0..9)
+        .map(|i| format!("a-rather-long-folder-name-{i}"))
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    w.set_local_crumbs(crumb_names(&names));
+    let pane = pane_named(&w, "This PC");
+    let (p, ps) = (pane.absolute_position(), pane.size());
+    for name in &names[..names.len() - 1] {
+        let button = crumb_button(&w, name).unwrap();
+        let (b, bs) = (button.absolute_position(), button.size());
+        assert!(
+            b.x >= p.x && b.x + bs.width <= p.x + ps.width,
+            "{name} spans {}..{} in a pane {}..{}",
+            b.x,
+            b.x + bs.width,
+            p.x,
+            p.x + ps.width
+        );
+    }
 }
 
 #[test]

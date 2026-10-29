@@ -88,11 +88,22 @@ export component AppWindow inherits Window {
     // Column number: 0 name, 1 size, 2 modified. The pane has already updated its sort properties.
     callback sort-local(int);
     callback sort-remote(int);
+    // A breadcrumb other than the last was pressed: the index into the pane's crumbs, where 0 is the
+    // drive (This PC pane) or the zone (cloud pane).
+    callback local-crumb-clicked(int);
+    callback remote-crumb-clicked(int);
 
     out property <bool> sidebar-visible: true;
-    // Window x of the cloud pane's left edge, in logical pixels. A file dropped to the right of it
-    // goes to the cloud pane. (With the panes stacked it is the left edge of both.)
+    // Where the cloud pane is, in window coordinates and logical pixels, for telling which pane a
+    // point is over. The panes sit side by side when the main area is wide enough and are stacked
+    // otherwise (`panes-stacked`). Side by side, a point is over the cloud pane when
+    // `x >= pane-split`; stacked, when `y >= remote-pane-y` (and `pane-split` is the left edge of
+    // both panes, so it says nothing).
+    out property <bool> panes-stacked: !panes.side-by-side;
+    // Absolute x of the cloud pane's left edge.
     out property <length> pane-split: remote-pane.absolute-position.x;
+    // Absolute y of the cloud pane's top edge.
+    out property <length> remote-pane-y: remote-pane.absolute-position.y;
     property <bool> has-selection: root.selected-site >= 0 && root.selected-site < root.sites.length;
 
     VerticalLayout {
@@ -151,6 +162,7 @@ export component AppWindow inherits Window {
                         sort-ascending <=> root.local-sort-ascending;
                         open(index) => { root.open-local(index); }
                         up => { root.local-up(); }
+                        crumb-clicked(index) => { root.local-crumb-clicked(index); }
                         sort(column) => { root.sort-local(column); }
                     }
                     remote-pane := Pane {
@@ -168,6 +180,7 @@ export component AppWindow inherits Window {
                         sort-ascending <=> root.remote-sort-ascending;
                         open(index) => { root.open-remote(index); }
                         up => { root.remote-up(); }
+                        crumb-clicked(index) => { root.remote-crumb-clicked(index); }
                         sort(column) => { root.sort-remote(column); }
                     }
                 }
