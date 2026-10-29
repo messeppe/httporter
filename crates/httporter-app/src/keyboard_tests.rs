@@ -219,14 +219,18 @@ slint::slint! {
         width: 600px;
         height: 400px;
         in property <[FileRow]> rows;
+        in property <[string]> crumbs;
         out property <bool> focused: pane.has-focus;
         out property <bool> ring: pane.focus-visible;
+        callback crumb-clicked(int);
 
         pane := Pane {
             width: parent.width;
             height: parent.height;
             title: "Bed";
             rows: root.rows;
+            crumbs: root.crumbs;
+            crumb-clicked(index) => { root.crumb-clicked(index); }
         }
     }
 }
@@ -795,17 +799,19 @@ fn breadcrumbs_work_from_the_keyboard_and_the_last_is_not_a_tab_stop() {
     tab(&w, LOCAL_LIST + 1);
     tap(w.window(), Key::Return);
     assert_eq!(*clicked.borrow(), [0]);
-    tab(&w, 1);
-    tap(w.window(), Key::Space);
-    assert_eq!(*clicked.borrow(), [0, 1]);
-    // Key repeat does not press it again.
+    // A pressed crumb hands the focus to the list (see
+    // `a_pressed_breadcrumb_hands_the_focus_to_the_list`), so the second crumb is two stops on.
+    tab(&w, 2);
+    // Key repeat does not press it.
     w.window().dispatch_event(WindowEvent::KeyPressRepeated {
         text: Key::Return.into(),
     });
+    assert_eq!(*clicked.borrow(), [0]);
+    tap(w.window(), Key::Space);
     assert_eq!(*clicked.borrow(), [0, 1]);
 
-    // The next stop is the Name column header, not the current folder.
-    tab(&w, 1);
+    // After the list and the two crumbs comes the Name column header, not the current folder.
+    tab(&w, 3);
     tap(w.window(), Key::Return);
     assert_eq!(*clicked.borrow(), [0, 1]);
     assert_eq!(sorted.get(), 0);
@@ -908,6 +914,50 @@ fn the_strong_focus_ring_follows_the_keyboard_not_the_mouse() {
     // Leaving the pane clears both.
     tap(bed.window(), Key::Backtab);
     assert!(!bed.get_focused() && !bed.get_ring());
+}
+
+/// Note for Task 15: the app answers a pressed breadcrumb with the new path, which rebuilds the
+/// crumbs and would take the keyboard focus away with the pressed one. The pane's list takes the
+/// focus when a crumb is pressed, so it survives the rebuild.
+#[test]
+fn a_pressed_breadcrumb_hands_the_focus_to_the_list() {
+    testing::init_no_event_loop();
+    let bed = PaneBed::new().unwrap();
+    let path = ["D:", "sites", "uploads"];
+    bed.set_crumbs(crumb_names(&path));
+    let pressed = Rc::new(std::cell::RefCell::new(Vec::new()));
+    bed.on_crumb_clicked({
+        let pressed = pressed.clone();
+        move |i| pressed.borrow_mut().push(i)
+    });
+    bed.show().unwrap();
+    assert!(!bed.get_focused());
+
+    // From the keyboard: Tab to the list, then past "D:" to "sites", and press it. The strong
+    // ring shows.
+    for _ in 0..3 {
+        tap(bed.window(), Key::Tab);
+    }
+    tap(bed.window(), Key::Return);
+    assert_eq!(*pressed.borrow(), [1]);
+    assert!(bed.get_focused() && bed.get_ring());
+    bed.set_crumbs(crumb_names(&path[..2]));
+    assert!(bed.get_focused() && bed.get_ring());
+}
+
+/// The same with the mouse: after the crumbs are rebuilt, the arrow keys work in the list.
+#[test]
+fn a_clicked_breadcrumb_hands_the_focus_to_the_list() {
+    let w = window_with_panes(3, 3);
+    let path = ["D:", "sites", "uploads"];
+    w.set_local_crumbs(crumb_names(&path));
+    let clicked = record_local_crumbs(&w);
+    click(w.window(), center(&crumb_button(&w, "sites").unwrap()), 1);
+    assert_eq!(*clicked.borrow(), [1]);
+    w.set_local_crumbs(crumb_names(&path[..2]));
+    assert_eq!(w.get_local_selected(), -1);
+    tap(w.window(), Key::DownArrow);
+    assert_eq!(w.get_local_selected(), 0);
 }
 
 /// Every user-facing string in the .slint sources must go through @tr() so it can be

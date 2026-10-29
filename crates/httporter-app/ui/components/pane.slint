@@ -282,6 +282,15 @@ export component Pane inherits Rectangle {
         }
     }
 
+    // A breadcrumb was pressed. The app answers with the new path, which rebuilds the crumbs and
+    // would drop the keyboard focus with the pressed one, so the list takes it now. The strong
+    // ring shows when the crumb was pressed from the keyboard, as it does for the list itself.
+    function go-to-crumb(index: int, from-keyboard: bool) {
+        root.keyboard-focus = from-keyboard;
+        key-focus.focus();
+        root.crumb-clicked(index);
+    }
+
     function sort-by(column: int) {
         if (root.sort-column == column) {
             root.sort-ascending = !root.sort-ascending;
@@ -454,7 +463,8 @@ export component Pane inherits Rectangle {
                                 }
                                 if i < root.crumbs.length - 1: Crumb {
                                     text: crumb;
-                                    clicked => { root.crumb-clicked(i); }
+                                    // A crumb holds the focus only when the keyboard put it there.
+                                    clicked => { root.go-to-crumb(i, self.has-focus); }
                                 }
                                 if i == root.crumbs.length - 1: HorizontalLayout {
                                     padding-left: 3px;

@@ -80,6 +80,19 @@ impl fmt::Debug for ValidSite {
 }
 
 impl AddSiteForm {
+    /// The form from the arguments of the sheet's `add-site-test` and `add-site-save` callbacks,
+    /// which come in this order: site name, zone, region index, password. Both buttons go through
+    /// here, so the order is written down once (the name and the zone are both strings: swapping
+    /// them would compile).
+    pub fn from_sheet(name: &str, zone: &str, region_index: i32, password: &str) -> Self {
+        Self {
+            name: name.into(),
+            zone: zone.into(),
+            region_index,
+            password: password.into(),
+        }
+    }
+
     /// Checks the form. `region_codes` are the codes behind the sheet's region list, in the same
     /// order. The first problem found is returned: zone, then region, then password.
     ///
@@ -141,6 +154,15 @@ mod tests {
             region_index: region,
             password: password.into(),
         }
+    }
+
+    #[test]
+    fn the_sheet_arguments_land_in_their_own_fields() {
+        let f = AddSiteForm::from_sheet("My site", "my-zone", 4, "pw-1");
+        assert_eq!(f.name, "My site");
+        assert_eq!(f.zone, "my-zone");
+        assert_eq!(f.region_index, 4);
+        assert_eq!(f.password, "pw-1");
     }
 
     #[test]

@@ -107,11 +107,6 @@ fn row(
     }
 }
 
-/// Rows for a cloud listing: folders first, then by name. See [`rows_from_remote_sorted`].
-pub fn rows_from_remote(entries: &[Entry], now: NaiveDateTime) -> Vec<RowData> {
-    rows_from_remote_sorted(entries, now, SortKey::Name, true)
-}
-
 /// Rows for a cloud listing in the order `key` and `ascending` give (folders always first).
 /// Times are converted from UTC to the PC's time zone; `now` is local time.
 pub fn rows_from_remote_sorted(
@@ -139,6 +134,40 @@ pub fn rows_from_remote_sorted(
         .collect()
 }
 
+/// Sorts a cloud listing in place into the order [`rows_from_remote_sorted`] shows it in: the same
+/// comparison on the same values, so a row's index is also its entry's index. As there, each
+/// entry's local time is worked out once rather than on every comparison.
+pub fn sort_remote_entries(entries: &mut Vec<Entry>, key: SortKey, ascending: bool) {
+    struct Keyed {
+        entry: Entry,
+        modified: Option<NaiveDateTime>,
+    }
+    impl Sortable for Keyed {
+        fn is_folder(&self) -> bool {
+            self.entry.is_folder
+        }
+        fn name(&self) -> &str {
+            self.entry.name()
+        }
+        fn size(&self) -> u64 {
+            self.entry.size
+        }
+        fn modified(&self) -> Option<NaiveDateTime> {
+            self.modified
+        }
+    }
+
+    let mut keyed: Vec<Keyed> = std::mem::take(entries)
+        .into_iter()
+        .map(|entry| Keyed {
+            modified: entry.modified.map(to_local),
+            entry,
+        })
+        .collect();
+    sort_rows(&mut keyed, key, ascending);
+    entries.extend(keyed.into_iter().map(|k| k.entry));
+}
+
 /// The fields of a cloud entry that a pane row needs, ready to be compared.
 struct Listed<'a> {
     name: &'a str,
@@ -160,11 +189,6 @@ impl Sortable for Listed<'_> {
     fn modified(&self) -> Option<NaiveDateTime> {
         self.modified
     }
-}
-
-/// Rows for a local folder: folders first, then by name. See [`rows_from_local_sorted`].
-pub fn rows_from_local(entries: &[LocalEntry], now: NaiveDateTime) -> Vec<RowData> {
-    rows_from_local_sorted(entries, now, SortKey::Name, true)
 }
 
 /// Rows for a local folder in the order `key` and `ascending` give (folders always first).
@@ -277,6 +301,15 @@ mod tests {
 
     fn names(rows: &[RowData]) -> Vec<&str> {
         rows.iter().map(|r| r.name.as_str()).collect()
+    }
+
+    /// Folders first, then by name: the order a pane starts in.
+    fn rows_from_remote(entries: &[Entry], now: NaiveDateTime) -> Vec<RowData> {
+        rows_from_remote_sorted(entries, now, SortKey::Name, true)
+    }
+
+    fn rows_from_local(entries: &[LocalEntry], now: NaiveDateTime) -> Vec<RowData> {
+        rows_from_local_sorted(entries, now, SortKey::Name, true)
     }
 
     fn synthetic_entries(count: usize) -> Vec<Entry> {
@@ -504,6 +537,39 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn sorted_entries_are_in_row_order_for_every_key_and_direction() {
+        let mut entries = synthetic_entries(5_000);
+        // Ties on size and on the modified time, so the tie-break by name matters too.
+        for (i, e) in entries.iter_mut().enumerate() {
+            e.size = (i % 7) as u64;
+            if i % 3 == 0 {
+                e.modified = None;
+            }
+        }
+        for key in [SortKey::Name, SortKey::Size, SortKey::Modified] {
+            for ascending in [true, false] {
+                sort_remote_entries(&mut entries, key, ascending);
+                let rows = rows_from_remote_sorted(&entries, now(), key, ascending);
+                let entry_names: Vec<&str> = entries.iter().map(Entry::name).collect();
+                assert_eq!(names(&rows), entry_names, "{key:?} ascending={ascending}");
+            }
+        }
+    }
+
+    #[test]
+    fn sorting_50k_entries_in_place_by_date_is_quick() {
+        let mut entries = synthetic_entries(50_000);
+        let t = Instant::now();
+        sort_remote_entries(&mut entries, SortKey::Modified, false);
+        assert!(
+            t.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t.elapsed()
+        );
+        assert_eq!(entries.len(), 50_000);
     }
 
     #[test]
