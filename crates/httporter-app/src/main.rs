@@ -3,6 +3,14 @@
 
 slint::include_modules!();
 
+// Nothing consumes these helpers until the file panes are wired up in a later task.
+#[allow(dead_code)]
+mod format;
+#[allow(dead_code)]
+mod local_fs;
+#[allow(dead_code)]
+mod sort;
+
 #[cfg(test)]
 mod keyboard_tests;
 
