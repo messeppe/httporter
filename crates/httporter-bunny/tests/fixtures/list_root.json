@@ -1,0 +1,4 @@
+[
+ {"Guid":"00000000-0000-0000-0000-000000000001","StorageZoneName":"testzone","Path":"/testzone/","ObjectName":"author-sitemap.xml","Length":688,"Checksum":"B952DEDC8ACB32567C6A1409077036C7D0F371C85A4D75BCD667E4740B75F991","ReplicatedZones":"LA,DE,BR","LastChanged":"2026-10-28T10:02:51.089","ServerId":0,"ArrayNumber":0,"IsDirectory":false,"UserId":"00000000-0000-0000-0000-000000000000","ContentType":"","DateCreated":"2026-10-28T10:02:51.089","StorageZoneId":1},
+ {"Guid":"00000000-0000-0000-0000-000000000002","StorageZoneName":"testzone","Path":"/testzone/","ObjectName":"wp-content","Length":0,"Checksum":null,"ReplicatedZones":null,"LastChanged":"2026-10-28T10:02:56.824","ServerId":0,"ArrayNumber":0,"IsDirectory":true,"UserId":"00000000-0000-0000-0000-000000000000","ContentType":"","DateCreated":"2026-10-28T10:02:56.824","StorageZoneId":1}
+]
