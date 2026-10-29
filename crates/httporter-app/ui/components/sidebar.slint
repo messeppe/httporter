@@ -5,7 +5,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { SiteItem } from "../types.slint";
 import { MonoTile, StatusDot } from "chips.slint";
-import { CapsuleButton, ToolButton } from "buttons.slint";
+import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { VCenter } from "layout.slint";
 
 // Section heading (mockup `.sb-sec`: padding 12px 8px 4px).
@@ -25,16 +25,19 @@ component SectionTitle inherits Rectangle {
 }
 
 // One site: provider tile, name over subtitle, health dot (mockup `.sb-item` with `.sb-two`).
+// Reachable with Tab, selected with Space or Return.
 component SiteRow inherits Rectangle {
     in property <SiteItem> site;
     in property <bool> selected;
+    out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
     min-height: Theme.sidebar-item-height;
     border-radius: Theme.radius-sm;
     background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
+    forward-focus: key-focus;
     accessible-role: list-item;
-    accessible-label: root.site.name + ", " + root.site.subtitle;
+    accessible-label: @tr("{}, {}", root.site.name, root.site.subtitle);
     accessible-item-selected: root.selected;
     accessible-action-default => { root.clicked(); }
 
@@ -63,6 +66,27 @@ component SiteRow inherits Rectangle {
         VCenter { StatusDot { tint: root.site.healthy ? Theme.green : Theme.label3; } }
     }
 
+    // Focus ring inside the row: the scroll view around the list would clip one drawn outside.
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
     area := TouchArea {
         clicked => { root.clicked(); }
     }
@@ -86,7 +110,7 @@ export component Sidebar inherits Rectangle {
         padding-top: 6px;
         padding-bottom: 8px;
 
-        SectionTitle { text: "Sites"; }
+        SectionTitle { text: @tr("Sites"); }
 
         ScrollView {
             vertical-stretch: 1;
@@ -108,7 +132,7 @@ export component Sidebar inherits Rectangle {
 
             VCenter {
                 CapsuleButton {
-                    text: "Add Site";
+                    text: @tr("Add Site");
                     icon: Icons.plus;
                     clicked => { root.add-site(); }
                 }
@@ -117,7 +141,7 @@ export component Sidebar inherits Rectangle {
             VCenter {
                 ToolButton {
                     icon: Icons.gear;
-                    label: "Settings";
+                    label: @tr("Settings");
                     clicked => { root.open-settings(); }
                 }
             }

@@ -3,6 +3,9 @@
 
 slint::include_modules!();
 
+#[cfg(test)]
+mod keyboard_tests;
+
 fn main() -> Result<(), slint::PlatformError> {
     // Software renderer on the winit backend: lowest memory use. A SLINT_BACKEND
     // environment variable overrides this, which tools/measure.ps1 -Backend relies on.

@@ -45,7 +45,7 @@ component ErrorBanner inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "HTTPorter";
+    title: @tr("HTTPorter");
     default-font-family: Theme.font-family;
     default-font-size: Theme.font-body;
     background: Theme.win;
@@ -67,12 +67,12 @@ export component AppWindow inherits Window {
     callback add-site();
     callback open-settings();
 
-    property <bool> sidebar-visible: true;
+    out property <bool> sidebar-visible: true;
     property <bool> has-selection: root.selected-site >= 0 && root.selected-site < root.sites.length;
 
     VerticalLayout {
         Toolbar {
-            title: root.has-selection ? root.sites[root.selected-site].name : "HTTPorter";
+            title: root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter");
             subtitle: root.endpoint-text;
             connection-text: root.connection-text;
             connection-ok: root.connection-ok;

@@ -38,7 +38,7 @@ export component Toolbar inherits Rectangle {
         VCenter {
             ToolButton {
                 icon: Icons.sidebar;
-                label: "Toggle sidebar";
+                label: @tr("Toggle sidebar");
                 clicked => { root.toggle-sidebar(); }
             }
         }
@@ -57,13 +57,13 @@ export component Toolbar inherits Rectangle {
                     spacing: 2px;
                     ToolButton {
                         icon: Icons.chev-l;
-                        label: "Back";
+                        label: @tr("Back");
                         enabled: root.can-go-back;
                         clicked => { root.go-back(); }
                     }
                     ToolButton {
                         icon: Icons.chev-r;
-                        label: "Forward";
+                        label: @tr("Forward");
                         enabled: root.can-go-forward;
                         clicked => { root.go-forward(); }
                     }
@@ -100,7 +100,7 @@ export component Toolbar inherits Rectangle {
 
         VCenter {
             CapsuleButton {
-                text: "Publish";
+                text: @tr("Publish");
                 icon: Icons.send;
                 primary: true;
                 enabled: root.can-publish;

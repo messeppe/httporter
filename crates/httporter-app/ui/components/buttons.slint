@@ -3,12 +3,36 @@
 import { Theme } from "../theme.slint";
 import { VCenter } from "layout.slint";
 
+// Focus ring drawn 3 px outside the control it belongs to, shown while that control has keyboard
+// focus. The control sizes it (`width`/`height` 6 px larger, `radius` 3 px larger) from its own
+// geometry. Place it after the content and before the TouchArea.
+component FocusRing inherits Rectangle {
+    in property <bool> has-focus;
+    in property <length> radius;
+
+    x: -3px;
+    y: -3px;
+    border-radius: root.radius;
+    border-width: 2px;
+    border-color: Theme.accent;
+    visible: root.has-focus;
+}
+
+// Which key presses activate a focused control: Space or Return, not auto-repeat.
+export global Activation {
+    pure public function triggers(text: string, repeat: bool) -> bool {
+        return !repeat && (text == Key.Space || text == Key.Return);
+    }
+}
+
 // 28 px icon button, transparent until hovered (mockup `.tbtn`).
+// Reachable with Tab, activated with Space or Return; a disabled button takes no focus.
 export component ToolButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <bool> enabled: true;
     in property <bool> active: false;
+    out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
     width: 32px;
@@ -16,6 +40,7 @@ export component ToolButton inherits Rectangle {
     border-radius: self.height / 2;
     background: root.active ? Theme.sel-quiet : (area.has-hover && root.enabled ? Theme.hover : transparent);
     opacity: root.enabled ? 1 : 0.4;
+    forward-focus: key-focus;
     accessible-role: button;
     accessible-label: root.label;
     accessible-enabled: root.enabled;
@@ -28,6 +53,27 @@ export component ToolButton inherits Rectangle {
         height: 16px;
     }
 
+    FocusRing {
+        has-focus: root.has-focus;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        radius: parent.border-radius + 3px;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
     area := TouchArea {
         enabled: root.enabled;
         clicked => { root.clicked(); }
@@ -35,11 +81,13 @@ export component ToolButton inherits Rectangle {
 }
 
 // 28 px labelled button (mockup `.btn`); `primary` fills with the accent colour.
+// Keyboard behaviour is the same as ToolButton.
 export component CapsuleButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
     in property <bool> primary: false;
     in property <bool> enabled: true;
+    out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
     height: 28px;
@@ -48,6 +96,7 @@ export component CapsuleButton inherits Rectangle {
     border-width: 0.5px;
     border-color: root.primary ? transparent : Theme.control-border;
     opacity: root.enabled ? 1 : 0.45;
+    forward-focus: key-focus;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
@@ -73,6 +122,26 @@ export component CapsuleButton inherits Rectangle {
             font-size: Theme.font-body;
             font-weight: root.primary ? Theme.weight-semibold : Theme.weight-medium;
             vertical-alignment: center;
+        }
+    }
+
+    FocusRing {
+        has-focus: root.has-focus;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        radius: parent.border-radius + 3px;
+    }
+
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
         }
     }
 
