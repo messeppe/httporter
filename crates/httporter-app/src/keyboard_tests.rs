@@ -48,13 +48,13 @@ fn testbed() -> Testbed {
 }
 
 /// Press and release one key in the window.
-fn tap(window: &slint::Window, key: impl Into<SharedString>) {
+pub(crate) fn tap(window: &slint::Window, key: impl Into<SharedString>) {
     let text: SharedString = key.into();
     window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
     window.dispatch_event(WindowEvent::KeyReleased { text });
 }
 
-fn site(name: &str, mono: &str) -> SiteItem {
+pub(crate) fn site(name: &str, mono: &str) -> SiteItem {
     SiteItem {
         id: name.into(),
         name: name.into(),
@@ -75,7 +75,7 @@ fn window_with_two_sites() -> AppWindow {
     w
 }
 
-fn tab(w: &AppWindow, times: usize) {
+pub(crate) fn tab(w: &AppWindow, times: usize) {
     for _ in 0..times {
         tap(w.window(), Key::Tab);
     }
@@ -120,6 +120,11 @@ fn add_site_and_settings_work_from_the_keyboard() {
     tab(&w, 4);
     tap(w.window(), Key::Return);
     assert_eq!((added.get(), settings.get()), (1, 0));
+    // Add Site opens a modal sheet; closing it puts the focus back on the button.
+    assert!(w.get_add_site_open());
+    tap(w.window(), Key::Escape);
+    assert!(!w.get_add_site_open());
+    slint::platform::update_timers_and_animations();
     tab(&w, 1);
     tap(w.window(), Key::Space);
     assert_eq!((added.get(), settings.get()), (1, 1));
@@ -259,7 +264,7 @@ fn list_items(w: &impl ComponentHandle) -> Vec<ElementHandle> {
         .find_all()
 }
 
-fn row_starting(w: &impl ComponentHandle, name: &str) -> ElementHandle {
+pub(crate) fn row_starting(w: &impl ComponentHandle, name: &str) -> ElementHandle {
     let name = name.to_owned();
     ElementQuery::from_root(w)
         .match_accessible_role(AccessibleRole::ListItem)
@@ -277,12 +282,12 @@ fn pane_named(w: &AppWindow, title: &str) -> ElementHandle {
         .unwrap_or_else(|| panic!("no pane named {title:?}"))
 }
 
-fn center(e: &ElementHandle) -> LogicalPosition {
+pub(crate) fn center(e: &ElementHandle) -> LogicalPosition {
     let (p, s) = (e.absolute_position(), e.size());
     LogicalPosition::new(p.x + s.width / 2.0, p.y + s.height / 2.0)
 }
 
-fn click(window: &slint::Window, at: LogicalPosition, times: usize) {
+pub(crate) fn click(window: &slint::Window, at: LogicalPosition, times: usize) {
     window.dispatch_event(WindowEvent::PointerMoved { position: at });
     for _ in 0..times {
         window.dispatch_event(WindowEvent::PointerPressed {

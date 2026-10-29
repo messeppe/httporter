@@ -23,6 +23,28 @@ export global Theme {
     out property <color> purple-soft: dark ? #bf5af22e : #8944ab1f;
     out property <color> folder: dark ? #5aa9ff : #2f8fe8;
 
+    // Provider brand colours behind the tiles (mockup `providers`): the same in light and dark.
+    out property <color> provider-bunny: #e8590c;
+    out property <color> provider-s3: #3a7bd5;
+    out property <color> provider-r2: #c2410c;
+    out property <color> provider-b2: #b42318;
+    out property <color> provider-wasabi: #1f7a3a;
+    out property <color> provider-do: #1d4ed8;
+    out property <color> provider-minio: #b91c1c;
+    out property <color> provider-other: #5c5c62;
+    // The tile colour for the letters a site list item carries (`SiteItem.mono`); the accent for
+    // a provider this build does not know.
+    pure public function provider-tint(mono: string) -> color {
+        return mono == "B" ? provider-bunny
+            : mono == "S3" ? provider-s3
+            : mono == "R2" ? provider-r2
+            : mono == "B2" ? provider-b2
+            : mono == "W" ? provider-wasabi
+            : mono == "DO" ? provider-do
+            : mono == "M" ? provider-minio
+            : accent;
+    }
+
     // Text.
     out property <color> label: dark ? #f5f5f7 : #1d1d1f;
     out property <color> label2: dark ? #a8a8ad : #5c5c62;
@@ -36,6 +58,10 @@ export global Theme {
     out property <color> row-alt: dark ? #232326 : #f7f7f9;
     out property <color> sheet: dark ? #2a2a2d : #ffffff;
     out property <color> scrim: dark ? #00000080 : #1e1e2838;
+    out property <color> shadow-sheet: dark ? #00000099 : #00000038;
+    // The app icon tile on the Add Site sheet (mockup `.appicon`: a 160 degree gradient).
+    out property <color> app-icon-top: #3a8dff;
+    out property <color> app-icon-bottom: #0058c7;
 
     // Lines, hover and selection.
     out property <color> sep: dark ? #ffffff17 : #00000017;
@@ -49,6 +75,9 @@ export global Theme {
     out property <color> control: dark ? #3a3a3d : #ffffff;
     out property <color> control-border: dark ? #ffffff1a : #00000021;
     out property <color> field: dark ? #2c2c2f : #ffffff;
+    // Outline of text fields and pickers: at least 3:1 against the surface behind (WCAG 1.4.11),
+    // which the hairline `control-border` is not.
+    out property <color> field-border: dark ? #ffffff5c : #0000006b;
     out property <color> chip: dark ? #ffffff14 : #0000000d;
 
     // Type.

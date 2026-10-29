@@ -59,22 +59,19 @@ export component StatusDot inherits Rectangle {
     background: root.tint;
 }
 
-// 18 px provider tile with one or two letters (mockup `.monotile`). Colours follow the mockup's providers.
+// 18 px provider tile with one or two letters (mockup `.monotile`), filled with the provider's colour.
 export component MonoTile inherits Rectangle {
     in property <string> mono;
+    in property <color> tint: Theme.accent;
 
     width: 18px;
     height: 18px;
     border-radius: 5px;
-    background: root.mono == "B" ? #e8590c
-        : root.mono == "R2" ? #c2410c
-        : root.mono == "M" ? #b91c1c
-        : root.mono == "S3" ? #3a7bd5
-        : Theme.accent;
+    background: root.tint;
 
     Text {
         text: root.mono;
-        color: #ffffff;
+        color: Theme.on-accent;
         font-size: 9px;
         font-weight: Theme.weight-bold;
         horizontal-alignment: center;

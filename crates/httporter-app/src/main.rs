@@ -3,6 +3,9 @@
 
 slint::include_modules!();
 
+// The form checks are used by the session controller (Task 15), which wires the sheet's callbacks.
+#[allow(dead_code)]
+mod add_site;
 mod format;
 mod local_fs;
 mod sort;
@@ -12,6 +15,8 @@ mod sort;
 #[allow(dead_code)]
 mod viewmodel;
 
+#[cfg(test)]
+mod add_site_tests;
 #[cfg(test)]
 mod keyboard_tests;
 

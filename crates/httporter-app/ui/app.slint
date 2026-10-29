@@ -12,6 +12,7 @@ import { Toolbar } from "components/toolbar.slint";
 import { Sidebar } from "components/sidebar.slint";
 import { StatusBar } from "components/statusbar.slint";
 import { Pane } from "components/pane.slint";
+import { AddSiteSheet } from "components/add_site.slint";
 
 export { FileKind, FileRow, SiteItem, Theme }
 
@@ -77,6 +78,25 @@ export component AppWindow inherits Window {
     in-out property <int> remote-sort-column: 0;
     in-out property <bool> remote-sort-ascending: true;
 
+    // The Add Site sheet. The window opens it when the sidebar's Add Site button is pressed (and
+    // still tells the app through `add-site`); the app opens it too, and closes it once the site
+    // is saved. `region-names` is the list the sheet offers, in the order the app maps to codes.
+    in-out property <bool> add-site-open: false;
+    in property <[string]> region-names;
+    // `https://{host}/{zone}/` for the zone and region last reported by `add-site-changed`.
+    in property <string> add-site-endpoint;
+    // The outcome of the last test and whether it worked. The sheet clears the text when the zone,
+    // region or password is edited, and when it opens.
+    in-out property <string> add-site-result;
+    in property <bool> add-site-result-ok;
+    // A test or save is running: the sheet turns those two buttons off.
+    in property <bool> add-site-busy;
+    // Messages from the form's validation, shown under the field they name (see `add_site.rs`).
+    // The sheet clears one when its field is edited, and all of them when it opens.
+    in-out property <string> add-site-zone-error;
+    in-out property <string> add-site-region-error;
+    in-out property <string> add-site-password-error;
+
     callback site-selected(int);
     callback add-site();
     callback open-settings();
@@ -92,6 +112,17 @@ export component AppWindow inherits Window {
     // drive (This PC pane) or the zone (cloud pane).
     callback local-crumb-clicked(int);
     callback remote-crumb-clicked(int);
+    // The zone or region on the sheet changed (also called once when it opens): the app answers
+    // with `add-site-endpoint`.
+    callback add-site-changed(string /* zone */, int /* region index */);
+    // Test Connection and Add Site: site name, zone, region index, password. The name may be
+    // empty (it then defaults to the zone). The app validates, and answers with field errors, a
+    // test result, or by closing the sheet.
+    callback add-site-test(string, string, int, string);
+    callback add-site-save(string, string, int, string);
+    // The sheet was cancelled (Cancel button or Escape); it has already closed itself. If a test or
+    // save was running (`add-site-busy`), the app should give up on it and clear the flag.
+    callback add-site-cancel();
 
     out property <bool> sidebar-visible: true;
     // Where the cloud pane is, in window coordinates and logical pixels, for telling which pane a
@@ -125,11 +156,15 @@ export component AppWindow inherits Window {
                 width: 220px;
                 sites: root.sites;
                 selected-site: root.selected-site;
+                sheet-open: root.add-site-open;
                 site-selected(index) => {
                     root.selected-site = index;
                     root.site-selected(index);
                 }
-                add-site => { root.add-site(); }
+                add-site => {
+                    root.add-site-open = true;
+                    root.add-site();
+                }
                 open-settings => { root.open-settings(); }
             }
 
@@ -190,6 +225,29 @@ export component AppWindow inherits Window {
         StatusBar {
             left-text: root.status-left;
             right-text: root.status-right;
+        }
+    }
+
+    // On top of everything else, so that it also dims the toolbar and swallows the pointer.
+    if root.add-site-open: AddSiteSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        region-names: root.region-names;
+        endpoint: root.add-site-endpoint;
+        result <=> root.add-site-result;
+        result-ok: root.add-site-result-ok;
+        busy: root.add-site-busy;
+        zone-error <=> root.add-site-zone-error;
+        region-error <=> root.add-site-region-error;
+        password-error <=> root.add-site-password-error;
+        changed(zone, region) => { root.add-site-changed(zone, region); }
+        test(name, zone, region, password) => { root.add-site-test(name, zone, region, password); }
+        save(name, zone, region, password) => { root.add-site-save(name, zone, region, password); }
+        cancel => {
+            root.add-site-open = false;
+            root.add-site-cancel();
         }
     }
 }
