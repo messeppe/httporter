@@ -70,6 +70,10 @@ export component AppWindow inherits Window {
     in property <[string]> remote-crumbs;
     // Storage endpoint shown as a chip in the cloud pane's header.
     in property <string> remote-chip;
+    // Explorer files are being dragged over the cloud pane: it shows the accent ring and a "Release
+    // to upload" chip. Set from the OS drag events (see src/drop_hook.rs), since Slint's DropArea
+    // does not see files dragged in from other apps.
+    in property <bool> drop-hover-remote: false;
     // Selected row of each pane (-1 for none) and its sorted column (0 name, 1 size, 2 modified).
     in-out property <int> local-selected: -1;
     in-out property <int> remote-selected: -1;
@@ -212,6 +216,7 @@ export component AppWindow inherits Window {
                         crumbs: root.remote-crumbs;
                         rows: root.remote-rows;
                         header-chip: root.remote-chip;
+                        drop-hover: root.drop-hover-remote;
                         selected <=> root.remote-selected;
                         sort-column <=> root.remote-sort-column;
                         sort-ascending <=> root.remote-sort-ascending;

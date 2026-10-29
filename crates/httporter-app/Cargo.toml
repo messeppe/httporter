@@ -12,7 +12,7 @@ path = "src/main.rs"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 httporter-core = { path = "../httporter-core" }
 slint = { version = "1.18", features = ["unstable-winit-030"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 slint-build = "1.18"

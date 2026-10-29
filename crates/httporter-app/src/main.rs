@@ -3,9 +3,12 @@
 
 slint::include_modules!();
 
+use drop_hook::{DropBatch, PaneLayout, PaneSide};
+
 // The form checks are used by the session controller (Task 15), which wires the sheet's callbacks.
 #[allow(dead_code)]
 mod add_site;
+mod drop_hook;
 mod format;
 mod local_fs;
 mod sort;
@@ -31,7 +34,50 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let ui = AppWindow::new()?;
+    install_drop(&ui);
     ui.run()
+}
+
+/// Files dragged in from Explorer: the cloud pane lights up while they are over it. Dropping is
+/// only acknowledged in the status line for now; the session controller (Task 15) uploads them.
+fn install_drop(ui: &AppWindow) {
+    let hover_ui = ui.as_weak();
+    let drop_ui = ui.as_weak();
+    let layout_ui = ui.as_weak();
+    drop_hook::install_drop_hook(
+        ui.window(),
+        move |over_remote| {
+            if let Some(ui) = hover_ui.upgrade() {
+                ui.set_drop_hover_remote(over_remote);
+            }
+        },
+        move |batch| {
+            if let Some(ui) = drop_ui.upgrade() {
+                ui.set_status_left(drop_status(&batch).into());
+            }
+        },
+        move || {
+            layout_ui
+                .upgrade()
+                .map_or_else(PaneLayout::default, |ui| PaneLayout {
+                    split_x: ui.get_pane_split(),
+                    stacked: ui.get_panes_stacked(),
+                    remote_y: ui.get_remote_pane_y(),
+                })
+        },
+    );
+}
+
+/// The status line for a drop (placeholder text until uploads exist).
+fn drop_status(batch: &DropBatch) -> String {
+    match batch.side {
+        PaneSide::Remote => {
+            let n = batch.paths.len();
+            let items = if n == 1 { "item" } else { "items" };
+            format!("Uploading arrives in the next build (I2): {n} {items} dropped.")
+        }
+        PaneSide::Local => "Drop files on the cloud pane to upload them.".into(),
+    }
 }
 
 #[cfg(test)]
@@ -45,6 +91,26 @@ mod tests {
         let w = AppWindow::new().unwrap();
         assert_eq!(w.get_connection_text(), "");
         assert_eq!(w.get_sites().row_count(), 0);
+    }
+
+    #[test]
+    fn a_drop_on_the_cloud_pane_is_counted_and_one_on_this_pc_points_to_the_cloud_pane() {
+        let batch = |side, n: usize| DropBatch {
+            side,
+            paths: (0..n).map(|i| format!(r"C:\f{i}").into()).collect(),
+        };
+        assert_eq!(
+            drop_status(&batch(PaneSide::Remote, 1)),
+            "Uploading arrives in the next build (I2): 1 item dropped."
+        );
+        assert_eq!(
+            drop_status(&batch(PaneSide::Remote, 3)),
+            "Uploading arrives in the next build (I2): 3 items dropped."
+        );
+        assert_eq!(
+            drop_status(&batch(PaneSide::Local, 3)),
+            "Drop files on the cloud pane to upload them."
+        );
     }
 
     #[test]

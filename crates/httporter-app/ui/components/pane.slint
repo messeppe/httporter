@@ -12,6 +12,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { FileKind, FileRow } from "../types.slint";
 import { Activation } from "buttons.slint";
+import { Chip } from "chips.slint";
 import { VCenter } from "layout.slint";
 
 // Sizes shared by the column headers and the rows (mockup `.cols, .row`: padding 0 12px, gap 8px).
@@ -244,6 +245,10 @@ export component Pane inherits Rectangle {
     in property <[string]> crumbs;
     in property <[FileRow]> rows;
     in property <string> header-chip;
+    // Files dragged in from Explorer are over this pane: it shows the accent ring and a "Release to
+    // upload" chip. Slint's own drop events do not see files from other apps, so the window sets
+    // this from the OS drag events.
+    in property <bool> drop-hover: false;
     // Index into `rows` of the selected row, or -1 for none.
     in-out property <int> selected: -1;
     // Sorted column: 0 name, 1 size, 2 modified. Pressing a column header changes these two and
@@ -564,6 +569,32 @@ export component Pane inherits Rectangle {
                             root.pick(i);
                             root.open(i);
                         }
+                    }
+                }
+            }
+        }
+
+        // Files from Explorer are over the pane: a light accent wash, the accent ring and a chip
+        // that says what letting go does. Inside the card so that its rounded clip does not cut
+        // the ring.
+        if root.drop-hover: Rectangle {
+            background: Theme.accent-soft;
+            border-radius: card.border-radius;
+            border-width: 2px;
+            border-color: Theme.accent;
+
+            VerticalLayout {
+                alignment: center;
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    Chip {
+                        text: @tr("Release to upload");
+                        icon: Icons.up;
+                        fg: Theme.on-accent;
+                        bg: Theme.accent;
+                        height: 24px;
                     }
                 }
             }
