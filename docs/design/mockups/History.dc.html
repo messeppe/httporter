@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTTPorter publish profile and history</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="app window {{theme}}">
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"></path></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM14 3v5h5M10.5 12.5l-2 2 2 2M13.5 12.5l2 2-2 2"></path></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 16l5-5 4 4 2.5-2.5L20 17"></path><circle cx="15.5" cy="9" r="1.5"></circle></symbol>
+    <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"></path></symbol>
+    <symbol id="i-chev-l" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"></path></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-4.5-4.5"></path></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9.5 5v14"></path></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .4-7.98A6 6 0 0 0 6 9.6 4.2 4.2 0 0 0 7 18z"></path></symbol>
+    <symbol id="i-pc" viewBox="0 0 24 24"><path d="M4 5h16v11H4zM8.5 20h7M12 16v4"></path></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L3 10.5l7.2 2.3L12.5 20 21 3zM10.2 12.8L21 3"></path></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 4l2.4 5 5.6.7-4.1 3.8 1.1 5.5L12 16.3 7 19l1.1-5.5L4 9.7 9.6 9z"></path></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16l-1 4zM14 7l3 3"></path></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"></path><circle cx="15" cy="7" r="2"></circle><circle cx="9" cy="17" r="2"></circle></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"></path></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5l9.5 16.5h-19zM12 10v4.5M12 17.2v.3"></path></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"></path></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"></path></symbol>
+    <symbol id="i-cap-min" viewBox="0 0 10 10"><path d="M0 5h10"></path></symbol>
+    <symbol id="i-cap-max" viewBox="0 0 10 10"><path d="M.5.5h9v9h-9z"></path></symbol>
+    <symbol id="i-cap-close" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"></path></symbol>
+  </svg>
+
+  <header class="titlebar">
+    <button class="tbtn" aria-label="Hide sidebar"><svg class="ic"><use href="#i-sidebar"></use></svg></button>
+    <div class="tgroup">
+      <button class="tbtn" aria-label="Back"><svg class="ic"><use href="#i-chev-l"></use></svg></button>
+      <button class="tbtn" aria-label="Forward" style="opacity: 0.4"><svg class="ic"><use href="#i-chev-r"></use></svg></button>
+    </div>
+    <div class="wtitle">
+      <b>example-shop.com live</b>
+      <span>Publish profile</span>
+    </div>
+    <span class="conn"><svg class="ic sm"><use href="#i-lock"></use></svg>HTTPS · 21 ms</span>
+    <div class="grow"></div>
+    <button class="btn"><svg class="ic sm"><use href="#i-pencil"></use></svg>Edit Profile</button>
+    <button class="btn primary"><svg class="ic"><use href="#i-send"></use></svg>Publish</button>
+    <label class="search"><svg class="ic sm"><use href="#i-search"></use></svg><input type="search" placeholder="Search history" aria-label="Search history"></label>
+    <div class="caption">
+      <button aria-label="Minimize"><svg><use href="#i-cap-min"></use></svg></button>
+      <button aria-label="Maximize"><svg><use href="#i-cap-max"></use></svg></button>
+      <button aria-label="Close"><svg><use href="#i-cap-close"></use></svg></button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="sidebar" aria-label="Sidebar">
+      <div class="sb-sec">Sites</div>
+      <a class="sb-item" href="#">
+        <span class="monotile bunny">B</span>
+        <span class="sb-two"><span>example-shop.com</span><span class="sub">Bunny · Singapore</span></span>
+        <span class="meta"><span class="dot green" aria-label="Connected"></span></span>
+      </a>
+      <a class="sb-item" href="#">
+        <span class="monotile r2">R2</span>
+        <span class="sb-two"><span>media-archive</span><span class="sub">Cloudflare R2 · auto</span></span>
+        <span class="meta"><span class="dot green" aria-label="Connected"></span></span>
+      </a>
+      <a class="sb-item" href="#">
+        <span class="monotile minio">M</span>
+        <span class="sb-two"><span>local-minio</span><span class="sub">MinIO · localhost:9000</span></span>
+        <span class="meta"><span class="dot gray" aria-label="Not connected"></span></span>
+      </a>
+      <div class="sb-sec">Publish</div>
+      <a class="sb-item sel" href="#"><svg class="ic"><use href="#i-send"></use></svg><span>example-shop.com live</span><span class="meta">2h ago</span></a>
+      <div class="sb-sec">Favorites</div>
+      <a class="sb-item" href="#"><svg class="ic"><use href="#i-star"></use></svg><span>uploads / 2026</span></a>
+      <a class="sb-item" href="#"><svg class="ic"><use href="#i-pc"></use></svg><span>Desktop</span></a>
+      <div class="sb-foot">
+        <button class="btn"><svg class="ic sm"><use href="#i-plus"></use></svg>Add Site</button>
+        <button class="tbtn" aria-label="Settings" style="margin-left: auto"><svg class="ic"><use href="#i-gear"></use></svg></button>
+      </div>
+    </nav>
+
+    <main class="main" style="padding: 16px 20px; gap: 16px">
+      <section class="group" style="padding: 16px 18px; display: flex; flex-wrap: wrap; gap: 16px; align-items: center">
+        <span class="appicon"><svg class="ic"><use href="#i-send"></use></svg></span>
+        <div style="flex: 1 1 360px; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+            <svg class="ic" style="color: var(--label2)"><use href="#i-folder"></use></svg>
+            <span>D:\site-export</span>
+            <svg class="ic sm" style="color: var(--label3)"><use href="#i-chev-r"></use></svg>
+            <svg class="ic" style="color: var(--green)"><use href="#i-lock"></use></svg>
+            <span class="mono" style="font-size: 12px">https://sg.storage.bunnycdn.com/exampleshop/</span>
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap">
+            <span class="chip neutral">12 skip rules</span>
+            <span class="chip neutral">Remove extras: off</span>
+            <span class="chip neutral">Purge: changed files · Pull Zone 7654321</span>
+            <span class="chip neutral">Delete guard: 100 files or 10%</span>
+          </div>
+        </div>
+        <button class="btn">Change Folder…</button>
+      </section>
+
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px">
+        <div class="group" style="padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+          <span class="muted" style="font-size: 12px">Last publish</span>
+          <span style="font-size: 20px; font-weight: 600">Today 15:12</span>
+          <span class="muted" style="font-size: 12px">36 files · 4.2 MB · all verified</span>
+        </div>
+        <div class="group" style="padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+          <span class="muted" style="font-size: 12px">On Bunny now</span>
+          <span style="font-size: 20px; font-weight: 600">13,795 files</span>
+          <span class="muted" style="font-size: 12px">1,011 folders · replicated to 3 regions</span>
+        </div>
+        <div class="group" style="padding: 14px 16px; display: flex; flex-direction: column; gap: 4px">
+          <span class="muted" style="font-size: 12px">Schedule</span>
+          <span style="font-size: 20px; font-weight: 600">Off</span>
+          <span class="muted" style="font-size: 12px"><a href="#" style="color: var(--accent-text); text-decoration: none">Publish on a schedule…</a></span>
+        </div>
+      </div>
+
+      <section class="pane" style="flex: 1 1 auto" aria-label="Publish history">
+        <div class="pane-head">
+          <span class="where"><svg class="ic"><use href="#i-clock"></use></svg>History</span>
+          <span class="right"><button class="tbtn" aria-label="Filter"><svg class="ic"><use href="#i-filter"></use></svg></button></span>
+        </div>
+        <div class="cols" style="grid-template-columns: 150px minmax(0, 1fr) 90px 80px 90px 80px 130px"><span>When</span><span>Result</span><span class="num">Uploaded</span><span class="num">Deleted</span><span class="num">Size</span><span class="num">Time</span><span>CDN purge</span></div>
+        <div class="rows">
+          <sc-for list="{{history}}" as="h" hint-placeholder-count="5">
+            <div class="row {{h.cls}}" style="grid-template-columns: 150px minmax(0, 1fr) 90px 80px 90px 80px 130px; height: 34px">
+              <span>{{h.when}}</span>
+              <span class="name"><span class="{{h.tone}}"><svg class="ic"><use href="{{h.icon}}"></use></svg></span><span>{{h.result}}</span></span>
+              <span class="num">{{h.up}}</span>
+              <span class="num">{{h.del}}</span>
+              <span class="num">{{h.size}}</span>
+              <span class="num">{{h.time}}</span>
+              <span class="date">{{h.purge}}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="border-top: 1px solid var(--sep); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+            <b>Today 10:40</b><span class="muted">· 2 files failed after 5 attempts (HTTP 503)</span>
+            <span style="margin-left: auto; display: flex; gap: 8px"><button class="btn">Show All 118 Files</button><button class="btn primary"><svg class="ic sm"><use href="#i-refresh"></use></svg>Retry 2 Failed</button></span>
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap">
+            <span class="chip red">wp-content/uploads/2026/10/Blur-SN-Finisar-1G-SX.png</span>
+            <span class="chip red">wp-content/uploads/2026/10/Blur-SN-Finisar-1G-LX-1.png</span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="statusbar">
+    <span>5 publishes · kept for the last 200</span>
+    <span class="right"><svg class="ic sm"><use href="#i-lock"></use></svg>HTTP/2 · TLS 1.3 · sg.storage.bunnycdn.com</span>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"dark":{"editor":"boolean","default":false},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const ok = (when, result, up, del, size, time, purge) => ({ when, result, up, del, size, time, purge, icon: '#i-check', tone: 'k-image', cls: '' });
+    const warn = (when, result, up, del, size, time, purge) => ({ when, result, up, del, size, time, purge, icon: '#i-warn', tone: 'k-warn', cls: 'sel' });
+    const history = [
+      ok('Today 15:12', 'Published', '36', '0', '4.2 MB', '7 s', '36 URLs'),
+      warn('Today 10:40', 'Published · 2 failed', '116', '0', '9.8 MB', '12 s', '116 URLs'),
+      ok('Yesterday 17:02', 'First publish', '13,793', '0', '865 MB', '2 m 27 s', 'Whole zone'),
+      ok('Yesterday 16:51', 'Dry run · nothing changed', '0', '0', '0 B', '6 s', 'Skipped'),
+      ok('Yesterday 16:48', 'Cancelled by you', '211', '0', '14.0 MB', '3 s', 'Skipped')
+    ];
+    return { theme: (this.props.dark ?? false) ? 'dark' : '', history };
+  }
+}
+</script>
+</body>
+</html>

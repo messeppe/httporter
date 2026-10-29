@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTTPorter settings, Transfers</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="app {{theme}}" style="min-height: 800px; display: flex; align-items: center; justify-content: center; padding: 32px 16px; box-sizing: border-box; background: var(--win)">
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"></path><circle cx="15" cy="7" r="2"></circle><circle cx="9" cy="17" r="2"></circle></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"></path></symbol>
+    <symbol id="i-updown" viewBox="0 0 24 24"><path d="M8 20V5M4 9l4-4 4 4M16 4v15M12 15l4 4 4-4"></path></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L3 10.5l7.2 2.3L12.5 20 21 3zM10.2 12.8L21 3"></path></symbol>
+    <symbol id="i-chip" viewBox="0 0 24 24"><path d="M7 7h10v10H7zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"></path></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"></path></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"></path></symbol>
+    <symbol id="i-cap-close" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"></path></symbol>
+  </svg>
+
+  <section class="panel" style="width: 760px; max-width: 100%; background: var(--win)" role="dialog" aria-label="Settings">
+    <header style="display: flex; flex-direction: column; background: var(--chrome); border-bottom: 1px solid var(--sep)">
+      <div style="display: flex; align-items: center; height: 32px">
+        <span style="flex: 1 1 auto; text-align: center; font-weight: 600; padding-left: 46px">Transfers</span>
+        <div class="caption" style="height: 32px"><button aria-label="Close"><svg><use href="#i-cap-close"></use></svg></button></div>
+      </div>
+      <nav style="display: flex; justify-content: center; gap: 4px; padding: 2px 12px 10px; flex-wrap: wrap" role="tablist" aria-label="Settings sections">
+        <sc-for list="{{tabs}}" as="t" hint-placeholder-count="6">
+          <button role="tab" aria-selected="{{t.on}}" style="display: flex; flex-direction: column; align-items: center; gap: 3px; width: 82px; padding: 6px 4px; border: 0; border-radius: 8px; font: inherit; font-size: 11px; cursor: default; color: var(--label); {{t.style}}">
+            <svg class="ic lg" style="color: {{t.color}}"><use href="{{t.icon}}"></use></svg>{{t.name}}
+          </button>
+        </sc-for>
+      </nav>
+    </header>
+
+    <div style="display: flex; flex-direction: column; gap: 18px; padding: 20px 24px 22px">
+      <div>
+        <div class="sb-sec" style="padding: 0 4px 6px">Speed</div>
+        <div class="group">
+          <div class="group-row">
+            <div class="text"><span>Simultaneous transfers</span><small>Per site. Bunny Storage allows up to 96 from one computer; S3 services up to 128.</small></div>
+            <div class="end">
+              <div class="tgroup">
+                <button class="tbtn" aria-label="Fewer"><svg class="ic sm"><use href="#i-minus"></use></svg></button>
+                <span style="min-width: 34px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums">32</span>
+                <button class="tbtn" aria-label="More"><svg class="ic sm"><use href="#i-plus"></use></svg></button>
+              </div>
+            </div>
+          </div>
+          <div class="group-row">
+            <div class="text"><span>Slow down when a server asks</span><small>On HTTP 429 or 503, halve parallel transfers, then ramp back up.</small></div>
+            <div class="end"><button class="switch on" role="switch" aria-checked="true" aria-label="Slow down when a server asks"></button></div>
+          </div>
+          <div class="group-row">
+            <div class="text"><span>Retry failed transfers</span><small>Waits 1, 2, 4, 8 and 10 seconds between attempts.</small></div>
+            <div class="end"><select class="input" style="width: 140px" aria-label="Retries"><option>5 times</option><option>3 times</option><option>Never</option></select></div>
+          </div>
+          <div class="group-row">
+            <div class="text"><span>Bandwidth limit</span><small>Applies to all transfers together.</small></div>
+            <div class="end">
+              <span class="seg" role="radiogroup" aria-label="Bandwidth limit"><button class="on" role="radio" aria-checked="true">Off</button><button role="radio" aria-checked="false">Limit to</button></span>
+              <input class="input" value="10 MB/s" disabled="disabled" style="width: 90px; opacity: 0.5" aria-label="Limit">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="sb-sec" style="padding: 0 4px 6px">HTTP connection</div>
+        <div class="group">
+          <div class="group-row">
+            <div class="text"><span>Protocol</span><small>Every connection is encrypted with TLS 1.2 or newer.</small></div>
+            <div class="end"><select class="input" style="width: 200px" aria-label="HTTP version"><option>HTTP/2 when available</option><option>HTTP/1.1 only</option></select></div>
+          </div>
+          <div class="group-row">
+            <div class="text"><span>Keep connections open between files</span><small>Saves a TLS handshake per file. Strongly recommended.</small></div>
+            <div class="end"><button class="switch on" role="switch" aria-checked="true" aria-label="Keep connections open"></button></div>
+          </div>
+          <div class="group-row">
+            <div class="text"><span>Request timeout</span></div>
+            <div class="end"><select class="input" style="width: 140px" aria-label="Request timeout"><option>120 seconds</option><option>60 seconds</option><option>300 seconds</option></select></div>
+          </div>
+          <div class="group-row">
+            <div class="text"><span>Proxy</span></div>
+            <div class="end"><select class="input" style="width: 200px" aria-label="Proxy"><option>Use Windows settings</option><option>No proxy</option><option>Custom…</option></select></div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="sb-sec" style="padding: 0 4px 6px">Integrity and conflicts</div>
+        <div class="group">
+          <div class="group-row">
+            <div class="text"><span>Verify every upload with a checksum</span><small>SHA-256 on Bunny Storage, MD5 on S3-compatible services. The server rejects damaged files.</small></div>
+            <div class="end"><button class="switch on" role="switch" aria-checked="true" aria-label="Verify uploads"></button></div>
+          </div>
+          <div class="group-row">
+            <div class="text"><span>When a file already exists</span><small>One choice per batch, never one dialog per file.</small></div>
+            <div class="end">
+              <select class="input" style="width: 190px" aria-label="When uploading"><option>Uploads: Ask once per batch</option><option>Uploads: Replace if different</option><option>Uploads: Skip</option></select>
+              <select class="input" style="width: 205px" aria-label="When downloading"><option>Downloads: Ask once per batch</option><option>Downloads: Replace if different</option><option>Downloads: Keep both</option></select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end">
+        <button class="btn quiet">Restore Defaults</button>
+      </div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"dark":{"editor":"boolean","default":false},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const tab = (name, icon, on) => ({
+      name,
+      icon,
+      on: on ? 'true' : 'false',
+      color: on ? 'var(--accent-text)' : 'var(--label2)',
+      style: on ? 'background: var(--sel-quiet); font-weight: 600' : 'background: transparent'
+    });
+    const tabs = [
+      tab('General', '#i-gear'),
+      tab('Sites', '#i-globe'),
+      tab('Transfers', '#i-updown', true),
+      tab('Security', '#i-lock'),
+      tab('Publish', '#i-send'),
+      tab('Advanced', '#i-chip')
+    ];
+    return { theme: (this.props.dark ?? false) ? 'dark' : '', tabs };
+  }
+}
+</script>
+</body>
+</html>

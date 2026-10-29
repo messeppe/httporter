@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTTPorter welcome</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="app window {{theme}}">
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"></path></symbol>
+    <symbol id="i-chev-l" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"></path></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9.5 5v14"></path></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L3 10.5l7.2 2.3L12.5 20 21 3zM10.2 12.8L21 3"></path></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"></path><circle cx="15" cy="7" r="2"></circle><circle cx="9" cy="17" r="2"></circle></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z"></path><path d="M9 12l2 2 4-4"></path></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"></path></symbol>
+    <symbol id="i-import" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></symbol>
+    <symbol id="i-porter" viewBox="0 0 48 48"><path d="M10 30v6a2 2 0 0 0 2 2h24a2 2 0 0 0 2-2v-6"></path><path d="M24 30V10M15 18.5L24 9.5l9 9"></path></symbol>
+    <symbol id="i-cap-min" viewBox="0 0 10 10"><path d="M0 5h10"></path></symbol>
+    <symbol id="i-cap-max" viewBox="0 0 10 10"><path d="M.5.5h9v9h-9z"></path></symbol>
+    <symbol id="i-cap-close" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"></path></symbol>
+  </svg>
+
+  <header class="titlebar">
+    <button class="tbtn" aria-label="Hide sidebar"><svg class="ic"><use href="#i-sidebar"></use></svg></button>
+    <div class="tgroup" style="opacity: 0.45">
+      <button class="tbtn" aria-label="Back" disabled="disabled"><svg class="ic"><use href="#i-chev-l"></use></svg></button>
+      <button class="tbtn" aria-label="Forward" disabled="disabled"><svg class="ic"><use href="#i-chev-r"></use></svg></button>
+    </div>
+    <div class="wtitle"><b>Welcome</b><span>No site connected</span></div>
+    <div class="grow"></div>
+    <button class="btn primary" disabled="disabled"><svg class="ic"><use href="#i-send"></use></svg>Publish</button>
+    <div class="caption">
+      <button aria-label="Minimize"><svg><use href="#i-cap-min"></use></svg></button>
+      <button aria-label="Maximize"><svg><use href="#i-cap-max"></use></svg></button>
+      <button aria-label="Close"><svg><use href="#i-cap-close"></use></svg></button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="sidebar" aria-label="Sidebar">
+      <div class="sb-sec">Sites</div>
+      <div style="padding: 6px 8px 0; color: var(--label2); font-size: 12px">No sites yet. Add one to start browsing and publishing.</div>
+      <div class="sb-sec">Publish</div>
+      <div style="padding: 6px 8px 0; color: var(--label2); font-size: 12px">Publish profiles appear here after you add a site.</div>
+      <div class="sb-foot">
+        <button class="btn"><svg class="ic sm"><use href="#i-plus"></use></svg>Add Site</button>
+        <button class="tbtn" aria-label="Settings" style="margin-left: auto"><svg class="ic"><use href="#i-gear"></use></svg></button>
+      </div>
+    </nav>
+
+    <main class="main" style="align-items: center; justify-content: center; padding: 40px 24px">
+      <div style="width: 560px; max-width: 100%; display: flex; flex-direction: column; align-items: center; gap: 28px">
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center">
+          <span class="appicon" style="width: 96px; height: 96px; border-radius: 24px"><svg class="ic" viewBox="0 0 48 48" style="width: 56px; height: 56px; stroke-width: 3.2"><use href="#i-porter"></use></svg></span>
+          <h1 class="h-title" style="font-size: 34px"><span class="wordmark"><span class="http">HTTP</span>orter</span></h1>
+          <p class="muted" style="margin: 0; font-size: 15px">Fast, safe file transfers to cloud storage over HTTP.</p>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 18px; width: 100%">
+          <div style="display: flex; gap: 16px; align-items: flex-start">
+            <svg class="ic xl" style="color: var(--accent-text)"><use href="#i-globe"></use></svg>
+            <div><b style="font-size: 14px">Made for HTTP storage</b><p class="muted" style="margin: 2px 0 0">Talks straight to Bunny Storage and S3-compatible services over HTTPS, sending many files at once instead of one by one.</p></div>
+          </div>
+          <div style="display: flex; gap: 16px; align-items: flex-start">
+            <svg class="ic xl" style="color: var(--accent-text)"><use href="#i-send"></use></svg>
+            <div><b style="font-size: 14px">Publish a whole folder</b><p class="muted" style="margin: 2px 0 0">Uploads only what changed, checked by checksum, then clears the CDN so visitors see it right away.</p></div>
+          </div>
+          <div style="display: flex; gap: 16px; align-items: flex-start">
+            <svg class="ic xl" style="color: var(--accent-text)"><use href="#i-shield"></use></svg>
+            <div><b style="font-size: 14px">Safe by design</b><p class="muted" style="margin: 2px 0 0">You see every change before it happens. Passwords stay in Windows Credential Manager, never in plain files.</p></div>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%">
+          <button class="btn primary big" style="width: 280px; max-width: 100%"><svg class="ic sm"><use href="#i-plus"></use></svg>Add Your First Site</button>
+          <button class="btn quiet"><svg class="ic sm"><use href="#i-import"></use></svg>Import from .env or AWS profile…</button>
+        </div>
+
+        <p class="muted" style="margin: 0; font-size: 11px">Free software · No telemetry · Your files go only to the services you add</p>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"dark":{"editor":"boolean","default":false},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: (this.props.dark ?? false) ? 'dark' : '' };
+  }
+}
+</script>
+</body>
+</html>

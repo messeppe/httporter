@@ -1,0 +1,52 @@
+{
+  "v": 3,
+  "createdOnFiles": { "v": 1, "at": "2026-10-29T12:00:00Z" },
+  "title": "HTTPorter, UI mockups",
+  "launch": { "view": "canvas" },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": { "x": 0, "y": 0, "w": 1280, "h": 800, "title": "Main window · two panes", "expand": "fill" },
+    "MainDark.dc.html": { "x": 1360, "y": 0, "w": 1280, "h": 800, "title": "Main window · dark", "expand": "fill" },
+    "Inspector.dc.html": { "x": 2720, "y": 0, "w": 1280, "h": 800, "title": "Single pane + inspector", "expand": "fill" },
+    "Transfers.dc.html": { "x": 0, "y": 1220, "w": 1280, "h": 800, "title": "Transfers in progress", "expand": "fill" },
+    "Conflicts.dc.html": { "x": 1360, "y": 1220, "w": 1280, "h": 800, "title": "File exists · one sheet per batch", "expand": "fill" },
+    "DeleteAlert.dc.html": { "x": 2720, "y": 1220, "w": 1280, "h": 800, "title": "Delete confirmation", "expand": "fill" },
+    "PublishPreview.dc.html": { "x": 0, "y": 2440, "w": 1280, "h": 800, "title": "Publish preview", "expand": "fill" },
+    "History.dc.html": { "x": 1360, "y": 2440, "w": 1280, "h": 800, "title": "Publish history", "expand": "fill" },
+    "QuickLook.dc.html": { "x": 2720, "y": 2440, "w": 1280, "h": 800, "title": "Quick Look", "expand": "fill" },
+    "CommandPalette.dc.html": { "x": 4080, "y": 2440, "w": 1280, "h": 800, "title": "Command palette", "expand": "fill" },
+    "Welcome.dc.html": { "x": 0, "y": 3660, "w": 1280, "h": 800, "title": "Welcome · first run", "expand": "fill" },
+    "AddSite.dc.html": { "x": 1360, "y": 3660, "w": 1280, "h": 800, "title": "Add site · HTTPS connection", "expand": "fill" },
+    "Settings.dc.html": { "x": 2720, "y": 3660, "w": 1280, "h": 800, "title": "Settings · Transfers", "expand": "fill" }
+  },
+  "order": [
+    "Main.dc.html",
+    "MainDark.dc.html",
+    "Inspector.dc.html",
+    "Transfers.dc.html",
+    "Conflicts.dc.html",
+    "DeleteAlert.dc.html",
+    "PublishPreview.dc.html",
+    "History.dc.html",
+    "QuickLook.dc.html",
+    "CommandPalette.dc.html",
+    "Welcome.dc.html",
+    "AddSite.dc.html",
+    "Settings.dc.html"
+  ],
+  "notes": {
+    "row1": { "x": 0, "y": -300, "text": "Main window", "kind": "title1", "maxW": 4000 },
+    "row2": { "x": 0, "y": 920, "text": "Moving files", "kind": "title1", "maxW": 4000 },
+    "row3": { "x": 0, "y": 2140, "text": "Publish & preview", "kind": "title1", "maxW": 5360 },
+    "row4": { "x": 0, "y": 3360, "text": "Connect & set up", "kind": "title1", "maxW": 4000 },
+    "rules": {
+      "x": 4080,
+      "y": 0,
+      "w": 440,
+      "size": "m",
+      "fill": "blue",
+      "text": "Design rules\n\n• Apple Human Interface Guidelines (macOS): sidebar source list, unified toolbar, sheets for decisions, alerts with Cancel as default, inspector, Quick Look.\n• Built on Slint's Cupertino style; runs on Windows, so Windows caption buttons stay.\n• No SF Pro / SF Symbols (Apple-only license): Inter + own stroke icons.\n• HTTP connection is always visible: protocol, host, latency, connections.\n• Text contrast WCAG AA in light and dark.\n• Name: HTTPorter (chosen 2026-10-29)."
+    }
+  },
+  "designSystems": []
+}

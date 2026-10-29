@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTTPorter main window</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="app window {{theme}}">
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"></path></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM14 3v5h5M10.5 12.5l-2 2 2 2M13.5 12.5l2 2-2 2"></path></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM14 3v5h5M9 13h6M9 16.5h6"></path></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 16l5-5 4 4 2.5-2.5L20 17"></path><circle cx="15.5" cy="9" r="1.5"></circle></symbol>
+    <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"></path></symbol>
+    <symbol id="i-chev-l" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"></path></symbol>
+    <symbol id="i-chev-u" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"></path></symbol>
+    <symbol id="i-sort" viewBox="0 0 24 24"><path d="M8 14l4-4 4 4"></path></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-4.5-4.5"></path></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"></path></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"></path></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></symbol>
+    <symbol id="i-newfolder" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5zM12 11v5M9.5 13.5h5"></path></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9.5 5v14"></path></symbol>
+    <symbol id="i-columns" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM12 5v14"></path></symbol>
+    <symbol id="i-inspector" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM14.5 5v14"></path></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .4-7.98A6 6 0 0 0 6 9.6 4.2 4.2 0 0 0 7 18z"></path></symbol>
+    <symbol id="i-pc" viewBox="0 0 24 24"><path d="M4 5h16v11H4zM8.5 20h7M12 16v4"></path></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L3 10.5l7.2 2.3L12.5 20 21 3zM10.2 12.8L21 3"></path></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 4l2.4 5 5.6.7-4.1 3.8 1.1 5.5L12 16.3 7 19l1.1-5.5L4 9.7 9.6 9z"></path></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16l-1 4zM14 7l3 3"></path></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"></path><circle cx="15" cy="7" r="2"></circle><circle cx="9" cy="17" r="2"></circle></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></symbol>
+    <symbol id="i-compare" viewBox="0 0 24 24"><path d="M4 8h14l-3.5-3.5M20 16H6l3.5 3.5"></path></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.5 5v14M15.5 5v14"></path></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"></path></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5l9.5 16.5h-19zM12 10v4.5M12 17.2v.3"></path></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="3"></circle></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"></path></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"></path></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"></circle><path d="M11 12l8-8M16 7l3 3"></path></symbol>
+    <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"></path></symbol>
+    <symbol id="i-cap-min" viewBox="0 0 10 10"><path d="M0 5h10"></path></symbol>
+    <symbol id="i-cap-max" viewBox="0 0 10 10"><path d="M.5.5h9v9h-9z"></path></symbol>
+    <symbol id="i-cap-close" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"></path></symbol>
+  </svg>
+
+  <header class="titlebar">
+    <button class="tbtn" aria-label="Hide sidebar"><svg class="ic"><use href="#i-sidebar"></use></svg></button>
+    <div class="tgroup">
+      <button class="tbtn" aria-label="Back"><svg class="ic"><use href="#i-chev-l"></use></svg></button>
+      <button class="tbtn" aria-label="Forward" disabled="disabled" style="opacity: 0.4"><svg class="ic"><use href="#i-chev-r"></use></svg></button>
+    </div>
+    <div class="wtitle">
+      <b>example-shop.com</b>
+      <span>Bunny Storage · exampleshop</span>
+    </div>
+    <span class="conn" title="Connected over HTTPS"><svg class="ic sm"><use href="#i-lock"></use></svg>HTTPS · 21 ms</span>
+    <div class="grow"></div>
+    <div class="tgroup" role="group" aria-label="View">
+      <button class="tbtn on" aria-label="Two panes"><svg class="ic"><use href="#i-columns"></use></svg></button>
+      <button class="tbtn" aria-label="Single pane with inspector"><svg class="ic"><use href="#i-inspector"></use></svg></button>
+      <button class="tbtn on" aria-label="Compare panes"><svg class="ic"><use href="#i-compare"></use></svg></button>
+    </div>
+    <div class="tgroup" role="group" aria-label="File actions">
+      <button class="tbtn" aria-label="Upload"><svg class="ic"><use href="#i-up"></use></svg></button>
+      <button class="tbtn" aria-label="Download"><svg class="ic"><use href="#i-down"></use></svg></button>
+      <button class="tbtn" aria-label="New folder"><svg class="ic"><use href="#i-newfolder"></use></svg></button>
+      <button class="tbtn" aria-label="Delete"><svg class="ic"><use href="#i-trash"></use></svg></button>
+    </div>
+    <button class="btn primary"><svg class="ic"><use href="#i-send"></use></svg>Publish</button>
+    <label class="search"><svg class="ic sm"><use href="#i-search"></use></svg><input type="search" placeholder="Search example-shop.com" aria-label="Search"></label>
+    <div class="caption">
+      <button aria-label="Minimize"><svg><use href="#i-cap-min"></use></svg></button>
+      <button aria-label="Maximize"><svg><use href="#i-cap-max"></use></svg></button>
+      <button aria-label="Close"><svg><use href="#i-cap-close"></use></svg></button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="sidebar" aria-label="Sidebar">
+      <div class="sb-sec">Sites</div>
+      <a class="sb-item sel" href="#">
+        <span class="monotile bunny">B</span>
+        <span class="sb-two"><span>example-shop.com</span><span class="sub">Bunny · Singapore</span></span>
+        <span class="meta"><span class="dot green" aria-label="Connected"></span></span>
+      </a>
+      <a class="sb-item" href="#">
+        <span class="monotile r2">R2</span>
+        <span class="sb-two"><span>media-archive</span><span class="sub">Cloudflare R2 · auto</span></span>
+        <span class="meta"><span class="dot green" aria-label="Connected"></span></span>
+      </a>
+      <a class="sb-item" href="#">
+        <span class="monotile minio">M</span>
+        <span class="sb-two"><span>local-minio</span><span class="sub">MinIO · localhost:9000</span></span>
+        <span class="meta"><span class="dot gray" aria-label="Not connected"></span></span>
+      </a>
+
+      <div class="sb-sec">Publish</div>
+      <a class="sb-item" href="#"><svg class="ic"><use href="#i-send"></use></svg><span>example-shop.com live</span><span class="meta">2h ago</span></a>
+
+      <div class="sb-sec">Favorites</div>
+      <a class="sb-item" href="#"><svg class="ic"><use href="#i-star"></use></svg><span>uploads / 2026</span></a>
+      <a class="sb-item" href="#"><svg class="ic"><use href="#i-pc"></use></svg><span>Desktop</span></a>
+
+      <div class="sb-sec">Editing</div>
+      <a class="sb-item" href="#"><svg class="ic"><use href="#i-pencil"></use></svg><span>index.html</span><span class="meta">Uploaded</span></a>
+
+      <div class="sb-foot">
+        <button class="btn"><svg class="ic sm"><use href="#i-plus"></use></svg>Add Site</button>
+        <button class="tbtn" aria-label="Settings" style="margin-left: auto"><svg class="ic"><use href="#i-gear"></use></svg></button>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="panes">
+        <section class="pane focus" aria-label="This PC">
+          <div class="pane-head">
+            <span class="where"><svg class="ic"><use href="#i-pc"></use></svg>This PC</span>
+            <span class="crumbs">D: <svg class="ic"><use href="#i-chev-r"></use></svg><b>site-export</b></span>
+            <span class="right"><span class="chip accent"><svg class="ic sm"><use href="#i-compare"></use></svg>Comparing</span></span>
+          </div>
+          <div class="cols"><span class="sorted">Name<svg class="ic sm"><use href="#i-sort"></use></svg></span><span>Status</span><span class="num">Size</span><span>Modified</span></div>
+          <div class="rows">
+            <sc-for list="{{local}}" as="r" hint-placeholder-count="14">
+              <div class="row {{r.cls}}">
+                <span class="name"><svg class="disc ic"><use href="{{r.disc}}"></use></svg><span class="{{r.kind}}"><svg class="ic"><use href="{{r.icon}}"></use></svg></span><span>{{r.name}}</span></span>
+                <span class="chip {{r.chip}}">{{r.status}}</span>
+                <span class="num">{{r.size}}</span>
+                <span class="date">{{r.date}}</span>
+              </div>
+            </sc-for>
+          </div>
+        </section>
+
+        <section class="pane" aria-label="example-shop.com on Bunny">
+          <div class="pane-head">
+            <span class="where"><svg class="ic"><use href="#i-cloud"></use></svg>example-shop.com</span>
+            <span class="crumbs">exampleshop <svg class="ic"><use href="#i-chev-r"></use></svg><b>/</b></span>
+            <span class="right"><span class="chip neutral mono" title="Storage endpoint">https://sg.storage.bunnycdn.com</span></span>
+          </div>
+          <div class="cols"><span class="sorted">Name<svg class="ic sm"><use href="#i-sort"></use></svg></span><span>Status</span><span class="num">Size</span><span>Modified</span></div>
+          <div class="rows">
+            <sc-for list="{{remote}}" as="r" hint-placeholder-count="13">
+              <div class="row {{r.cls}}">
+                <span class="name"><svg class="disc ic"><use href="{{r.disc}}"></use></svg><span class="{{r.kind}}"><svg class="ic"><use href="{{r.icon}}"></use></svg></span><span>{{r.name}}</span></span>
+                <span class="chip {{r.chip}}">{{r.status}}</span>
+                <span class="num">{{r.size}}</span>
+                <span class="date">{{r.date}}</span>
+              </div>
+            </sc-for>
+          </div>
+        </section>
+      </div>
+
+      <sc-if value="{{queueClosed}}" hint-placeholder-val="{{ true }}">
+        <div class="drawer">
+          <div class="drawer-head">
+            <svg class="ic" style="color: var(--green)"><use href="#i-check"></use></svg>
+            <span><b>No transfers running</b></span>
+            <span class="muted">Last publish 2 hours ago · 34 files · 4.2 MB</span>
+            <button class="btn quiet" style="margin-left: auto">Show Transfers<svg class="ic sm"><use href="#i-chev-u"></use></svg></button>
+          </div>
+        </div>
+      </sc-if>
+      <sc-if value="{{queueOpen}}" hint-placeholder-val="{{ false }}">
+        <div class="drawer" aria-label="Transfers">
+          <div class="drawer-head">
+            <svg class="ring" viewBox="0 0 36 36" role="img" aria-label="61 percent uploaded">
+              <circle cx="18" cy="18" r="15" fill="none" stroke="var(--chip)" stroke-width="4"></circle>
+              <circle cx="18" cy="18" r="15" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linecap="round" stroke-dasharray="57.5 94.2" transform="rotate(-90 18 18)"></circle>
+            </svg>
+            <span style="display: flex; flex-direction: column">
+              <b>Uploading to example-shop.com</b>
+              <span class="muted" style="font-size: 12px">8,412 of 13,793 files · 527 of 865 MB · over HTTPS to sg.storage.bunnycdn.com</span>
+            </span>
+            <span class="stats"><span><b>96</b> files/s</span><span><b>6.1</b> MB/s</span><span>about <b>56 s</b> left</span></span>
+            <span style="margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+              <span class="tabs" role="tablist">
+                <button class="on" role="tab">Active 32</button>
+                <button role="tab">Queued 5,349</button>
+                <button role="tab">Failed 0</button>
+                <button role="tab">Done 8,412</button>
+              </span>
+              <button class="btn"><svg class="ic sm"><use href="#i-pause"></use></svg>Pause</button>
+              <button class="btn">Cancel</button>
+            </span>
+          </div>
+          <sc-for list="{{queue}}" as="q" hint-placeholder-count="8">
+            <div class="qrow">
+              <span class="name"><span class="{{q.kind}}"><svg class="ic sm"><use href="{{q.icon}}"></use></svg></span><span>{{q.name}}</span></span>
+              <span class="bar"><i style="width: {{q.pct}}"></i></span>
+              <span class="num">{{q.size}}</span>
+              <span class="num">{{q.pct}}</span>
+              <button class="tbtn" style="height: 22px; min-width: 22px; padding: 0" aria-label="Cancel this upload"><svg class="ic sm"><use href="#i-x"></use></svg></button>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+    </main>
+  </div>
+
+  <footer class="statusbar">
+    <span><b>index.html</b> selected · 383.4 KB</span>
+    <span><span class="chip changed">34 changed</span> <span class="chip new">2 new</span> <span class="chip remote">1 only on Bunny</span></span>
+    <span class="right"><svg class="ic sm"><use href="#i-lock"></use></svg>HTTP/2 · TLS 1.3 · sg.storage.bunnycdn.com · 32 connections ready</span>
+  </footer>
+
+  <sc-if value="{{ovConflicts}}" hint-placeholder-val="{{ false }}">
+    <div class="scrim">
+      <section class="sheet" style="width: 820px" role="dialog" aria-labelledby="cf-title">
+        <div class="sheet-head">
+          <span class="appicon" style="background: var(--orange-soft); color: var(--orange); box-shadow: none"><svg class="ic"><use href="#i-warn"></use></svg></span>
+          <div>
+            <h2 id="cf-title">12 files already exist on example-shop.com</h2>
+            <p>You're uploading 640 files to wp-content / uploads / 2026 / 10. Choose once what happens to existing files; you can change single files below.</p>
+          </div>
+        </div>
+        <div class="sheet-body" style="display: flex; flex-direction: column; gap: 12px">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+            <span class="muted">For all 12:</span>
+            <span class="seg" role="radiogroup" aria-label="Default action">
+              <button class="on" role="radio" aria-checked="true">Replace if different</button>
+              <button role="radio" aria-checked="false">Replace all</button>
+              <button role="radio" aria-checked="false">Skip all</button>
+              <button role="radio" aria-checked="false">Keep both</button>
+            </span>
+            <span class="muted" style="margin-left: auto; font-size: 12px">7 differ · 5 identical (same SHA-256)</span>
+          </div>
+          <div class="group" style="overflow: hidden">
+            <div class="cols" style="grid-template-columns: minmax(0, 1fr) 150px 150px 92px 150px; padding: 0 14px"><span>Name</span><span>On this PC</span><span>On Bunny</span><span>Contents</span><span>Action</span></div>
+            <sc-for list="{{conflicts}}" as="c" hint-placeholder-count="6">
+              <div class="row" style="grid-template-columns: minmax(0, 1fr) 150px 150px 92px 150px; height: 36px; padding: 0 14px">
+                <span class="name"><span class="k-image"><svg class="ic"><use href="#i-image"></use></svg></span><span>{{c.name}}</span></span>
+                <span class="date">{{c.local}}</span>
+                <span class="date">{{c.remote}}</span>
+                <span class="chip {{c.chip}}">{{c.diff}}</span>
+                <select class="input" aria-label="Action for {{c.name}}" style="height: 26px"><option>{{c.action}}</option><option>Replace</option><option>Skip</option><option>Keep both</option></select>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div class="sheet-foot">
+          <label class="check"><input type="checkbox" checked="checked">Remember for uploads to this site</label>
+          <span class="grow"></span>
+          <button class="btn">Cancel Upload</button>
+          <button class="btn primary">Continue</button>
+        </div>
+      </section>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ovDelete}}" hint-placeholder-val="{{ false }}">
+    <div class="scrim center">
+      <section class="alert" role="alertdialog" aria-labelledby="del-title" aria-describedby="del-text">
+        <span class="appicon" style="background: var(--red-soft); color: var(--red); box-shadow: none; width: 56px; height: 56px; border-radius: 14px"><svg class="ic" style="width: 30px; height: 30px"><use href="#i-trash"></use></svg></span>
+        <h2 id="del-title">Delete “old-promo-2025” from example-shop.com?</h2>
+        <p id="del-text">This folder holds 48 files (12.3 MB). Bunny Storage has no trash, so this can't be undone.</p>
+        <label class="check" style="font-size: 12px; margin-top: 2px"><input type="checkbox" checked="checked">Also purge these URLs from the CDN</label>
+        <div class="stack" style="flex-direction: row">
+          <button class="btn destructive" style="flex: 1 1 0">Delete 48 Files</button>
+          <button class="btn primary" style="flex: 1 1 0">Cancel</button>
+        </div>
+      </section>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ovPublish}}" hint-placeholder-val="{{ false }}">
+    <div class="scrim">
+      <section class="sheet" style="width: 760px" role="dialog" aria-labelledby="pub-title">
+        <div class="sheet-head">
+          <span class="appicon"><svg class="ic"><use href="#i-send"></use></svg></span>
+          <div style="flex: 1 1 auto; min-width: 0">
+            <h2 id="pub-title">Publish to example-shop.com</h2>
+            <p>Compared 13,793 files by SHA-256 checksum. Nothing is uploaded or deleted until you click Publish.</p>
+          </div>
+        </div>
+        <div class="sheet-body" style="display: flex; flex-direction: column; gap: 12px">
+          <div class="group">
+            <div class="group-row">
+              <svg class="ic" style="color: var(--label2)"><use href="#i-folder"></use></svg>
+              <div class="text"><span>D:\site-export</span><small>Folder on this PC</small></div>
+              <span class="end"><button class="btn">Change Folder…</button></span>
+            </div>
+            <div class="group-row">
+              <svg class="ic" style="color: var(--green)"><use href="#i-lock"></use></svg>
+              <div class="text"><span class="mono" style="font-size: 12px">https://sg.storage.bunnycdn.com/exampleshop/</span><small>Destination · HTTPS · 32 parallel uploads</small></div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center">
+            <span class="chip changed">34 changed</span><span class="chip new">2 new</span><span class="chip remote">1 only on Bunny</span><span class="chip neutral">13,756 same</span>
+            <span class="muted" style="margin-left: auto">Upload 36 files · 4.2 MB</span>
+          </div>
+          <div class="group" style="overflow: hidden">
+            <sc-for list="{{plan}}" as="p" hint-placeholder-count="9">
+              <div class="row" style="grid-template-columns: 22px minmax(0, 1fr) 120px 90px; height: 30px; padding: 0 14px">
+                <input type="checkbox" checked="{{p.checked}}" aria-label="Include {{p.path}}" style="accent-color: var(--accent); margin: 0">
+                <span class="name"><span class="{{p.kind}}"><svg class="ic sm"><use href="{{p.icon}}"></use></svg></span><span>{{p.path}}</span></span>
+                <span class="chip {{p.chip}}">{{p.label}}</span>
+                <span class="num">{{p.size}}</span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+            <label class="check"><input type="checkbox">Remove files from Bunny that aren't in the folder</label>
+            <span style="margin-left: auto; display: flex; align-items: center; gap: 8px">
+              <span class="muted">Purge CDN:</span>
+              <span class="seg" role="radiogroup" aria-label="Purge after publish">
+                <button role="radio" aria-checked="false">Off</button>
+                <button class="on" role="radio" aria-checked="true">Changed files</button>
+                <button role="radio" aria-checked="false">Whole zone</button>
+              </span>
+            </span>
+          </div>
+        </div>
+        <div class="sheet-foot">
+          <button class="btn quiet">Export Plan…</button>
+          <span class="grow"></span>
+          <button class="btn">Cancel</button>
+          <button class="btn primary"><svg class="ic sm"><use href="#i-send"></use></svg>Publish 36 Files</button>
+        </div>
+      </section>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ovQuick}}" hint-placeholder-val="{{ false }}">
+    <div class="scrim center" style="background: rgba(0, 0, 0, 0.12)">
+      <section class="panel" style="width: 760px; max-width: 100%; height: 560px" role="dialog" aria-label="Quick Look: index.html">
+        <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--sep)">
+          <button class="tbtn" aria-label="Close Quick Look"><svg class="ic"><use href="#i-x"></use></svg></button>
+          <span style="display: flex; flex-direction: column; line-height: 1.2">
+            <b>index.html</b>
+            <span class="muted" style="font-size: 11px">HTML · 383.4 KB · on this PC · changed since last publish</span>
+          </span>
+          <span style="margin-left: auto; display: flex; gap: 8px">
+            <span class="seg" role="radiogroup" aria-label="Compare view">
+              <button class="on" role="radio" aria-checked="true">Source</button>
+              <button role="radio" aria-checked="false">Changes vs Bunny</button>
+            </span>
+            <button class="btn"><svg class="ic sm"><use href="#i-globe"></use></svg>Open in Browser</button>
+            <button class="btn"><svg class="ic sm"><use href="#i-open"></use></svg>Open With…</button>
+          </span>
+        </div>
+        <div class="code" style="flex: 1 1 auto; overflow: hidden; padding: 12px 0; background: var(--content)">
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">1</span><span class="t">&lt;!DOCTYPE html&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">2</span><span class="t">&lt;html</span> <span class="a">lang</span>=<span class="s">"en-US"</span><span class="t">&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">3</span><span class="t">&lt;head&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">4</span>    <span class="t">&lt;meta</span> <span class="a">charset</span>=<span class="s">"UTF-8"</span><span class="t">&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">5</span>    <span class="t">&lt;meta</span> <span class="a">name</span>=<span class="s">"viewport"</span> <span class="a">content</span>=<span class="s">"width=device-width, initial-scale=1"</span><span class="t">&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">6</span>    <span class="t">&lt;link</span> <span class="a">rel</span>=<span class="s">"profile"</span> <span class="a">href</span>=<span class="s">"http://gmpg.org/xfn/11"</span><span class="t">&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">7</span>    <span class="t">&lt;meta</span> <span class="a">name</span>=<span class="s">"robots"</span> <span class="a">content</span>=<span class="s">"index, follow, max-image-preview:large"</span><span class="t">&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">8</span>    <span class="c">&lt;!-- This site is optimized with the Yoast SEO plugin v28.1 --&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">9</span>    <span class="t">&lt;title&gt;</span>Example Shop | Quality Parts, Fast Delivery<span class="t">&lt;/title&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">10</span>    <span class="t">&lt;link</span> <span class="a">rel</span>=<span class="s">"canonical"</span> <span class="a">href</span>=<span class="s">"https://example-shop.com/"</span><span class="t">&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">11</span>    <span class="t">&lt;meta</span> <span class="a">property</span>=<span class="s">"og:url"</span> <span class="a">content</span>=<span class="s">"https://example-shop.com/"</span><span class="t">&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">12</span>    <span class="t">&lt;meta</span> <span class="a">property</span>=<span class="s">"og:site_name"</span> <span class="a">content</span>=<span class="s">"Example Shop"</span><span class="t">&gt;</span></div>
+          <div style="background: var(--orange-soft)"><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">13</span>    <span class="t">&lt;meta</span> <span class="a">property</span>=<span class="s">"article:modified_time"</span> <span class="a">content</span>=<span class="s">"2026-10-22T09:05:34+00:00"</span><span class="t">&gt;</span></div>
+          <div><span class="c" style="display: inline-block; width: 44px; text-align: right; margin-right: 14px">14</span>    <span class="t">&lt;meta</span> <span class="a">property</span>=<span class="s">"og:image:width"</span> <span class="a">content</span>=<span class="s">"901"</span><span class="t">&gt;</span></div>
+        </div>
+        <div class="statusbar" style="justify-content: space-between">
+          <span>Space or Esc to close · ← → previous / next file</span>
+          <span>UTF-8 · LF · line 13 changed</span>
+        </div>
+      </section>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ovPalette}}" hint-placeholder-val="{{ false }}">
+    <div class="scrim" style="background: rgba(0, 0, 0, 0.10); padding-top: 90px">
+      <section class="panel" style="width: 600px; max-width: 100%" role="dialog" aria-label="Command palette">
+        <label style="display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--sep)">
+          <svg class="ic lg" style="color: var(--label2)"><use href="#i-search"></use></svg>
+          <input type="text" value="pu" aria-label="Command" style="border: 0; outline: 0; background: transparent; font: inherit; font-size: 17px; color: var(--label); flex: 1 1 auto">
+          <span class="kbd">Esc</span>
+        </label>
+        <div style="padding: 6px">
+          <sc-for list="{{palette}}" as="p" hint-placeholder-count="7">
+            <sc-if value="{{p.header}}" hint-placeholder-val="{{ false }}">
+              <div class="sb-sec" style="padding: 10px 10px 4px">{{p.title}}</div>
+            </sc-if>
+            <sc-if value="{{p.item}}" hint-placeholder-val="{{ true }}">
+              <div class="sb-item {{p.cls}}" style="min-height: 36px; padding: 0 10px; border-radius: 8px">
+                <svg class="ic"><use href="{{p.icon}}"></use></svg>
+                <span class="sb-two"><span>{{p.title}}</span><span class="sub">{{p.sub}}</span></span>
+                <span class="meta"><span class="kbd">{{p.keys}}</span></span>
+              </div>
+            </sc-if>
+          </sc-for>
+        </div>
+        <div class="statusbar" style="border-radius: 0">
+          <span><span class="kbd">↑</span> <span class="kbd">↓</span> to move · <span class="kbd">Enter</span> to run</span>
+          <span class="right">Ctrl K</span>
+        </div>
+      </section>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ovAddSite}}" hint-placeholder-val="{{ false }}">
+    <div class="scrim">
+      <section class="sheet" style="width: 760px" role="dialog" aria-labelledby="add-title">
+        <div class="sheet-head">
+          <span class="appicon"><svg class="ic"><use href="#i-globe"></use></svg></span>
+          <div>
+            <h2 id="add-title">Add Site</h2>
+            <p>Connect to cloud storage over HTTPS. Passwords and keys are stored in Windows Credential Manager, never in plain files.</p>
+          </div>
+        </div>
+        <div class="sheet-body" style="display: flex; flex-direction: column; gap: 14px">
+          <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px">
+            <sc-for list="{{providers}}" as="v" hint-placeholder-count="8">
+              <button class="group" style="display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 10px; font: inherit; color: var(--label); cursor: default; text-align: left; {{v.style}}">
+                <span class="monotile {{v.tile}}" style="background: {{v.color}}">{{v.mono}}</span>
+                <span style="display: flex; flex-direction: column; line-height: 1.15"><span style="font-weight: 600">{{v.name}}</span><span class="muted" style="font-size: 11px">{{v.kind}}</span></span>
+              </button>
+            </sc-for>
+          </div>
+          <div class="form">
+            <label>Sign in with</label>
+            <span><span class="seg" role="radiogroup" aria-label="Sign-in method"><button class="on" role="radio" aria-checked="true">Storage zone password</button><button role="radio" aria-checked="false">Bunny account key</button></span></span>
+            <label for="add-zone">Storage zone</label>
+            <input id="add-zone" class="input" value="exampleshop">
+            <label for="add-region">Region</label>
+            <select id="add-region" class="input"><option>Singapore (sg)</option><option>Frankfurt (de)</option><option>London (uk)</option><option>New York (ny)</option><option>Los Angeles (la)</option><option>Stockholm (se)</option><option>São Paulo (br)</option><option>Johannesburg (jh)</option><option>Sydney (syd)</option></select>
+            <label for="add-pass">Password</label>
+            <input id="add-pass" class="input" type="password" value="example-password">
+            <span class="hint">Bunny dashboard → Storage → exampleshop → FTP &amp; API Access. Use the full password, not the read-only one.</span>
+            <label>Endpoint</label>
+            <span class="input mono" style="display: flex; align-items: center; gap: 6px; background: var(--chip)"><svg class="ic sm" style="color: var(--green)"><use href="#i-lock"></use></svg>https://sg.storage.bunnycdn.com/exampleshop/</span>
+            <label for="add-name">Site name</label>
+            <input id="add-name" class="input" value="example-shop.com">
+          </div>
+          <div class="group" style="background: var(--green-soft); border-color: transparent">
+            <div class="group-row" style="border: 0">
+              <svg class="ic lg" style="color: var(--green)"><use href="#i-check"></use></svg>
+              <div class="text"><span style="font-weight: 600">Connected over HTTPS</span><small>TLS 1.3 · HTTP/2 · 21 ms · 282 items in /</small></div>
+            </div>
+          </div>
+        </div>
+        <div class="sheet-foot">
+          <button class="btn"><svg class="ic sm"><use href="#i-refresh"></use></svg>Test Connection</button>
+          <span class="grow"></span>
+          <button class="btn">Cancel</button>
+          <button class="btn primary">Add Site</button>
+        </div>
+      </section>
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"dark":{"editor":"boolean","default":false},"drawer":{"editor":"enum","options":["collapsed","transfers"],"default":"collapsed"},"overlay":{"editor":"enum","options":["none","conflicts","delete","publish","quicklook","palette","addsite"],"default":"none"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const chips = { Changed: 'changed', New: 'new', 'Only on Bunny': 'remote', Same: 'same' };
+    const f = (name, kind, status, size, date, cls) => ({
+      name,
+      kind: 'k-' + kind,
+      icon: '#i-' + kind,
+      disc: kind === 'folder' ? '#i-chev-r' : '',
+      status,
+      chip: chips[status],
+      size,
+      date,
+      cls: cls || ''
+    });
+    const local = [
+      f('product-alpha', 'folder', 'Same', '-', 'Today 10:02'),
+      f('contact-us', 'folder', 'Changed', '-', 'Today 10:02'),
+      f('knowledge', 'folder', 'Same', '-', 'Today 10:02'),
+      f('new-arrivals-2026', 'folder', 'New', '-', 'Today 10:02'),
+      f('produk-kami', 'folder', 'Changed', '-', 'Today 10:02'),
+      f('wp-content', 'folder', 'Changed', '-', 'Today 10:02'),
+      f('wp-includes', 'folder', 'Same', '-', 'Today 10:02'),
+      f('index.html', 'code', 'Changed', '383.4 KB', 'Today 10:02', 'sel'),
+      f('main-sitemap.xsl', 'code', 'Same', '4.1 KB', 'Today 10:02'),
+      f('og-cover.webp', 'image', 'New', '214 KB', 'Today 10:02'),
+      f('page-sitemap.xml', 'code', 'Changed', '72.5 KB', 'Today 10:02'),
+      f('post-sitemap.xml', 'code', 'Same', '4.0 KB', 'Today 10:02'),
+      f('robots.txt', 'doc', 'Same', '67 B', 'Today 10:02'),
+      f('sitemap.xml', 'code', 'Same', '857 B', 'Today 10:02')
+    ];
+    const remote = [
+      f('product-alpha', 'folder', 'Same', '-', 'Yesterday 17:02'),
+      f('contact-us', 'folder', 'Changed', '-', 'Yesterday 17:02'),
+      f('knowledge', 'folder', 'Same', '-', 'Yesterday 17:02'),
+      f('old-promo-2025', 'folder', 'Only on Bunny', '-', '12 Mar 2026'),
+      f('produk-kami', 'folder', 'Changed', '-', 'Yesterday 17:02'),
+      f('wp-content', 'folder', 'Changed', '-', 'Yesterday 17:02'),
+      f('wp-includes', 'folder', 'Same', '-', 'Yesterday 17:02'),
+      f('index.html', 'code', 'Changed', '381.9 KB', 'Yesterday 17:02'),
+      f('main-sitemap.xsl', 'code', 'Same', '4.1 KB', 'Yesterday 17:02'),
+      f('page-sitemap.xml', 'code', 'Changed', '71.8 KB', 'Yesterday 17:02'),
+      f('post-sitemap.xml', 'code', 'Same', '4.0 KB', 'Yesterday 17:02'),
+      f('robots.txt', 'doc', 'Same', '67 B', 'Yesterday 17:02'),
+      f('sitemap.xml', 'code', 'Same', '857 B', 'Yesterday 17:02')
+    ];
+    const drawer = this.props.drawer ?? 'collapsed';
+    const overlay = this.props.overlay ?? 'none';
+
+    const q = (name, kind, size, pct) => ({ name, kind: 'k-' + kind, icon: '#i-' + kind, size, pct: pct + '%' });
+    const queue = [
+      q('wp-content/uploads/2026/10/IMG_0001-2048x1536.jpg', 'image', '211.6 KB', 82),
+      q('wp-content/uploads/2026/10/IMG_0001-1536x1152.jpg.webp', 'image', '51.0 KB', 64),
+      q('wp-content/uploads/2026/10/Blur-SN-Finisar-1G-SX.png', 'image', '6.4 MB', 23),
+      q('wp-includes/js/jquery/jquery.min.js', 'code', '85.5 KB', 91),
+      q('produk-kami/index.html', 'code', '204.7 KB', 47),
+      q('wp-content/uploads/2026/10/IMG_0001-700x600.jpg', 'image', '27.0 KB', 100),
+      q('contact-us/index.html', 'code', '171.2 KB', 12),
+      q('wp-content/uploads/2026/10/IMG_0001-450x540.jpg.webp', 'image', '9.7 KB', 5)
+    ];
+
+    const c = (name, local, remote, same) => ({
+      name, local, remote,
+      diff: same ? 'Identical' : 'Different',
+      chip: same ? 'neutral' : 'changed',
+      action: same ? 'Skip (identical)' : 'Replace'
+    });
+    const conflicts = [
+      c('IMG_0001.jpg', '357.2 KB · Today 09:58', '357.2 KB · Yesterday 17:02', true),
+      c('IMG_0001-2048x1536.jpg', '214.0 KB · Today 09:58', '211.6 KB · Yesterday 17:02', false),
+      c('IMG_0001-1536x1152.jpg', '117.9 KB · Today 09:58', '115.6 KB · Yesterday 17:02', false),
+      c('IMG_0001-1024x768.jpg', '48.5 KB · Today 09:58', '48.5 KB · Yesterday 17:02', true),
+      c('IMG_0001-700x600.jpg', '27.4 KB · Today 09:58', '27.0 KB · Yesterday 17:02', false),
+      c('IMG_0001-300x225.jpg', '6.3 KB · Today 09:58', '6.3 KB · Yesterday 17:02', true)
+    ];
+
+    const p = (path, kind, label, chip, size, checked) => ({ path, kind: 'k-' + kind, icon: '#i-' + kind, label, chip, size, checked: checked !== false });
+    const plan = [
+      p('index.html', 'code', 'Changed', 'changed', '383.4 KB'),
+      p('page-sitemap.xml', 'code', 'Changed', 'changed', '72.5 KB'),
+      p('contact-us/index.html', 'code', 'Changed', 'changed', '171.2 KB'),
+      p('produk-kami/index.html', 'code', 'Changed', 'changed', '204.7 KB'),
+      p('wp-content/uploads/2026/10/IMG_0001-2048x1536.jpg', 'image', 'Changed', 'changed', '214.0 KB'),
+      p('… 29 more changed files', 'folder', 'Changed', 'changed', '3.0 MB'),
+      p('og-cover.webp', 'image', 'New', 'new', '214 KB'),
+      p('new-arrivals-2026/index.html', 'code', 'New', 'new', '98.6 KB'),
+      p('old-promo-2025/ (48 files)', 'folder', 'Will be kept', 'remote', '12.3 MB', false)
+    ];
+
+    const pal = (title, sub, icon, keys, cls) => ({ item: true, header: false, title, sub, icon, keys, cls: cls || '' });
+    const head = (title) => ({ item: false, header: true, title, sub: '', icon: '', keys: '', cls: '' });
+    const palette = [
+      head('Actions'),
+      pal('Publish “example-shop.com live”', 'D:\\site-export → exampleshop', '#i-send', 'Ctrl P', 'sel'),
+      pal('Purge from CDN…', 'Pull Zone 7654321 · example-shop.com', '#i-refresh', ''),
+      pal('Upload Files…', 'To example-shop.com / (current folder)', '#i-up', 'Ctrl U'),
+      head('Sites and folders'),
+      pal('media-archive', 'Cloudflare R2 · auto', '#i-cloud', ''),
+      pal('produk-kami', 'Folder on example-shop.com', '#i-folder', '')
+    ];
+
+    const pv = (name, kind, mono, tile, color, on) => ({ name, kind, mono, tile, color, style: on ? 'box-shadow: 0 0 0 2px var(--accent); border-color: transparent' : '' });
+    const providers = [
+      pv('Bunny Storage', 'HTTP API', 'B', 'bunny', '#e8590c', true),
+      pv('Amazon S3', 'S3', 'S3', 's3', '#3a7bd5'),
+      pv('Cloudflare R2', 'S3-compatible', 'R2', 'r2', '#c2410c'),
+      pv('Backblaze B2', 'S3-compatible', 'B2', 's3', '#b42318'),
+      pv('Wasabi', 'S3-compatible', 'W', 's3', '#1f7a3a'),
+      pv('DigitalOcean Spaces', 'S3-compatible', 'DO', 's3', '#1d4ed8'),
+      pv('MinIO', 'S3-compatible', 'M', 'minio', '#b91c1c'),
+      pv('Other S3', 'Custom endpoint', '…', 's3', '#5c5c62')
+    ];
+
+    return {
+      theme: (this.props.dark ?? false) ? 'dark' : '',
+      local,
+      remote,
+      queueClosed: drawer !== 'transfers',
+      queueOpen: drawer === 'transfers',
+      queue,
+      ovConflicts: overlay === 'conflicts',
+      ovDelete: overlay === 'delete',
+      ovPublish: overlay === 'publish',
+      ovQuick: overlay === 'quicklook',
+      ovPalette: overlay === 'palette',
+      ovAddSite: overlay === 'addsite',
+      conflicts,
+      plan,
+      palette,
+      providers
+    };
+  }
+}
+</script>
+</body>
+</html>

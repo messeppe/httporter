@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTTPorter single pane with inspector</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{margin:0}</style>
+</helmet>
+<div class="app window {{theme}}">
+  <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"></path></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 16l5-5 4 4 2.5-2.5L20 17"></path><circle cx="15.5" cy="9" r="1.5"></circle></symbol>
+    <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"></path></symbol>
+    <symbol id="i-chev-l" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"></path></symbol>
+    <symbol id="i-sort" viewBox="0 0 24 24"><path d="M8 14l4-4 4 4"></path></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-4.5-4.5"></path></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"></path></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"></path></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></symbol>
+    <symbol id="i-newfolder" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5zM12 11v5M9.5 13.5h5"></path></symbol>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9.5 5v14"></path></symbol>
+    <symbol id="i-columns" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM12 5v14"></path></symbol>
+    <symbol id="i-inspector" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM14.5 5v14"></path></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"></path></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"></path></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 0 0 .4-7.98A6 6 0 0 0 6 9.6 4.2 4.2 0 0 0 7 18z"></path></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L3 10.5l7.2 2.3L12.5 20 21 3zM10.2 12.8L21 3"></path></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><path d="M6 11h12v9H6zM8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"></path></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><path d="M9 9h10v11H9zM5 15V4h10"></path></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="3"></circle></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"></path></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"></path></symbol>
+    <symbol id="i-cap-min" viewBox="0 0 10 10"><path d="M0 5h10"></path></symbol>
+    <symbol id="i-cap-max" viewBox="0 0 10 10"><path d="M.5.5h9v9h-9z"></path></symbol>
+    <symbol id="i-cap-close" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10"></path></symbol>
+  </svg>
+
+  <header class="titlebar">
+    <button class="tbtn" aria-label="Show sidebar"><svg class="ic"><use href="#i-sidebar"></use></svg></button>
+    <div class="tgroup">
+      <button class="tbtn" aria-label="Back"><svg class="ic"><use href="#i-chev-l"></use></svg></button>
+      <button class="tbtn" aria-label="Forward"><svg class="ic"><use href="#i-chev-r"></use></svg></button>
+    </div>
+    <div class="wtitle">
+      <b>10</b>
+      <span>example-shop.com · wp-content / uploads / 2026</span>
+    </div>
+    <span class="conn"><svg class="ic sm"><use href="#i-lock"></use></svg>HTTPS · 21 ms</span>
+    <div class="grow"></div>
+    <div class="tgroup" role="group" aria-label="Layout">
+      <button class="tbtn on" aria-label="List"><svg class="ic"><use href="#i-list"></use></svg></button>
+      <button class="tbtn" aria-label="Thumbnails"><svg class="ic"><use href="#i-grid"></use></svg></button>
+    </div>
+    <div class="tgroup" role="group" aria-label="View">
+      <button class="tbtn" aria-label="Two panes"><svg class="ic"><use href="#i-columns"></use></svg></button>
+      <button class="tbtn on" aria-label="Single pane with inspector"><svg class="ic"><use href="#i-inspector"></use></svg></button>
+    </div>
+    <div class="tgroup" role="group" aria-label="File actions">
+      <button class="tbtn" aria-label="Upload"><svg class="ic"><use href="#i-up"></use></svg></button>
+      <button class="tbtn" aria-label="Download"><svg class="ic"><use href="#i-down"></use></svg></button>
+      <button class="tbtn" aria-label="New folder"><svg class="ic"><use href="#i-newfolder"></use></svg></button>
+      <button class="tbtn" aria-label="Delete"><svg class="ic"><use href="#i-trash"></use></svg></button>
+    </div>
+    <button class="btn primary"><svg class="ic"><use href="#i-send"></use></svg>Publish</button>
+    <label class="search"><svg class="ic sm"><use href="#i-search"></use></svg><input type="search" placeholder="Search in 10" aria-label="Search"></label>
+    <div class="caption">
+      <button aria-label="Minimize"><svg><use href="#i-cap-min"></use></svg></button>
+      <button aria-label="Maximize"><svg><use href="#i-cap-max"></use></svg></button>
+      <button aria-label="Close"><svg><use href="#i-cap-close"></use></svg></button>
+    </div>
+  </header>
+
+  <div class="body">
+    <main class="main" style="flex: 999 1 520px">
+      <section class="pane focus" style="flex: 1 1 auto" aria-label="Files in 10">
+        <div class="pane-head">
+          <span class="where"><svg class="ic"><use href="#i-cloud"></use></svg>example-shop.com</span>
+          <span class="crumbs">exampleshop <svg class="ic"><use href="#i-chev-r"></use></svg> wp-content <svg class="ic"><use href="#i-chev-r"></use></svg> uploads <svg class="ic"><use href="#i-chev-r"></use></svg> 2026 <svg class="ic"><use href="#i-chev-r"></use></svg><b>10</b></span>
+          <span class="right"><button class="tbtn" aria-label="Refresh"><svg class="ic"><use href="#i-refresh"></use></svg></button></span>
+        </div>
+        <div class="cols" style="grid-template-columns: minmax(0, 1fr) 76px 110px 128px"><span class="sorted">Name<svg class="ic sm"><use href="#i-sort"></use></svg></span><span class="num">Size</span><span>Kind</span><span>Modified</span></div>
+        <div class="rows">
+          <sc-for list="{{files}}" as="r" hint-placeholder-count="16">
+            <div class="row {{r.cls}}" style="grid-template-columns: minmax(0, 1fr) 76px 110px 128px">
+              <span class="name"><span class="k-image"><svg class="ic"><use href="#i-image"></use></svg></span><span>{{r.name}}</span></span>
+              <span class="num">{{r.size}}</span>
+              <span class="date">{{r.kind}}</span>
+              <span class="date">Yesterday 17:02</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+    </main>
+
+    <aside class="sidebar" style="flex: 1 1 300px; max-width: 340px; margin: 8px 8px 8px 0; padding: 14px; gap: 14px; background: var(--content); border-color: var(--sep-strong)" aria-label="Inspector">
+      <div style="aspect-ratio: 4 / 3; border-radius: 10px; background: var(--chip); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--label2)">
+        <svg class="ic xl"><use href="#i-image"></use></svg>
+        <span style="font-size: 11px">[Image preview]</span>
+      </div>
+      <div>
+        <div style="font-size: 15px; font-weight: 600; word-break: break-all">IMG_0001-2048x1536.jpg</div>
+        <div class="muted" style="font-size: 12px">JPEG image · 2048 × 1536 · 211.6 KB</div>
+      </div>
+      <div style="display: flex; gap: 6px; flex-wrap: wrap">
+        <button class="btn"><svg class="ic sm"><use href="#i-eye"></use></svg>Quick Look</button>
+        <button class="btn"><svg class="ic sm"><use href="#i-down"></use></svg>Download</button>
+        <button class="btn destructive" aria-label="Delete"><svg class="ic sm"><use href="#i-trash"></use></svg></button>
+      </div>
+      <div class="divider"></div>
+      <div style="display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 6px 10px; font-size: 12px">
+        <span class="muted">Modified</span><span>28 Oct 2026, 17:02</span>
+        <span class="muted">Created</span><span>28 Oct 2026, 17:02</span>
+        <span class="muted">Content type</span><span class="mono">image/jpeg</span>
+        <span class="muted">Replicated</span><span>Singapore → Los Angeles, Frankfurt, São Paulo</span>
+        <span class="muted">SHA-256</span><span class="mono" style="word-break: break-all; font-size: 11px">3BD241C1C3F808256327E25F7CABAC7F2F2EC01852602F2DE4811E5D4C75CFCB</span>
+        <span class="muted">Matches local</span><span style="color: var(--green); font-weight: 600">Yes · same checksum</span>
+      </div>
+      <div class="divider"></div>
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <div style="font-size: 11px; font-weight: 600; color: var(--label2)">Links</div>
+        <div class="group">
+          <div class="group-row" style="min-height: 38px">
+            <svg class="ic" style="color: var(--accent-text)"><use href="#i-globe"></use></svg>
+            <div class="text"><span class="mono" style="font-size: 11px; word-break: break-all">https://example-shop.com/wp-content/uploads/2026/10/IMG_0001-2048x1536.jpg</span><small>Public · Pull Zone 7654321</small></div>
+            <button class="tbtn end" aria-label="Copy public link"><svg class="ic"><use href="#i-copy"></use></svg></button>
+          </div>
+          <div class="group-row" style="min-height: 38px">
+            <svg class="ic" style="color: var(--label2)"><use href="#i-lock"></use></svg>
+            <div class="text"><span class="mono" style="font-size: 11px; word-break: break-all">https://sg.storage.bunnycdn.com/exampleshop/wp-content/uploads/2026/10/…</span><small>Storage API · needs password</small></div>
+            <button class="tbtn end" aria-label="Copy storage URL"><svg class="ic"><use href="#i-copy"></use></svg></button>
+          </div>
+        </div>
+        <button class="btn"><svg class="ic sm"><use href="#i-refresh"></use></svg>Purge from CDN</button>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="statusbar">
+    <span><b>1 of 1,829</b> selected · 211.6 KB</span>
+    <span class="right"><svg class="ic sm"><use href="#i-lock"></use></svg>HTTP/2 · TLS 1.3 · sg.storage.bunnycdn.com · 1,829 items</span>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"dark":{"editor":"boolean","default":false},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const rows = [
+      ['IMG_0001.jpg', '357.2 KB', 'JPEG image'],
+      ['IMG_0001.jpg.webp', '76.6 KB', 'WebP image'],
+      ['IMG_0001-1024x768.jpg', '48.5 KB', 'JPEG image'],
+      ['IMG_0001-1024x768.jpg.webp', '21.2 KB', 'WebP image'],
+      ['IMG_0001-150x150.jpg', '3.0 KB', 'JPEG image'],
+      ['IMG_0001-150x150.jpg.webp', '2.0 KB', 'WebP image'],
+      ['IMG_0001-1536x1152.jpg', '115.6 KB', 'JPEG image'],
+      ['IMG_0001-1536x1152.jpg.webp', '51.0 KB', 'WebP image'],
+      ['IMG_0001-2048x1536.jpg', '211.6 KB', 'JPEG image', 'sel'],
+      ['IMG_0001-2048x1536.jpg.webp', '96.3 KB', 'WebP image'],
+      ['IMG_0001-300x225.jpg', '6.3 KB', 'JPEG image'],
+      ['IMG_0001-300x225.jpg.webp', '3.5 KB', 'WebP image'],
+      ['IMG_0001-450x540.jpg', '18.1 KB', 'JPEG image'],
+      ['IMG_0001-450x540.jpg.webp', '9.7 KB', 'WebP image'],
+      ['IMG_0001-700x600.jpg', '27.0 KB', 'JPEG image'],
+      ['IMG_0001-700x600.jpg.webp', '13.8 KB', 'WebP image']
+    ];
+    const files = rows.map(([name, size, kind, cls]) => ({ name, size, kind, cls: cls || '' }));
+    return { theme: (this.props.dark ?? false) ? 'dark' : '', files };
+  }
+}
+</script>
+</body>
+</html>
