@@ -1,13 +1,9 @@
 //! Tests of the binding: the window's callbacks reach the session, and views reach the window.
 
 use super::*;
-use crate::session::fakes::{FakeFactory, session_with};
+use crate::session::fakes::{FakeFactory, Gated, session_with};
 use crate::viewmodel::{FileKindData, RowData};
-use async_trait::async_trait;
-use httporter_core::{
-    ByteStream, Capabilities, Listing, MockProvider, ProviderError, RemotePath, StorageProvider,
-    UploadOptions, UploadSource,
-};
+use httporter_core::{MockProvider, StorageProvider};
 use i_slint_backend_testing as testing;
 use slint::Model;
 use std::time::{Duration, Instant};
@@ -15,8 +11,9 @@ use tokio::runtime::Runtime;
 
 struct Bound {
     ui: AppWindow,
-    rt: Runtime,
-    session: Arc<Mutex<Session>>,
+    /// Runs the tasks the window starts; they stop when it is dropped.
+    _rt: Runtime,
+    session: Arc<Session>,
     factory: Arc<FakeFactory>,
 }
 
@@ -28,7 +25,7 @@ fn bound(provider: Arc<dyn StorageProvider>) -> Bound {
     let session = install(&ui, rt.handle().clone(), session);
     Bound {
         ui,
-        rt,
+        _rt: rt,
         session,
         factory,
     }
@@ -47,39 +44,6 @@ fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
         }
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-/// A storage whose listings never finish, like a server that stopped answering.
-struct Hanging(Capabilities);
-
-#[async_trait]
-impl StorageProvider for Hanging {
-    fn capabilities(&self) -> &Capabilities {
-        &self.0
-    }
-    fn endpoint(&self) -> String {
-        "hanging://".into()
-    }
-    async fn list(&self, _dir: &RemotePath) -> Result<Listing, ProviderError> {
-        std::future::pending().await
-    }
-    async fn upload(
-        &self,
-        _path: &RemotePath,
-        _source: UploadSource,
-        _opts: &UploadOptions,
-    ) -> Result<(), ProviderError> {
-        unreachable!("browsing never uploads")
-    }
-    async fn download(&self, _path: &RemotePath) -> Result<ByteStream, ProviderError> {
-        unreachable!("browsing never downloads")
-    }
-    async fn delete_file(&self, _path: &RemotePath) -> Result<(), ProviderError> {
-        unreachable!("browsing never deletes")
-    }
-    async fn delete_folder(&self, _dir: &RemotePath) -> Result<(), ProviderError> {
-        unreachable!("browsing never deletes")
     }
 }
 
@@ -129,9 +93,7 @@ fn the_sheet_reports_its_fields_to_the_session_in_order() {
     );
 
     b.ui.invoke_add_site_save("My site".into(), "testzone".into(), 4, "pw".into());
-    let saved = wait_for("the save", || {
-        b.rt.block_on(async { b.session.lock().await.sites().first().cloned() })
-    });
+    let saved = wait_for("the save", || b.session.sites().first().cloned());
     assert_eq!(
         (
             saved.name.as_str(),
@@ -158,12 +120,13 @@ fn an_invalid_form_shows_its_field_error_and_starts_nothing() {
     assert!(!b.ui.get_add_site_busy());
 
     assert!(b.factory.configs().is_empty());
-    assert!(b.rt.block_on(async { b.session.lock().await.sites().is_empty() }));
+    assert!(b.session.sites().is_empty());
 }
 
 #[test]
 fn cancel_gives_up_on_a_running_test_and_clears_busy() {
-    let hanging = Arc::new(Hanging(Capabilities::default()));
+    // Its root listing is held back for good, like a server that stopped answering.
+    let hanging = Gated::new(MockProvider::new(Default::default()), "");
     let b = bound(hanging.clone());
     // References to the storage: this test's and the factory's. A running test holds a third.
     let idle = Arc::strong_count(&hanging);
@@ -210,7 +173,7 @@ fn install_fills_the_region_list_and_the_drives() {
 fn the_first_site_is_opened_at_start() {
     testing::init_no_event_loop();
     let rt = Runtime::new().unwrap();
-    let (mut session, _creds, factory) = session_with(empty());
+    let (session, _creds, factory) = session_with(empty());
     for (name, zone, region) in [("beta", "zone-b", "sg"), ("alpha", "zone-a", "de")] {
         let site = ValidSite {
             name: name.into(),
@@ -232,21 +195,120 @@ fn the_first_site_is_opened_at_start() {
 }
 
 #[test]
-fn selecting_a_site_empties_the_cloud_pane_and_leaves_the_rest() {
-    let b = bound(empty());
-    b.ui.set_remote_rows(to_slint_rows(&[row("old.txt", false)]));
-    b.ui.set_remote_crumbs(super::strings(&["old-zone".into()]));
-    b.ui.set_remote_selected(0);
-    b.ui.set_status_left("3 items".into());
-    b.ui.set_error_text("Couldn't open D:\\x: Access is denied.".into());
-    b.ui.invoke_site_selected(0);
-    assert_eq!(b.ui.get_remote_rows().row_count(), 0);
-    assert_eq!(b.ui.get_remote_crumbs().row_count(), 0);
-    assert_eq!(b.ui.get_remote_selected(), -1);
-    assert_eq!(b.ui.get_status_left(), "3 items");
+fn picking_a_site_empties_the_cloud_pane_and_drops_its_error_only() {
+    testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_remote_rows(to_slint_rows(&[row("old.txt", false)]));
+    ui.set_remote_crumbs(super::strings(&["old-zone".into()]));
+    ui.set_remote_selected(0);
+    ui.set_status_left("3 items".into());
+    let shown = Mutex::new(Shown {
+        remote_error: Some("Couldn't sign in to old-zone.".into()),
+        local_error: Some("Couldn't open D:\\x: Access is denied.".into()),
+        ..Shown::default()
+    });
+    start_opening_site(&ui, &shown, None);
+    assert_eq!(ui.get_remote_rows().row_count(), 0);
+    assert_eq!(ui.get_remote_crumbs().row_count(), 0);
+    assert_eq!(ui.get_remote_selected(), -1);
+    assert_eq!(ui.get_status_left(), "3 items");
     assert_eq!(
-        b.ui.get_error_text(),
+        ui.get_error_text(),
         "Couldn't open D:\\x: Access is denied."
+    );
+}
+
+#[test]
+fn the_banner_has_the_notice_then_each_pane_s_error() {
+    let shown = Shown {
+        remote_error: Some("cloud".into()),
+        local_error: Some("this pc".into()),
+        ..Shown::default()
+    };
+    assert_eq!(
+        shown.banner(Some("notice".into())),
+        "notice\ncloud\nthis pc"
+    );
+    assert_eq!(shown.banner(None), "cloud\nthis pc");
+    assert_eq!(Shown::default().banner(None), "");
+}
+
+/// Ruling P21: views from tasks that ran side by side can arrive out of order; the window never
+/// puts an older one over a newer one.
+#[test]
+fn an_older_view_never_replaces_a_newer_one() {
+    let b = bound(empty());
+    let shown = Mutex::new(Shown::default());
+    let newer = RemoteView {
+        version: 5,
+        rows: vec![row("new.txt", false)],
+        ..RemoteView::default()
+    };
+    let older = RemoteView {
+        version: 4,
+        rows: vec![row("old.txt", false)],
+        error: Some("an old failure".into()),
+        ..RemoteView::default()
+    };
+    show_remote(&b.ui, &shown, &b.session, &newer, Change::Listed);
+    show_remote(&b.ui, &shown, &b.session, &older, Change::Listed);
+    assert_eq!(row_names(&b.ui), ["new.txt"]);
+    assert_eq!(b.ui.get_error_text(), "");
+
+    let newer = LocalView {
+        version: 7,
+        rows: vec![row("now", true)],
+        ..LocalView::default()
+    };
+    let older = LocalView {
+        version: 6,
+        rows: vec![row("before", true)],
+        error: Some("an old failure".into()),
+        ..LocalView::default()
+    };
+    show_local(&b.ui, &shown, &b.session, &newer, Change::Listed);
+    show_local(&b.ui, &shown, &b.session, &older, Change::Listed);
+    assert_eq!(b.ui.get_local_rows().row_data(0).unwrap().name, "now");
+    assert_eq!(b.ui.get_error_text(), "");
+}
+
+/// Ruling P21 (2), through the window: a site is added while the site opened at start hangs.
+#[test]
+fn a_site_can_be_added_while_a_cloud_listing_hangs() {
+    testing::init_no_event_loop();
+    let rt = Runtime::new().unwrap();
+    let hanging = Gated::new(MockProvider::new(Default::default()), "");
+    let (session, _creds, factory) = session_with(empty());
+    factory.serve("hanging-zone", hanging.clone());
+    let site = ValidSite {
+        name: "hanging".into(),
+        zone: "hanging-zone".into(),
+        region_code: "sg".into(),
+        password: "pw".into(),
+    };
+    rt.block_on(session.save_site(&site)).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let session = install(&ui, rt.handle().clone(), session);
+    wait_for("the first site's listing to hang", || {
+        (hanging.waiting() == 1).then_some(())
+    });
+
+    ui.invoke_add_site_save("other".into(), "other-zone".into(), 0, "pw".into());
+    wait_for("the save", || (session.sites().len() == 2).then_some(()));
+    ui.invoke_add_site_test("".into(), "other-zone".into(), 0, "pw".into());
+    wait_for("the test", || {
+        (factory
+            .configs()
+            .iter()
+            .filter(|c| c.0 == "other-zone")
+            .count()
+            == 1)
+            .then_some(())
+    });
+    assert_eq!(
+        hanging.waiting(),
+        1,
+        "the first site's listing is still out"
     );
 }
 
@@ -255,6 +317,7 @@ fn a_remote_view_is_applied_to_the_window() {
     testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
     let view = RemoteView {
+        version: 1,
         rows: vec![row("wp-content", true), row("index.html", false)],
         crumbs: vec!["testzone".into(), "wp-content".into()],
         connection: "HTTPS · 21 ms".into(),
@@ -264,7 +327,7 @@ fn a_remote_view_is_applied_to_the_window() {
         error: None,
     };
     ui.set_remote_selected(1);
-    apply_remote(&ui, &view, Change::Listed, "");
+    apply_remote(&ui, &view, Change::Listed);
     assert_eq!(row_names(&ui), ["wp-content", "index.html"]);
     assert_eq!(strings(ui.get_remote_crumbs()), ["testzone", "wp-content"]);
     assert_eq!(ui.get_connection_text(), "HTTPS · 21 ms");
@@ -273,10 +336,9 @@ fn a_remote_view_is_applied_to_the_window() {
     assert_eq!(ui.get_remote_chip(), "https://sg.storage.bunnycdn.com");
     assert_eq!(ui.get_status_right(), "HTTP/2 · sg.storage.bunnycdn.com");
     assert_eq!(ui.get_status_left(), "2 items");
-    assert_eq!(ui.get_error_text(), "");
     assert_eq!(ui.get_remote_selected(), -1);
 
-    // A failure turns the pill orange and shows the banner; the item count is left alone.
+    // A failure turns the pill orange; the item count is left alone.
     let failed = RemoteView {
         connection: "Not connected".into(),
         status_right: String::new(),
@@ -284,10 +346,9 @@ fn a_remote_view_is_applied_to_the_window() {
         rows: vec![row("a", false)],
         ..view
     };
-    apply_remote(&ui, &failed, Change::Listed, "Couldn't reach x: y");
+    apply_remote(&ui, &failed, Change::Listed);
     assert!(!ui.get_connection_ok());
     assert_eq!(ui.get_connection_text(), "Not connected");
-    assert_eq!(ui.get_error_text(), "Couldn't reach x: y");
     assert_eq!(ui.get_status_left(), "2 items");
 }
 
@@ -296,13 +357,14 @@ fn a_local_view_is_applied_to_the_window() {
     testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
     let view = LocalView {
+        version: 1,
         rows: vec![row("sub", true), row("a.txt", false)],
         crumbs: vec!["D:".into(), "site".into()],
         status: "2 items · 1 couldn't be read".into(),
         error: None,
     };
     ui.set_local_selected(0);
-    apply_local(&ui, &view, Change::Listed, "");
+    apply_local(&ui, &view, Change::Listed);
     assert_eq!(ui.get_local_rows().row_count(), 2);
     assert_eq!(strings(ui.get_local_crumbs()), ["D:", "site"]);
     assert_eq!(ui.get_status_left(), "2 items · 1 couldn't be read");
@@ -317,14 +379,14 @@ fn sorting_keeps_the_selected_row_selected() {
         rows: vec![row("a", false), row("b", false), row("c", false)],
         ..RemoteView::default()
     };
-    apply_remote(&ui, &listed, Change::Listed, "");
+    apply_remote(&ui, &listed, Change::Listed);
     ui.set_remote_selected(2);
     ui.set_status_left("dropped".into());
     let sorted = RemoteView {
         rows: vec![row("c", false), row("b", false), row("a", false)],
         ..RemoteView::default()
     };
-    apply_remote(&ui, &sorted, Change::Sorted, "");
+    apply_remote(&ui, &sorted, Change::Sorted);
     assert_eq!(row_names(&ui), ["c", "b", "a"]);
     assert_eq!(ui.get_remote_selected(), 0);
     // A sort is not news for the status line.

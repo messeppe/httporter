@@ -62,7 +62,7 @@ fn open_session() -> Result<Session, httporter_platform::StoreError> {
             )),
         ),
     };
-    let mut session = Session::new(store, Arc::new(KeyringStore), Arc::new(RealFactory), || {
+    let session = Session::new(store, Arc::new(KeyringStore), Arc::new(RealFactory), || {
         Local::now().naive_local()
     });
     if let Some(problem) = problem {

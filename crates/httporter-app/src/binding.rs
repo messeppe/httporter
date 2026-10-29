@@ -1,24 +1,23 @@
 //! Connects the window to the [`Session`].
 //!
-//! The session lives behind a tokio mutex. Every callback that lists a folder or talks to the
-//! storage runs as a task on the tokio runtime, never on the UI thread, and hands the view it
-//! produced back to the window with `upgrade_in_event_loop`. A task hands its view over while it
-//! still holds the session, so views reach the window in the order the session made them.
+//! The window and the tasks share one `Arc<Session>`. Every callback that lists a folder or talks
+//! to the storage runs as a task on the tokio runtime, never on the UI thread, and hands the view
+//! it produced back to the window with `upgrade_in_event_loop`.
 //!
-//! Each pane has at most one listing in flight. Asking a pane for another one gives the first up
-//! (aborts its task): the user has moved on, and a row index from the click refers to the rows on
-//! screen, which the abandoned listing would have replaced. A session method changes nothing
-//! until its listing is back, so an aborted task leaves the session as it was.
+//! The session locks its parts separately, so tasks run side by side: a hanging cloud listing
+//! holds up neither the This PC pane nor the Add Site sheet. Their views can therefore reach the
+//! window out of order. Each pane's view carries a version, and the window applies only a view
+//! newer than the one it shows ([`Shown`]). The sidebar and the banner's notice are read from the
+//! session when a view is applied: both are short reads of state kept in memory.
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use httporter_bunny::REGIONS;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use tokio::runtime::Handle;
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::add_site::{AddSiteForm, ValidSite, show_field_error};
@@ -45,7 +44,7 @@ enum RemoteOp {
 }
 
 impl RemoteOp {
-    async fn run(self, session: &mut Session) -> RemoteView {
+    async fn run(self, session: &Session) -> RemoteView {
         match self {
             Self::Select(index) => session.select_site(index).await,
             Self::Open(row) => session.open_remote(row).await,
@@ -73,7 +72,7 @@ enum LocalOp {
 }
 
 impl LocalOp {
-    async fn run(self, session: &mut Session) -> LocalView {
+    async fn run(self, session: &Session) -> LocalView {
         match self {
             Self::Open(row) => session.open_local(row).await,
             Self::Up => session.local_up().await,
@@ -90,45 +89,68 @@ impl LocalOp {
     }
 }
 
-/// The task a pane (or the Add Site sheet) is waiting for.
+/// A task that a newer one of the same kind replaces, giving it up.
 #[derive(Default)]
-struct Slot(RefCell<Option<Running>>);
-
-struct Running {
-    task: JoinHandle<()>,
-    /// The task opens a site, rather than moving around in the open one.
-    opens_site: bool,
-}
+struct Slot(RefCell<Option<JoinHandle<()>>>);
 
 impl Slot {
-    /// A site is being opened: what the cloud pane shows is about to go.
-    fn opening_site(&self) -> bool {
+    fn is_running(&self) -> bool {
         self.0
             .borrow()
             .as_ref()
-            .is_some_and(|r| r.opens_site && !r.task.is_finished())
+            .is_some_and(|task| !task.is_finished())
     }
 
-    /// Waits for `task` instead, giving up the task waited for so far.
-    fn replace(&self, task: JoinHandle<()>, opens_site: bool) {
-        if let Some(old) = self.0.replace(Some(Running { task, opens_site })) {
-            old.task.abort();
+    fn replace(&self, task: JoinHandle<()>) {
+        if let Some(old) = self.0.replace(Some(task)) {
+            old.abort();
         }
     }
 
     fn abort(&self) {
         if let Some(old) = self.0.take() {
-            old.task.abort();
+            old.abort();
         }
     }
+}
+
+/// What the window shows of each pane: the version of the view on screen, and its error. Only
+/// the UI thread uses it; the mutex is there so that the closures handed to the event loop can
+/// carry it.
+#[derive(Default)]
+struct Shown {
+    remote: u64,
+    local: u64,
+    remote_error: Option<String>,
+    local_error: Option<String>,
+}
+
+impl Shown {
+    /// The banner: the app's notice, then the cloud pane's error, then This PC's, one per line.
+    fn banner(&self, notice: Option<String>) -> String {
+        [
+            notice.as_deref(),
+            self.remote_error.as_deref(),
+            self.local_error.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 struct Ctx {
     ui: Weak<AppWindow>,
     rt: Handle,
-    session: Arc<Mutex<Session>>,
-    remote: Slot,
-    local: Slot,
+    session: Arc<Session>,
+    shown: Arc<Mutex<Shown>>,
+    /// The site the cloud pane is opening, while it is on its way.
+    opening: Slot,
     sheet: Slot,
     /// Counts the sheet's tests and saves, and its cancels. A result is shown only while its run
     /// is the latest, so a test that finishes after a cancel (or after the sheet reopened) is
@@ -138,45 +160,35 @@ struct Ctx {
 
 impl Ctx {
     fn remote(&self, op: RemoteOp) {
-        let tracked = !matches!(op, RemoteOp::Sort(..));
-        let opens_site = matches!(op, RemoteOp::Select(_));
-        // While another site opens, the rows on screen are on their way out: a click on one of
-        // them (or Backspace) means nothing any more.
-        if tracked && !opens_site && self.remote.opening_site() {
+        let moves = !matches!(op, RemoteOp::Select(_) | RemoteOp::Sort(..));
+        // While another site opens, the pane has been emptied and the rows the user saw are gone:
+        // moving around in them means nothing any more.
+        if moves && self.opening.is_running() {
             return;
         }
-        let session = self.session.clone();
-        let ui = self.ui.clone();
+        let (session, shown, ui) = (self.session.clone(), self.shown.clone(), self.ui.clone());
         let task = self.rt.spawn(async move {
-            let mut session = session.lock().await;
-            let view = op.run(&mut session).await;
-            let sites = session.site_items();
-            let banner = session.error_banner();
+            let view = op.run(&session).await;
             // An error means the window is gone (or, in tests, that there is no event loop).
             let _ = ui.upgrade_in_event_loop(move |ui| {
-                apply_remote(&ui, &view, op.change(), &banner);
-                sync_sites(&ui, &sites);
+                show_remote(&ui, &shown, &session, &view, op.change());
             });
         });
-        if tracked {
-            self.remote.replace(task, opens_site);
+        if matches!(op, RemoteOp::Select(_)) {
+            // A site picked before this one is of no interest any more. (Older listings within a
+            // site need no aborting: the session drops their answers.)
+            self.opening.replace(task);
         }
     }
 
     fn local(&self, op: LocalOp) {
-        let session = self.session.clone();
-        let ui = self.ui.clone();
-        let task = self.rt.spawn(async move {
-            let mut session = session.lock().await;
-            let view = op.run(&mut session).await;
-            let banner = session.error_banner();
+        let (session, shown, ui) = (self.session.clone(), self.shown.clone(), self.ui.clone());
+        self.rt.spawn(async move {
+            let view = op.run(&session).await;
             let _ = ui.upgrade_in_event_loop(move |ui| {
-                apply_local(&ui, &view, op.change(), &banner);
+                show_local(&ui, &shown, &session, &view, op.change());
             });
         });
-        if !matches!(op, LocalOp::Sort(..)) {
-            self.local.replace(task, false);
-        }
     }
 
     /// Starts a run of the sheet: marks it busy at once (the sheet turns its buttons off on that,
@@ -198,9 +210,7 @@ impl Ctx {
             self.ui.clone(),
         );
         let task = self.rt.spawn(async move {
-            // The test does not need the session once it has started.
-            let test = session.lock().await.test_connection(&site);
-            let result = test.await;
+            let result = session.test_connection(&site).await;
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 if runs.load(Ordering::SeqCst) == run {
                     ui.set_add_site_busy(false);
@@ -209,7 +219,7 @@ impl Ctx {
                 }
             });
         });
-        self.sheet.replace(task, false);
+        self.sheet.replace(task);
     }
 
     fn save_site(&self, form: AddSiteForm) {
@@ -224,9 +234,7 @@ impl Ctx {
             self.ui.clone(),
         );
         let task = self.rt.spawn(async move {
-            let mut session = session.lock().await;
             let saved = session.save_site(&site).await;
-            let sites = session.site_items();
             let index = saved.as_ref().ok().and_then(|record| {
                 session
                     .sites()
@@ -239,7 +247,7 @@ impl Ctx {
                 match saved {
                     Ok(_) => {
                         // Saved even if the sheet was cancelled meanwhile: the list must show it.
-                        sync_sites(&ui, &sites);
+                        sync_sites(&ui, &session.site_items());
                         if latest {
                             ui.set_add_site_busy(false);
                             ui.set_add_site_open(false);
@@ -259,7 +267,7 @@ impl Ctx {
                 }
             });
         });
-        self.sheet.replace(task, false);
+        self.sheet.replace(task);
     }
 
     /// The sheet was cancelled: give up its test or save and let it be used again.
@@ -288,25 +296,28 @@ fn validated(ui: &AppWindow, form: &AddSiteForm) -> Option<ValidSite> {
 
 /// Wires every callback of `ui` to `session`, fills the window with the session's starting state
 /// and selects the first site, if there is one. Returns the shared session.
-pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Mutex<Session>> {
+pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
     let regions: Vec<SharedString> = REGIONS.iter().map(|(_, city)| (*city).into()).collect();
     ui.set_region_names(ModelRc::new(VecModel::from(regions)));
+    let session = Arc::new(session);
+    let shown = Arc::new(Mutex::new(Shown::default()));
+    let local = session.local_view();
+    {
+        let mut shown = lock(&shown);
+        shown.local = local.version;
+        shown.local_error = local.error.clone();
+        apply_local(ui, &local, Change::Listed);
+        ui.set_error_text(shown.banner(session.notice()).into());
+    }
     let sites = session.site_items();
     sync_sites(ui, &sites);
-    apply_local(
-        ui,
-        &session.local_view(),
-        Change::Listed,
-        &session.error_banner(),
-    );
 
-    let session = Arc::new(Mutex::new(session));
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         rt,
         session: session.clone(),
-        remote: Slot::default(),
-        local: Slot::default(),
+        shown,
+        opening: Slot::default(),
         sheet: Slot::default(),
         sheet_run: Arc::new(AtomicU64::new(0)),
     });
@@ -317,7 +328,7 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Mutex<Sessio
         move |index| {
             let Some(index) = row(index) else { return };
             if let Some(ui) = ctx.ui.upgrade() {
-                clear_remote_rows(&ui);
+                start_opening_site(&ui, &ctx.shown, ctx.session.notice());
             }
             ctx.remote(RemoteOp::Select(index));
         }
@@ -414,6 +425,56 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Mutex<Sessio
     session
 }
 
+/// Puts a cloud view on screen, unless the window already shows a newer one; then brings the
+/// banner and the sidebar (whose health dots follow the listings) up to date.
+fn show_remote(
+    ui: &AppWindow,
+    shown: &Mutex<Shown>,
+    session: &Session,
+    view: &RemoteView,
+    change: Change,
+) {
+    let mut shown = lock(shown);
+    if view.version > shown.remote {
+        shown.remote = view.version;
+        shown.remote_error = view.error.clone();
+        apply_remote(ui, view, change);
+    }
+    ui.set_error_text(shown.banner(session.notice()).into());
+    drop(shown);
+    sync_sites(ui, &session.site_items());
+}
+
+/// As [`show_remote`], for the This PC pane.
+fn show_local(
+    ui: &AppWindow,
+    shown: &Mutex<Shown>,
+    session: &Session,
+    view: &LocalView,
+    change: Change,
+) {
+    let mut shown = lock(shown);
+    if view.version > shown.local {
+        shown.local = view.version;
+        shown.local_error = view.error.clone();
+        apply_local(ui, view, change);
+    }
+    ui.set_error_text(shown.banner(session.notice()).into());
+}
+
+/// Another site was picked in the sidebar. The pane title follows the sidebar at once, so the
+/// cloud pane is emptied (not the old site's files under the new site's name) and the old site's
+/// error leaves the banner. The rest of the window keeps what it shows until the new site's view
+/// arrives.
+fn start_opening_site(ui: &AppWindow, shown: &Mutex<Shown>, notice: Option<String>) {
+    ui.set_remote_rows(ModelRc::default());
+    ui.set_remote_crumbs(ModelRc::default());
+    ui.set_remote_selected(-1);
+    let mut shown = lock(shown);
+    shown.remote_error = None;
+    ui.set_error_text(shown.banner(notice).into());
+}
+
 fn strings(list: &[String]) -> ModelRc<SharedString> {
     let list: Vec<SharedString> = list.iter().map(|s| s.as_str().into()).collect();
     ModelRc::new(VecModel::from(list))
@@ -445,7 +506,8 @@ fn selection(
     }
 }
 
-fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change, banner: &str) {
+/// Puts a cloud view on screen (everything but the banner, which [`Shown`] puts together).
+fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     let failed = view.error.is_some();
     let selected = selection(
         change,
@@ -462,22 +524,13 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change, banner: &str)
     ui.set_endpoint_text(view.endpoint.as_str().into());
     ui.set_remote_chip(view.chip.as_str().into());
     ui.set_status_right(view.status_right.as_str().into());
-    ui.set_error_text(banner.into());
     if change == Change::Listed && !failed {
         ui.set_status_left(items(view.rows.len()).into());
     }
 }
 
-/// Empties the cloud pane while another site opens, so the old site's files are not shown under
-/// the new site's name (the pane title follows the sidebar at once). The rest of the window keeps
-/// what it shows until the new site's view arrives.
-fn clear_remote_rows(ui: &AppWindow) {
-    ui.set_remote_rows(ModelRc::default());
-    ui.set_remote_crumbs(ModelRc::default());
-    ui.set_remote_selected(-1);
-}
-
-fn apply_local(ui: &AppWindow, view: &LocalView, change: Change, banner: &str) {
+/// Puts a This PC view on screen (everything but the banner).
+fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
     let failed = view.error.is_some();
     let selected = selection(
         change,
@@ -489,7 +542,6 @@ fn apply_local(ui: &AppWindow, view: &LocalView, change: Change, banner: &str) {
     ui.set_local_rows(to_slint_rows(&view.rows));
     ui.set_local_crumbs(strings(&view.crumbs));
     ui.set_local_selected(selected);
-    ui.set_error_text(banner.into());
     if change == Change::Listed && !failed {
         ui.set_status_left(view.status.as_str().into());
     }

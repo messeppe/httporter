@@ -5,6 +5,8 @@ use super::fakes::*;
 use super::*;
 use httporter_core::{MockOp, MockProvider};
 use httporter_platform::{CredentialKey, MemoryStore};
+use std::time::Duration;
+use tokio::time::timeout;
 
 fn valid(zone: &str, region: &str, password: &str) -> ValidSite {
     ValidSite {
@@ -31,7 +33,7 @@ fn site_mock() -> Arc<MockProvider> {
 
 /// A session with the site "testzone" (Singapore, password "pw") saved, browsing `mock`.
 async fn saved(mock: &Arc<MockProvider>) -> Session {
-    let (mut s, _, _) = session_with(mock.clone());
+    let (s, _, _) = session_with(mock.clone());
     s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
     s
 }
@@ -40,18 +42,56 @@ fn names(rows: &[RowData]) -> Vec<&str> {
     rows.iter().map(|r| r.name.as_str()).collect()
 }
 
-fn remote_entry_names(s: &Session) -> Vec<&str> {
-    s.remote
+fn remote_entry_names(s: &Session) -> Vec<String> {
+    lock(&s.remote)
+        .open
         .as_ref()
         .unwrap()
         .entries
         .iter()
-        .map(Entry::name)
+        .map(|e| e.name().to_owned())
         .collect()
 }
 
-fn local_entry_names(s: &Session) -> Vec<&str> {
-    s.local.entries.iter().map(|e| e.name.as_str()).collect()
+fn local_entry_names(s: &Session) -> Vec<String> {
+    lock(&s.local)
+        .entries
+        .iter()
+        .map(|e| e.name.clone())
+        .collect()
+}
+
+/// What the cloud pane shows now.
+fn current_remote(s: &Session) -> RemoteView {
+    s.remote_view_of(&lock(&s.remote))
+}
+
+/// Sends the This PC pane to `dir` (`None`: the drives).
+async fn navigate_local(s: &Session, dir: Option<PathBuf>) -> LocalView {
+    s.navigate_local(move |_| Some(dir)).await
+}
+
+/// `view` without its version, to compare what two views show.
+fn shows(view: &LocalView) -> LocalView {
+    LocalView {
+        version: 0,
+        ..view.clone()
+    }
+}
+
+/// How long anything that must not wait for a held-back listing may take: far longer than it
+/// needs, far shorter than forever.
+const PROMPTLY: Duration = Duration::from_secs(5);
+
+/// Waits until `gated` holds a listing back.
+async fn until_held(gated: &Gated) {
+    timeout(PROMPTLY, async {
+        while gated.waiting() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the listing never reached the storage");
 }
 
 const AUTH: &str = "Couldn't sign in to testzone. Check the password, zone name and region.";
@@ -60,7 +100,7 @@ const AUTH: &str = "Couldn't sign in to testzone. Check the password, zone name 
 
 #[tokio::test]
 async fn save_site_keeps_password_out_of_the_database() {
-    let (mut s, creds) = session_with_mock(MockProvider::new(Default::default()));
+    let (s, creds) = session_with_mock(MockProvider::new(Default::default()));
     let rec = s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
     assert_eq!(
         creds.get(&CredentialKey::site(&rec.id)).unwrap().as_deref(),
@@ -73,7 +113,7 @@ async fn save_site_keeps_password_out_of_the_database() {
 #[tokio::test]
 async fn select_site_lists_root() {
     let mock = site_mock();
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     let view = s.select_site(0).await;
     assert_eq!(names(&view.rows), ["wp-content", "index.html"]);
     assert_eq!(view.crumbs, ["testzone"]);
@@ -87,7 +127,7 @@ async fn select_site_lists_root() {
 #[tokio::test]
 async fn auth_error_shows_exact_message() {
     let mock = site_mock();
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     mock.fail_next(MockOp::List, ProviderError::Auth, 1);
     let view = s.select_site(0).await;
     assert_eq!(view.error.as_deref(), Some(AUTH));
@@ -101,7 +141,7 @@ async fn auth_error_shows_exact_message() {
 #[tokio::test]
 async fn navigate_into_folder_and_back() {
     let mock = site_mock();
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     s.select_site(0).await;
     let view = s.open_remote(0).await;
     assert_eq!(view.crumbs, ["testzone", "wp-content"]);
@@ -114,7 +154,7 @@ async fn navigate_into_folder_and_back() {
 #[tokio::test]
 async fn failed_site_turns_unhealthy() {
     let mock = site_mock();
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     mock.fail_next(MockOp::List, ProviderError::Auth, 1);
     s.select_site(0).await;
     let item = &s.site_items()[0];
@@ -180,7 +220,7 @@ async fn test_connection_reports_a_rejected_password() {
 #[tokio::test]
 async fn the_site_password_comes_from_the_credential_store() {
     let mock = site_mock();
-    let (mut s, creds, factory) = session_with(mock.clone());
+    let (s, creds, factory) = session_with(mock.clone());
     let rec = s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
     creds.set(&CredentialKey::site(&rec.id), "pw-2").unwrap();
     s.select_site(0).await;
@@ -197,7 +237,7 @@ async fn the_site_password_comes_from_the_credential_store() {
 #[tokio::test]
 async fn a_missing_password_is_reported_without_a_request() {
     let mock = site_mock();
-    let (mut s, creds, _) = session_with(mock.clone());
+    let (s, creds, _) = session_with(mock.clone());
     let rec = s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
     creds.delete(&CredentialKey::site(&rec.id)).unwrap();
     let view = s.select_site(0).await;
@@ -211,7 +251,7 @@ async fn a_missing_password_is_reported_without_a_request() {
 
 #[tokio::test]
 async fn sites_are_listed_by_name_with_their_region() {
-    let (mut s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
     s.save_site(&valid("zeta", "de", "pw")).await.unwrap();
     let alpha = s.save_site(&valid("alpha", "sg", "pw")).await.unwrap();
     let items = s.site_items();
@@ -232,7 +272,7 @@ async fn sites_are_listed_by_name_with_their_region() {
 
 #[tokio::test]
 async fn an_unknown_region_is_not_saved() {
-    let (mut s, creds) = session_with_mock(MockProvider::new(Default::default()));
+    let (s, creds) = session_with_mock(MockProvider::new(Default::default()));
     assert!(s.save_site(&valid("z", "xx", "pw")).await.is_err());
     assert!(s.sites().is_empty());
     assert_eq!(format!("{creds:?}"), "MemoryStore { entries: 0, .. }");
@@ -275,7 +315,7 @@ async fn remote_rows_stay_in_entry_order_after_a_sort_change() {
             .with_folder("alpha")
             .with_folder("zeta"),
     );
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     let view = s.select_site(0).await;
     assert_eq!(names(&view.rows), remote_entry_names(&s));
 
@@ -305,7 +345,7 @@ async fn remote_rows_stay_in_entry_order_after_a_sort_change() {
 #[tokio::test]
 async fn opening_a_file_or_a_row_past_the_end_does_nothing() {
     let mock = site_mock();
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     let listed = s.select_site(0).await;
     let calls = mock.calls(MockOp::List);
     assert_eq!(s.open_remote(1).await, listed);
@@ -319,7 +359,7 @@ async fn crumbs_go_to_that_ancestor() {
     let mock = Arc::new(
         MockProvider::new(Default::default()).with_file("wp-content/uploads/2026/a.txt", b"a"),
     );
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     s.select_site(0).await;
     s.open_remote(0).await;
     s.open_remote(0).await;
@@ -341,7 +381,7 @@ async fn crumbs_go_to_that_ancestor() {
 #[tokio::test]
 async fn a_folder_that_is_gone_shows_an_error_and_stays_put() {
     let mock = site_mock();
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     s.select_site(0).await;
     mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
     let view = s.open_remote(0).await;
@@ -363,7 +403,7 @@ async fn a_folder_that_is_gone_shows_an_error_and_stays_put() {
 #[tokio::test]
 async fn other_errors_name_the_host() {
     let mock = site_mock();
-    let mut s = saved(&mock).await;
+    let s = saved(&mock).await;
     mock.fail_next(
         MockOp::List,
         ProviderError::Transient("connection reset".into()),
@@ -378,18 +418,19 @@ async fn other_errors_name_the_host() {
 
 #[tokio::test]
 async fn with_no_site_selected_the_cloud_pane_is_empty() {
-    let (mut s, _) = session_with_mock(MockProvider::new(Default::default()));
-    assert_eq!(s.select_site(0).await, RemoteView::default());
-    assert_eq!(s.open_remote(0).await, RemoteView::default());
-    assert_eq!(s.remote_up().await, RemoteView::default());
-    assert_eq!(s.remote_crumb(0).await, RemoteView::default());
-    assert_eq!(s.sort_remote(SortKey::Size, true), RemoteView::default());
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let empty = |view: RemoteView| RemoteView { version: 0, ..view } == RemoteView::default();
+    assert!(empty(s.select_site(0).await));
+    assert!(empty(s.open_remote(0).await));
+    assert!(empty(s.remote_up().await));
+    assert!(empty(s.remote_crumb(0).await));
+    assert!(empty(s.sort_remote(SortKey::Size, true)));
 }
 
 #[tokio::test]
 async fn switching_to_a_site_that_fails_drops_the_old_listing() {
     let mock = site_mock();
-    let (mut s, _, _) = session_with(mock.clone());
+    let (s, _, _) = session_with(mock.clone());
     s.save_site(&valid("alpha", "sg", "pw")).await.unwrap();
     s.save_site(&valid("beta", "de", "pw")).await.unwrap();
     assert_eq!(s.select_site(0).await.rows.len(), 2);
@@ -423,9 +464,9 @@ async fn local_browsing_opens_folders_and_goes_up() {
     std::fs::write(tmp.path().join("a.txt"), b"abc").unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub").join("inner.txt"), b"x").unwrap();
-    let (mut s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
 
-    let top = s.navigate_local(Some(tmp.path().to_path_buf())).await;
+    let top = navigate_local(&s, Some(tmp.path().to_path_buf())).await;
     assert_eq!(names(&top.rows), ["sub", "a.txt"]);
     assert_eq!(top.status, "2 items");
     assert_eq!(top.crumbs, crate::viewmodel::local_crumbs(tmp.path()));
@@ -437,7 +478,7 @@ async fn local_browsing_opens_folders_and_goes_up() {
 
     // A file does not open.
     assert_eq!(s.open_local(0).await, sub);
-    assert_eq!(s.local_up().await, top);
+    assert_eq!(shows(&s.local_up().await), shows(&top));
 }
 
 #[tokio::test]
@@ -447,8 +488,8 @@ async fn local_rows_stay_in_entry_order_after_a_sort_change() {
     std::fs::write(tmp.path().join("big.txt"), [0; 5000]).unwrap();
     std::fs::create_dir(tmp.path().join("alpha")).unwrap();
     std::fs::create_dir(tmp.path().join("zeta")).unwrap();
-    let (mut s, _) = session_with_mock(MockProvider::new(Default::default()));
-    let view = s.navigate_local(Some(tmp.path().to_path_buf())).await;
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let view = navigate_local(&s, Some(tmp.path().to_path_buf())).await;
     assert_eq!(names(&view.rows), local_entry_names(&s));
 
     let view = s.sort_local(SortKey::Size, false);
@@ -482,8 +523,8 @@ async fn local_crumbs_go_to_that_ancestor() {
     let tmp = tempfile::tempdir().unwrap();
     let deep = tmp.path().join("a").join("b");
     std::fs::create_dir_all(&deep).unwrap();
-    let (mut s, _) = session_with_mock(MockProvider::new(Default::default()));
-    let view = s.navigate_local(Some(deep)).await;
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let view = navigate_local(&s, Some(deep)).await;
     let a = view.crumbs.len() - 2;
     let view = s.local_crumb(a).await;
     assert_eq!(view.crumbs.last().map(String::as_str), Some("a"));
@@ -495,22 +536,22 @@ async fn local_crumbs_go_to_that_ancestor() {
 
 #[tokio::test]
 async fn up_from_a_drive_goes_to_the_drives() {
-    let (mut s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
     let drives = s.local_view();
     let c = drives.rows.iter().position(|r| r.name == "C:").unwrap();
     let view = s.open_local(c).await;
     assert_eq!(view.crumbs, ["C:"]);
-    assert_eq!(s.local_up().await, drives);
+    assert_eq!(shows(&s.local_up().await), shows(&drives));
 }
 
 #[tokio::test]
 async fn an_unreadable_local_folder_shows_an_error_and_stays_put() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a.txt"), b"abc").unwrap();
-    let (mut s, _) = session_with_mock(MockProvider::new(Default::default()));
-    let before = s.navigate_local(Some(tmp.path().to_path_buf())).await;
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let before = navigate_local(&s, Some(tmp.path().to_path_buf())).await;
     let missing = tmp.path().join("missing");
-    let view = s.navigate_local(Some(missing.clone())).await;
+    let view = navigate_local(&s, Some(missing.clone())).await;
     let error = view.error.clone().unwrap();
     assert!(
         error.starts_with(&format!("Couldn't open {}: ", missing.display())),
@@ -521,19 +562,180 @@ async fn an_unreadable_local_folder_shows_an_error_and_stays_put() {
 }
 
 #[tokio::test]
-async fn the_banner_collects_every_problem() {
-    let mock = site_mock();
-    let mut s = saved(&mock).await;
-    assert_eq!(s.error_banner(), "");
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
-    s.select_site(0).await;
-    let tmp = tempfile::tempdir().unwrap();
-    s.navigate_local(Some(tmp.path().join("missing"))).await;
+async fn a_notice_stays_for_the_banner() {
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    assert_eq!(s.notice(), None);
     s.set_notice("The site database could not be opened.".into());
-    let banner = s.error_banner();
-    let lines: Vec<&str> = banner.lines().collect();
-    assert_eq!(lines.len(), 3, "{banner}");
-    assert_eq!(lines[0], "The site database could not be opened.");
-    assert_eq!(lines[1], AUTH);
-    assert!(lines[2].starts_with("Couldn't open "), "{banner}");
+    assert_eq!(
+        s.notice().as_deref(),
+        Some("The site database could not be opened.")
+    );
+}
+
+// ---- Ruling P21: nothing waits for a cloud listing, and a late one is dropped ----
+
+#[tokio::test]
+async fn views_are_numbered_so_a_late_one_can_be_told_apart() {
+    let mock = site_mock();
+    let s = saved(&mock).await;
+    let listed = s.select_site(0).await;
+    let sorted = s.sort_remote(SortKey::Size, false);
+    assert!(sorted.version > listed.version);
+    // Nothing changes, and neither does the number.
+    assert_eq!(s.open_remote(1).await.version, sorted.version);
+    let opened = s.open_remote(0).await;
+    assert!(opened.version > sorted.version);
+
+    let local = s.local_view();
+    let resorted = s.sort_local(SortKey::Size, true);
+    assert!(resorted.version > local.version);
+}
+
+/// Ruling P21 (1): the This PC pane goes about its business while a cloud listing hangs.
+#[tokio::test]
+async fn local_browsing_does_not_wait_for_a_cloud_listing() {
+    let gated = Gated::new(
+        MockProvider::new(Default::default()).with_file("a.txt", b"a"),
+        "",
+    );
+    let (s, _, _) = session_with(gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    let hanging = tokio::spawn({
+        let s = s.clone();
+        async move { s.select_site(0).await }
+    });
+    until_held(&gated).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("sub").join("deeper")).unwrap();
+    let top = timeout(PROMPTLY, navigate_local(&s, Some(tmp.path().to_path_buf())))
+        .await
+        .expect("listing a local folder waited for the cloud");
+    assert_eq!(names(&top.rows), ["sub"]);
+    let sub = timeout(PROMPTLY, s.open_local(0))
+        .await
+        .expect("open waited");
+    assert_eq!(sub.crumbs.last().map(String::as_str), Some("sub"));
+    timeout(PROMPTLY, s.open_local(0))
+        .await
+        .expect("open waited");
+    let crumb = sub.crumbs.len() - 1;
+    let back = timeout(PROMPTLY, s.local_crumb(crumb))
+        .await
+        .expect("a crumb waited");
+    assert_eq!(back.crumbs, sub.crumbs);
+    timeout(PROMPTLY, s.local_up()).await.expect("up waited");
+    s.sort_local(SortKey::Size, false);
+    let _ = s.local_view();
+
+    // The cloud listing is still out, and nothing it holds was needed.
+    assert_eq!(gated.waiting(), 1);
+    assert!(!hanging.is_finished());
+    hanging.abort();
+}
+
+/// Ruling P21 (2): the site list, saving a site and testing one do not wait for a cloud listing.
+#[tokio::test]
+async fn sites_can_be_saved_and_tested_while_a_cloud_listing_hangs() {
+    let gated = Gated::new(MockProvider::new(Default::default()), "");
+    let (s, _, factory) = session_with(Arc::new(
+        MockProvider::new(Default::default()).with_file("index.html", b"x"),
+    ));
+    factory.serve("hanging-zone", gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("hanging-zone", "sg", "pw"))
+        .await
+        .unwrap();
+    let hanging = tokio::spawn({
+        let s = s.clone();
+        async move { s.select_site(0).await }
+    });
+    until_held(&gated).await;
+
+    let saved = timeout(PROMPTLY, s.save_site(&valid("other-zone", "de", "pw")))
+        .await
+        .expect("saving a site waited for the cloud")
+        .unwrap();
+    assert!(s.sites().iter().any(|site| site.id == saved.id));
+    assert_eq!(s.site_items().len(), 2);
+    let tested = timeout(
+        PROMPTLY,
+        s.test_connection(&valid("other-zone", "de", "pw")),
+    )
+    .await
+    .expect("testing a site waited for the cloud");
+    assert!(tested.ok, "{}", tested.text);
+
+    assert_eq!(gated.waiting(), 1);
+    assert!(!hanging.is_finished());
+    hanging.abort();
+}
+
+/// Ruling P21 (3): a listing of a site the user has left is dropped when it finally arrives.
+#[tokio::test]
+async fn a_late_listing_from_a_site_the_user_left_is_dropped() {
+    let gated = Gated::new(
+        MockProvider::new(Default::default()).with_file("from-a.txt", b"a"),
+        "",
+    );
+    let (s, _, factory) = session_with(Arc::new(
+        MockProvider::new(Default::default()).with_file("from-b.txt", b"b"),
+    ));
+    factory.serve("zone-a", gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("zone-a", "sg", "pw")).await.unwrap();
+    s.save_site(&valid("zone-b", "de", "pw")).await.unwrap();
+
+    let late = tokio::spawn({
+        let s = s.clone();
+        async move { s.select_site(0).await }
+    });
+    until_held(&gated).await;
+    let b = timeout(PROMPTLY, s.select_site(1))
+        .await
+        .expect("opening another site waited for the held-back listing");
+    assert_eq!(names(&b.rows), ["from-b.txt"]);
+
+    // Site A's answer finally comes, and it is a failure: neither its rows nor its error nor its
+    // health may reach the pane or the sidebar.
+    gated.mock().fail_next(MockOp::List, ProviderError::Auth, 1);
+    gated.open();
+    let answer = timeout(PROMPTLY, late).await.unwrap().unwrap();
+    assert_eq!(answer, b, "the late answer reports the pane as it is");
+    assert_eq!(current_remote(&s), b);
+    assert_eq!(remote_entry_names(&s), ["from-b.txt"]);
+    assert!(s.site_items().iter().all(|site| site.healthy));
+}
+
+/// Ruling P21 (3): the same for a folder the user has left within the site.
+#[tokio::test]
+async fn a_late_listing_from_a_folder_the_user_left_is_dropped() {
+    let gated = Gated::new(
+        MockProvider::new(Default::default())
+            .with_file("fast/quick.txt", b"q")
+            .with_file("slow/late.txt", b"l"),
+        "slow",
+    );
+    let (s, _, _) = session_with(gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    let root = s.select_site(0).await;
+    assert_eq!(names(&root.rows), ["fast", "slow"]);
+
+    let late = tokio::spawn({
+        let s = s.clone();
+        async move { s.open_remote(1).await }
+    });
+    until_held(&gated).await;
+    let fast = timeout(PROMPTLY, s.open_remote(0))
+        .await
+        .expect("opening another folder waited for the held-back listing");
+    assert_eq!(fast.crumbs, ["testzone", "fast"]);
+
+    gated.open();
+    let answer = timeout(PROMPTLY, late).await.unwrap().unwrap();
+    assert_eq!(answer, fast);
+    assert_eq!(current_remote(&s).crumbs, ["testzone", "fast"]);
+    assert_eq!(remote_entry_names(&s), ["quick.txt"]);
 }
