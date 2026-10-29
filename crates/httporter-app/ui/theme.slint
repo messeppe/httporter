@@ -1,0 +1,73 @@
+// Design tokens, copied from docs/design/mockups/app.css (light and dark).
+// Alpha values are the CSS rgba() alphas rounded to the nearest 1/255.
+
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    // Accent. `accent` is for fills behind white text; `accent-text` is the accent used as text.
+    out property <color> accent: #0071e3;
+    out property <color> accent-text: dark ? #5aa9ff : #0066cc;
+    out property <color> on-accent: #ffffff;
+    out property <color> accent-soft: dark ? #0a84ff33 : #0071e31f;
+
+    // Status colours and their tinted chip backgrounds.
+    out property <color> red: dark ? #ff7a72 : #c4001a;
+    out property <color> red-soft: dark ? #ff453a29 : #d700151a;
+    out property <color> green: dark ? #4cd964 : #1d7a35;
+    out property <color> green-soft: dark ? #30d15829 : #248a3d1f;
+    out property <color> orange: dark ? #ffad33 : #b03000;
+    out property <color> orange-soft: dark ? #ff9f0a29 : #c934001a;
+    out property <color> purple: dark ? #d39cff : #7a3aa0;
+    out property <color> purple-soft: dark ? #bf5af22e : #8944ab1f;
+    out property <color> folder: dark ? #5aa9ff : #2f8fe8;
+
+    // Text.
+    out property <color> label: dark ? #f5f5f7 : #1d1d1f;
+    out property <color> label2: dark ? #a8a8ad : #5c5c62;
+    out property <color> label3: dark ? #6e6e73 : #8e8e93;
+
+    // Surfaces.
+    out property <color> win: dark ? #1b1b1d : #f2f2f5;
+    out property <color> chrome: dark ? #232325 : #f7f7f9;
+    out property <color> content: dark ? #1e1e20 : #ffffff;
+    out property <color> sidebar: dark ? #2a2a2d : #eaeaee;
+    out property <color> row-alt: dark ? #232326 : #f7f7f9;
+    out property <color> sheet: dark ? #2a2a2d : #ffffff;
+    out property <color> scrim: dark ? #00000080 : #1e1e2838;
+
+    // Lines, hover and selection.
+    out property <color> sep: dark ? #ffffff17 : #00000017;
+    out property <color> sep-strong: dark ? #ffffff29 : #00000029;
+    out property <color> hover: dark ? #ffffff0d : #0000000a;
+    out property <color> sel: #0071e3;
+    out property <color> sel-text: #ffffff;
+    out property <color> sel-quiet: dark ? #ffffff1a : #00000012;
+
+    // Controls.
+    out property <color> control: dark ? #3a3a3d : #ffffff;
+    out property <color> control-border: dark ? #ffffff1a : #00000021;
+    out property <color> field: dark ? #2c2c2f : #ffffff;
+    out property <color> chip: dark ? #ffffff14 : #0000000d;
+
+    // Type.
+    out property <string> font-family: "Inter";
+    out property <string> font-mono: "Cascadia Mono";
+    out property <length> font-body: 13px;
+    out property <length> font-small: 11px;
+    out property <length> font-title: 15px;
+    out property <int> weight-medium: 500;
+    out property <int> weight-semibold: 600;
+    out property <int> weight-bold: 700;
+
+    // Metrics. Capsule controls are fully rounded: use `self.height / 2` for their radius.
+    out property <length> row-height: 28px;
+    out property <length> sidebar-item-height: 28px;
+    out property <length> toolbar-height: 52px;
+    out property <length> statusbar-height: 28px;
+    out property <length> radius-sm: 8px;
+    out property <length> radius-md: 12px;
+    out property <length> radius-lg: 14px;
+    out property <length> radius-xl: 18px;
+}

@@ -1,0 +1,83 @@
+// Capsule-shaped buttons from the mockup: `.tbtn` (icon only) and `.btn` (label, optional icon).
+
+import { Theme } from "../theme.slint";
+import { VCenter } from "layout.slint";
+
+// 28 px icon button, transparent until hovered (mockup `.tbtn`).
+export component ToolButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked();
+
+    width: 32px;
+    height: 28px;
+    border-radius: self.height / 2;
+    background: root.active ? Theme.sel-quiet : (area.has-hover && root.enabled ? Theme.hover : transparent);
+    opacity: root.enabled ? 1 : 0.4;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+
+    Image {
+        source: root.icon;
+        colorize: Theme.label;
+        width: 16px;
+        height: 16px;
+    }
+
+    area := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// 28 px labelled button (mockup `.btn`); `primary` fills with the accent colour.
+export component CapsuleButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 28px;
+    border-radius: self.height / 2;
+    background: root.primary ? Theme.accent : Theme.control;
+    border-width: 0.5px;
+    border-color: root.primary ? transparent : Theme.control-border;
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 6px;
+        alignment: center;
+
+        if root.icon.width > 0: VCenter {
+            Image {
+                source: root.icon;
+                colorize: root.primary ? Theme.on-accent : Theme.label;
+                width: 16px;
+                height: 16px;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.primary ? Theme.on-accent : Theme.label;
+            font-size: Theme.font-body;
+            font-weight: root.primary ? Theme.weight-semibold : Theme.weight-medium;
+            vertical-alignment: center;
+        }
+    }
+
+    area := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}

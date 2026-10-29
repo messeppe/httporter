@@ -1,0 +1,126 @@
+// Left sidebar (mockup `.sidebar`): the site list and the Add Site / Settings footer.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { SiteItem } from "../types.slint";
+import { MonoTile, StatusDot } from "chips.slint";
+import { CapsuleButton, ToolButton } from "buttons.slint";
+import { VCenter } from "layout.slint";
+
+// Section heading (mockup `.sb-sec`: padding 12px 8px 4px).
+component SectionTitle inherits Rectangle {
+    in property <string> text;
+
+    height: 31px;
+
+    Text {
+        x: 8px;
+        y: 12px;
+        text: root.text;
+        color: Theme.label2;
+        font-size: Theme.font-small;
+        font-weight: Theme.weight-semibold;
+    }
+}
+
+// One site: provider tile, name over subtitle, health dot (mockup `.sb-item` with `.sb-two`).
+component SiteRow inherits Rectangle {
+    in property <SiteItem> site;
+    in property <bool> selected;
+    callback clicked();
+
+    min-height: Theme.sidebar-item-height;
+    border-radius: Theme.radius-sm;
+    background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
+    accessible-role: list-item;
+    accessible-label: root.site.name + ", " + root.site.subtitle;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        VCenter { MonoTile { mono: root.site.mono; } }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.site.name;
+                color: Theme.label;
+                font-size: Theme.font-body;
+                font-weight: root.selected ? Theme.weight-medium : 400;
+                overflow: elide;
+            }
+            Text {
+                text: root.site.subtitle;
+                color: Theme.label2;
+                font-size: Theme.font-small;
+                overflow: elide;
+            }
+        }
+        VCenter { StatusDot { tint: root.site.healthy ? Theme.green : Theme.label3; } }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    in property <[SiteItem]> sites;
+    in property <int> selected-site: -1;
+    callback site-selected(int);
+    callback add-site();
+    callback open-settings();
+
+    background: Theme.sidebar;
+    border-radius: Theme.radius-lg;
+    border-width: 0.5px;
+    border-color: Theme.sep;
+
+    VerticalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 6px;
+        padding-bottom: 8px;
+
+        SectionTitle { text: "Sites"; }
+
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                for site[i] in root.sites: SiteRow {
+                    site: site;
+                    selected: i == root.selected-site;
+                    clicked => { root.site-selected(i); }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            padding-top: 8px;
+            spacing: 6px;
+
+            VCenter {
+                CapsuleButton {
+                    text: "Add Site";
+                    icon: Icons.plus;
+                    clicked => { root.add-site(); }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            VCenter {
+                ToolButton {
+                    icon: Icons.gear;
+                    label: "Settings";
+                    clicked => { root.open-settings(); }
+                }
+            }
+        }
+    }
+}
