@@ -40,6 +40,25 @@ pub fn sort_rows<T: Sortable>(rows: &mut [T], key: SortKey, ascending: bool) {
 
 /// Case-insensitive, with the exact spelling as the last resort so the order is total.
 fn compare_names(a: &str, b: &str) -> Ordering {
+    // ASCII fast path, with the same result as the general case below. Most file names are ASCII
+    // and a listing of tens of thousands makes this the hottest line of a sort, so it skips the
+    // Unicode case mapping for as long as both names stay ASCII.
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    for i in 0..x.len().min(y.len()) {
+        let (p, q) = (x[i], y[i]);
+        if !p.is_ascii() || !q.is_ascii() {
+            return compare_names_unicode(a, b);
+        }
+        let (p, q) = (p.to_ascii_lowercase(), q.to_ascii_lowercase());
+        if p != q {
+            return p.cmp(&q);
+        }
+    }
+    // One name's lowercase form is a prefix of the other's, so the shorter comes first.
+    x.len().cmp(&y.len()).then_with(|| a.cmp(b))
+}
+
+fn compare_names_unicode(a: &str, b: &str) -> Ordering {
     fn lower(s: &str) -> impl Iterator<Item = char> + '_ {
         s.chars().flat_map(char::to_lowercase)
     }
@@ -164,5 +183,51 @@ mod tests {
         assert_eq!(names(&rows), ["unknown.txt", "old.txt", "new.txt"]);
         sort_rows(&mut rows, SortKey::Modified, false);
         assert_eq!(names(&rows), ["new.txt", "old.txt", "unknown.txt"]);
+    }
+
+    #[test]
+    fn the_ascii_fast_path_orders_names_like_the_unicode_path() {
+        let names = [
+            "",
+            "a",
+            "A",
+            "ab",
+            "aB",
+            "Ab",
+            "abc",
+            "b",
+            "B.txt",
+            "b.txt",
+            "index.html",
+            "Index.html",
+            "file-1",
+            "file-10",
+            "file-2",
+            "FILE-2",
+            "a b",
+            "a-b",
+            "a_b",
+            "a\u{e9}",
+            "a\u{c9}",
+            "ae",
+            "\u{e9}a",
+            "k",
+            "K",
+            "kk",
+            // The Kelvin sign lowercases to an ASCII "k", so it must not take the fast path.
+            "\u{212a}",
+            "k\u{212a}",
+            "\u{3a3}",
+            "\u{3c3}",
+        ];
+        for a in names {
+            for b in names {
+                assert_eq!(
+                    compare_names(a, b),
+                    compare_names_unicode(a, b),
+                    "{a:?} vs {b:?}"
+                );
+            }
+        }
     }
 }

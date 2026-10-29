@@ -1733,6 +1733,7 @@ name = "httporter-app"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "httporter-core",
  "i-slint-backend-testing",
  "slint",
  "slint-build",

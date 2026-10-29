@@ -31,6 +31,8 @@ impl Sortable for LocalEntry {
     }
 }
 
+// Not read until the session controller (Task 15) fills the This PC pane.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct LocalListing {
     pub entries: Vec<LocalEntry>,
@@ -41,6 +43,8 @@ pub struct LocalListing {
 /// Lists `dir` (unsorted). Failing to open `dir` itself is an error; an entry whose metadata cannot
 /// be read is counted in `skipped`. A link to a folder (a junction or symlink) is listed as a folder;
 /// a link whose target cannot be read is skipped.
+// Not called until the session controller (Task 15) fills the This PC pane.
+#[allow(dead_code)]
 pub fn list_local(dir: &Path) -> io::Result<LocalListing> {
     let mut entries = Vec::new();
     let mut skipped = 0;
@@ -77,6 +81,8 @@ fn read_entry(entry: &DirEntry) -> io::Result<LocalEntry> {
 }
 
 /// The PC's drive roots (`C:\`, `D:\`, ...), in letter order.
+// Not called until the session controller (Task 15) fills the This PC pane.
+#[allow(dead_code)]
 pub fn list_drives() -> Vec<PathBuf> {
     // SAFETY: `GetLogicalDrives` takes no arguments and only reads system state.
     let mask = unsafe { GetLogicalDrives() };

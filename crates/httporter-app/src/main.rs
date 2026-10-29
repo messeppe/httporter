@@ -3,13 +3,14 @@
 
 slint::include_modules!();
 
-// Nothing consumes these helpers until the file panes are wired up in a later task.
-#[allow(dead_code)]
 mod format;
-#[allow(dead_code)]
 mod local_fs;
-#[allow(dead_code)]
 mod sort;
+// Nothing in the running app builds pane rows until the session controller (Task 15) wires the
+// panes to the local disk and the cloud site. The allow also keeps the modules above, which only
+// the view model uses, from being reported as unused.
+#[allow(dead_code)]
+mod viewmodel;
 
 #[cfg(test)]
 mod keyboard_tests;
