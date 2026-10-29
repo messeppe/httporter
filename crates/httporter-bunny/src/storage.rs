@@ -50,6 +50,10 @@ const RETRY_AFTER_MAX: Duration = Duration::from_secs(300);
 const USER_AGENT: &str = "HTTPorter/0.1";
 /// The size of the pieces an upload body is fed to the connection in.
 const BODY_CHUNK: usize = 64 * 1024;
+/// How much of an error response body is ever read.
+const ERROR_BODY_MAX: usize = 4 * 1024;
+/// How much of it can end up in an error message.
+const ERROR_SNIPPET_MAX: usize = 200;
 
 /// Directory listings the service tolerates at once before it starts
 /// answering "busy".
@@ -310,13 +314,24 @@ impl BunnyStorage {
         if matches!(status.as_u16(), 200 | 201) {
             return Ok(());
         }
-        let op = Op::Upload {
-            with_checksum: opts.sha256.is_some(),
-        };
+        let with_checksum = opts.sha256.is_some();
+        if status == StatusCode::BAD_REQUEST {
+            // A 400 can be an overloaded server or a rejected upload, and only
+            // the body tells them apart.
+            let body = tokio::time::timeout(
+                self.transfer_idle_timeout,
+                read_capped(response, ERROR_BODY_MAX),
+            )
+            .await
+            .map_err(|_| stall_error("upload", self.transfer_idle_timeout))?
+            .map_err(network_error)?;
+            return Err(map_upload_400(&body, with_checksum));
+        }
+        let retry_after = parse_retry_after(response.headers());
         Err(map_status(
             status,
-            parse_retry_after(response.headers()),
-            op,
+            retry_after,
+            Op::Upload { with_checksum },
         ))
     }
 
@@ -459,6 +474,48 @@ fn map_status(status: StatusCode, retry_after: Option<Duration>, op: Op) -> Prov
         500..=599 => ProviderError::Transient(format!("server error ({status})")),
         _ => ProviderError::Permanent(format!("unexpected response from server ({status})")),
     }
+}
+
+/// What a 400 answering an upload means. Bunny says "Unable to process
+/// request" when it is overloaded, which is worth another try; any other 400
+/// rejected the upload itself.
+fn map_upload_400(body: &[u8], with_checksum: bool) -> ProviderError {
+    let body = String::from_utf8_lossy(body);
+    if body
+        .to_ascii_lowercase()
+        .contains("unable to process request")
+    {
+        return ProviderError::Transient("server busy (400)".into());
+    }
+    match map_status(StatusCode::BAD_REQUEST, None, Op::Upload { with_checksum }) {
+        // Without a checksum there is nothing to blame, so say what the
+        // server said. It is server text, never anything we sent.
+        ProviderError::Permanent(message) => {
+            let words = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            let snippet: String = words.chars().take(ERROR_SNIPPET_MAX).collect();
+            if snippet.is_empty() {
+                ProviderError::Permanent(message)
+            } else if snippet.len() < words.len() {
+                ProviderError::Permanent(format!("{message}: {snippet}..."))
+            } else {
+                ProviderError::Permanent(format!("{message}: {snippet}"))
+            }
+        }
+        other => other,
+    }
+}
+
+/// Up to `max` bytes of a response body; the rest is not read.
+async fn read_capped(mut response: reqwest::Response, max: usize) -> reqwest::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while body.len() < max {
+        let Some(chunk) = response.chunk().await? else {
+            break;
+        };
+        let room = max - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+    }
+    Ok(body)
 }
 
 /// `Retry-After` as a number of seconds, at most [`RETRY_AFTER_MAX`]; the
@@ -761,6 +818,58 @@ mod tests {
                 "{op:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_upload_400_is_busy_only_when_the_server_says_so() {
+        let busy = ProviderError::Transient("server busy (400)".into());
+        for with_checksum in [true, false] {
+            for body in [
+                "Unable to process request",
+                "unable to process request.",
+                r#"{"HttpCode":400,"Message":"UNABLE TO PROCESS REQUEST"}"#,
+            ] {
+                assert_eq!(
+                    map_upload_400(body.as_bytes(), with_checksum),
+                    busy,
+                    "{body}"
+                );
+            }
+        }
+        assert!(busy.is_retryable());
+    }
+
+    #[test]
+    fn any_other_upload_400_blames_the_checksum_when_one_was_sent() {
+        for body in ["", "Checksum mismatch", "Bad thing", "\u{0}\u{ff}binary"] {
+            assert_eq!(
+                map_upload_400(body.as_bytes(), true),
+                ProviderError::ChecksumMismatch,
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unchecksummed_upload_400_quotes_a_short_trimmed_snippet() {
+        let message = |body: &str| match map_upload_400(body.as_bytes(), false) {
+            ProviderError::Permanent(message) => message,
+            other => panic!("expected Permanent, got {other:?}"),
+        };
+        let prefix = "request rejected by server (400 Bad Request)";
+        assert_eq!(message(""), prefix);
+        assert_eq!(message(" \n\t "), prefix);
+        assert_eq!(message("Bad thing"), format!("{prefix}: Bad thing"));
+        assert_eq!(
+            message("  Bad\r\n  thing\n"),
+            format!("{prefix}: Bad thing"),
+            "trimmed, with runs of whitespace collapsed"
+        );
+        let long = message(&"x".repeat(5000));
+        assert_eq!(
+            long,
+            format!("{prefix}: {}...", "x".repeat(ERROR_SNIPPET_MAX))
+        );
     }
 
     #[test]

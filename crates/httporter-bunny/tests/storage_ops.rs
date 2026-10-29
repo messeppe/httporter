@@ -544,3 +544,103 @@ async fn an_empty_file_uploads_with_a_zero_length_body() {
         .await
         .unwrap();
 }
+
+fn checksummed() -> UploadOptions {
+    UploadOptions {
+        content_type: "text/plain".into(),
+        sha256: Some(Sha256::digest(b"hello").into()),
+    }
+}
+
+#[tokio::test]
+async fn a_busy_400_on_a_checksummed_upload_is_retried() {
+    let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("Unable to process request"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&s)
+        .await;
+    storage(&s)
+        .upload(
+            &rp("a.txt"),
+            UploadSource::Bytes("hello".into()),
+            &checksummed(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(s.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn any_other_400_on_a_checksummed_upload_is_a_single_checksum_mismatch() {
+    let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("The checksum does not match"))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let err = storage(&s)
+        .upload(
+            &rp("a.txt"),
+            UploadSource::Bytes("hello".into()),
+            &checksummed(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, ProviderError::ChecksumMismatch);
+    assert_eq!(s.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_400_on_an_unchecksummed_upload_is_permanent_and_quotes_the_server() {
+    let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("Bad thing"))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let err = storage(&s)
+        .upload(
+            &rp("a.txt"),
+            UploadSource::Bytes("hello".into()),
+            &text_plain(),
+        )
+        .await
+        .unwrap_err();
+    match err {
+        ProviderError::Permanent(m) => {
+            assert!(m.contains("Bad thing"), "{m}");
+            assert!(!m.contains("secret"), "the access key must not leak: {m}");
+        }
+        other => panic!("expected Permanent, got {other:?}"),
+    }
+    assert_eq!(s.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn only_a_short_snippet_of_a_huge_400_body_reaches_the_error() {
+    let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("x".repeat(10 * 1024)))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let err = storage(&s)
+        .upload(
+            &rp("a.txt"),
+            UploadSource::Bytes("hello".into()),
+            &text_plain(),
+        )
+        .await
+        .unwrap_err();
+    match err {
+        ProviderError::Permanent(m) => assert!(m.len() < 400, "{} bytes", m.len()),
+        other => panic!("expected Permanent, got {other:?}"),
+    }
+}
