@@ -1,0 +1,11 @@
+[package]
+name = "httporter-bunny"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono = "0.4.45"
+httporter-core = { version = "0.1.0", path = "../httporter-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
