@@ -1,0 +1,19 @@
+// Data shapes shared by the window, its components and (via app.slint) the Rust side.
+
+export enum FileKind { folder, code, image, doc }
+
+export struct FileRow {
+    name: string,
+    kind: FileKind,
+    size: string,
+    modified: string,
+    folder: bool,
+}
+
+export struct SiteItem {
+    id: string,
+    name: string,
+    subtitle: string,
+    mono: string,
+    healthy: bool,
+}

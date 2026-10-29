@@ -1,0 +1,111 @@
+// Toolbar row under the standard Windows title bar (mockup `.titlebar`, without the caption buttons).
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { ToolButton, CapsuleButton } from "buttons.slint";
+import { ConnectionPill } from "chips.slint";
+import { VCenter } from "layout.slint";
+
+export component Toolbar inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> connection-text;
+    in property <bool> connection-ok;
+    in property <bool> can-go-back: false;
+    in property <bool> can-go-forward: false;
+    in property <bool> can-publish: false;
+    callback toggle-sidebar();
+    callback go-back();
+    callback go-forward();
+    callback publish();
+
+    height: Theme.toolbar-height;
+    background: Theme.chrome;
+
+    // Bottom hairline (mockup: border-bottom).
+    Rectangle {
+        y: parent.height - self.height;
+        width: parent.width;
+        height: 1px;
+        background: Theme.sep;
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 10px;
+
+        VCenter {
+            ToolButton {
+                icon: Icons.sidebar;
+                label: @tr("Toggle sidebar");
+                clicked => { root.toggle-sidebar(); }
+            }
+        }
+
+        // Back / forward capsule group (mockup `.tgroup`).
+        VCenter {
+            Rectangle {
+                background: Theme.control;
+                border-radius: self.height / 2;
+                border-width: 0.5px;
+                border-color: Theme.control-border;
+                height: 32px;
+
+                HorizontalLayout {
+                    padding: 2px;
+                    spacing: 2px;
+                    ToolButton {
+                        icon: Icons.chev-l;
+                        label: @tr("Back");
+                        enabled: root.can-go-back;
+                        clicked => { root.go-back(); }
+                    }
+                    ToolButton {
+                        icon: Icons.chev-r;
+                        label: @tr("Forward");
+                        enabled: root.can-go-forward;
+                        clicked => { root.go-forward(); }
+                    }
+                }
+            }
+        }
+
+        // Title over subtitle (mockup `.wtitle`).
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.title;
+                color: Theme.label;
+                font-size: Theme.font-title;
+                font-weight: Theme.weight-semibold;
+                overflow: elide;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                color: Theme.label2;
+                font-size: Theme.font-small;
+                overflow: elide;
+            }
+        }
+
+        if root.connection-text != "": VCenter {
+            ConnectionPill {
+                text: root.connection-text;
+                ok: root.connection-ok;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        VCenter {
+            CapsuleButton {
+                text: @tr("Publish");
+                icon: Icons.send;
+                primary: true;
+                enabled: root.can-publish;
+                clicked => { root.publish(); }
+            }
+        }
+    }
+}

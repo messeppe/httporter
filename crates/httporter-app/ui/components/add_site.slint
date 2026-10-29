@@ -1,0 +1,950 @@
+// Add Site sheet (mockup `Main.dc.html`, overlay `addsite`): the window dimmed by a scrim with a sheet
+// on top. Bunny Storage is the only provider that works in this build; the S3 tiles and the
+// "Bunny account key" sign-in are shown disabled and marked "Coming soon".
+//
+// The sheet is modal. While it is open the scrim swallows the pointer, so nothing behind it
+// reacts, and the keyboard focus stays inside it: Tab and Shift+Tab wrap around its controls.
+// The focus starts in the Storage zone field, Escape cancels, and Return in a text field presses
+// the default button, Add Site, unless it is disabled. Nothing is validated here: the sheet reports
+// what was typed and the app answers with field errors, a test result or by closing the sheet.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { MonoTile } from "chips.slint";
+import { CapsuleButton } from "buttons.slint";
+import { VCenter } from "layout.slint";
+
+// Single-line text field (mockup `.input`: 28 px, 7 px corners; the outline is a full pixel in
+// `field-border` so that the field can be seen). It shows the error border when `error` is set;
+// the message itself is drawn by the caller under the field. A password field shows dots,
+// assistive technology is told it has no readable value, and it cannot be copied or cut.
+component Field inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <string> label;
+    in property <string> error;
+    in property <InputType> input-type: InputType.text;
+    out property <bool> has-focus: input.has-focus;
+    callback edited();
+    // Return was pressed (not auto-repeat).
+    callback accepted();
+
+    height: 28px;
+    forward-focus: input;
+    border-radius: 7px;
+    background: Theme.field;
+    border-width: 1px;
+    border-color: root.error != "" ? Theme.red : Theme.field-border;
+
+    // Where the text may be drawn: the 9 px inside the border, clipped so that a long value
+    // scrolls instead of spilling out.
+    Rectangle {
+        x: 9px;
+        width: parent.width - 18px;
+        clip: true;
+
+        Text {
+            width: 100%;
+            height: 100%;
+            text: root.placeholder;
+            visible: input.text == "" && input.preedit-text == "";
+            color: Theme.label2;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            // The input carries the placeholder for assistive technology.
+            accessible-role: none;
+        }
+
+        ContextMenuArea {
+            Menu {
+                MenuItem {
+                    title: @tr("Cut");
+                    enabled: input.text != "" && root.input-type != InputType.password;
+                    activated => { input.cut(); }
+                }
+                MenuItem {
+                    title: @tr("Copy");
+                    enabled: input.text != "" && root.input-type != InputType.password;
+                    activated => { input.copy(); }
+                }
+                MenuItem {
+                    title: @tr("Paste");
+                    activated => { input.paste(); }
+                }
+                MenuItem {
+                    title: @tr("Select All");
+                    enabled: input.text != "";
+                    activated => { input.select-all(); }
+                }
+            }
+
+            input := TextInput {
+                property <length> scroll-x;
+
+                x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll-x));
+                width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                single-line: true;
+                input-type: root.input-type;
+                vertical-alignment: center;
+                color: Theme.label;
+                font-size: Theme.font-body;
+                selection-background-color: Theme.accent;
+                selection-foreground-color: Theme.on-accent;
+                accessible-label: root.label;
+                accessible-description: root.error;
+                accessible-placeholder-text: root.placeholder;
+                accessible-value: root.input-type == InputType.password ? "" : self.text;
+
+                cursor-position-changed(position) => {
+                    if (position.x + self.scroll-x < 0px) {
+                        self.scroll-x = -position.x;
+                    } else if (position.x + self.scroll-x > parent.width - self.text-cursor-width) {
+                        self.scroll-x = parent.width - position.x - self.text-cursor-width;
+                    }
+                }
+                edited => { root.edited(); }
+                accepted => { root.accepted(); }
+                key-pressed(event) => {
+                    // A held Return (for example the one that opened the sheet) must not press
+                    // the default button over and over.
+                    if (event.text == Key.Return && event.repeat) {
+                        return accept;
+                    }
+                    // What is typed into a password field must not leave through the clipboard:
+                    // copy and cut (Ctrl+C, Ctrl+X, Ctrl+Insert, Shift+Delete) do nothing there.
+                    if (root.input-type == InputType.password && ((event.modifiers.control && (event.text == "c" || event.text == "C" || event.text == "x" || event.text == "X" || event.text == Key.Insert)) || (event.modifiers.shift && event.text == Key.Delete))) {
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside the field like the buttons' ring.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+}
+
+// One line of red text under a field, with a warning mark so that colour is not the only cue.
+// An assertive live region, so assistive technology announces a new error at once.
+component ErrorLine inherits Rectangle {
+    in property <string> text;
+
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    accessible-live-region: assertive;
+
+    HorizontalLayout {
+        spacing: 4px;
+
+        VCenter {
+            Image {
+                source: Icons.warn;
+                colorize: Theme.red;
+                width: 12px;
+                height: 12px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.red;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+// A form row (mockup `.form`): the label to the left in a right aligned column (120 px; the
+// mockup's 150 px leaves the password hint too little room for one line), then the field and
+// whatever belongs under it.
+component FormRow inherits HorizontalLayout {
+    in property <string> label;
+
+    spacing: 14px;
+
+    Text {
+        width: 120px;
+        height: 28px;
+        text: root.label;
+        color: Theme.label;
+        font-size: Theme.font-body;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 4px;
+        @children
+    }
+}
+
+// The rows of the region list: the current region has the selection colour, the one under the
+// pointer a hover tint. Keeps the current row in view when it changes.
+component RegionList inherits Rectangle {
+    in property <[string]> model;
+    in property <int> current-index;
+    in property <length> item-height: 28px;
+    callback chosen(int);
+
+    // Scrolls the list just far enough to show the current row.
+    function reveal() {
+        if (root.current-index * root.item-height < -list.content-y) {
+            list.content-y = -root.current-index * root.item-height;
+        } else if ((root.current-index + 1) * root.item-height > -list.content-y + list.visible-height) {
+            list.content-y = list.visible-height - (root.current-index + 1) * root.item-height;
+        }
+    }
+
+    changed current-index => { root.reveal(); }
+
+    list := ScrollView {
+        VerticalLayout {
+            alignment: start;
+            for name[index] in root.model: Rectangle {
+                height: root.item-height;
+                border-radius: 6px;
+                background: index == root.current-index ? Theme.sel : (area.has-hover ? Theme.hover : transparent);
+                accessible-role: list-item;
+                accessible-label: name;
+                accessible-item-selected: index == root.current-index;
+                accessible-action-default => { root.chosen(index); }
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 6px;
+
+                    VCenter {
+                        Image {
+                            source: Icons.check;
+                            colorize: Theme.sel-text;
+                            width: 12px;
+                            height: 12px;
+                            opacity: index == root.current-index ? 1 : 0;
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        text: name;
+                        color: index == root.current-index ? Theme.sel-text : Theme.label;
+                        font-size: Theme.font-body;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        accessible-role: none;
+                    }
+                }
+
+                area := TouchArea {
+                    clicked => { root.chosen(index); }
+                }
+            }
+        }
+    }
+}
+
+// Drop-down list of the regions (mockup `select.input`). Closed, it shows the current region and
+// Up and Down change it; Return or Space (or a click) opens the list. In the list Up, Down, Home
+// and End change the region, Return or Space close the list, and so does Escape, which then
+// leaves the sheet open.
+component RegionPicker inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: 0;
+    in property <string> label;
+    in property <string> error;
+    out property <bool> has-focus: key-focus.has-focus || popup.is-open;
+    // The user chose another region.
+    callback selected(int);
+
+    property <string> current-name: root.current-index >= 0 && root.current-index < root.model.length ? root.model[root.current-index] : "";
+
+    function choose(index: int) {
+        if (index >= 0 && index < root.model.length && index != root.current-index) {
+            root.current-index = index;
+            root.selected(index);
+        }
+    }
+
+    function open-list() {
+        if (root.model.length > 0 && !popup.is-open) {
+            popup.show();
+        }
+    }
+
+    height: 28px;
+    forward-focus: key-focus;
+    border-radius: 7px;
+    background: Theme.field;
+    border-width: 1px;
+    border-color: root.error != "" ? Theme.red : Theme.field-border;
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.current-name;
+    accessible-description: root.error;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+    accessible-action-expand => { root.open-list(); }
+    accessible-action-default => { root.open-list(); }
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 6px;
+        spacing: 4px;
+
+        Text {
+            text: root.current-name;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            accessible-role: none;
+        }
+        VCenter {
+            Image {
+                source: Icons.sort-down;
+                colorize: Theme.label2;
+                width: 16px;
+                height: 16px;
+                accessible-role: none;
+            }
+        }
+    }
+
+    // Keyboard focus ring, like the text fields'.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it; the click handler below does.
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.DownArrow) {
+                root.choose(root.current-index + 1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.choose(root.current-index - 1);
+                return accept;
+            }
+            if ((event.text == Key.Return || event.text == Key.Space) && !event.repeat) {
+                root.open-list();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            key-focus.focus();
+            root.open-list();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        width: root.width;
+        height: min(root.model.length, 8) * 28px + 8px;
+        close-policy: close-on-click-outside;
+        forward-focus: list-scope;
+
+        Rectangle {
+            background: Theme.sheet;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.sep-strong;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.shadow-sheet;
+
+            list-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape || ((event.text == Key.Return || event.text == Key.Space) && !event.repeat)) {
+                        popup.close();
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        root.choose(root.current-index + 1);
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.choose(root.current-index - 1);
+                        return accept;
+                    }
+                    if (event.text == Key.Home) {
+                        root.choose(0);
+                        return accept;
+                    }
+                    if (event.text == Key.End) {
+                        root.choose(root.model.length - 1);
+                        return accept;
+                    }
+                    return reject;
+                }
+
+                RegionList {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    model: root.model;
+                    current-index: root.current-index;
+                    chosen(index) => {
+                        root.choose(index);
+                        popup.close();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A provider choice (mockup: the `group` buttons in the 4 x 2 grid). Only an available one can
+// be selected; the others say "Coming soon" where the kind of storage would be.
+component ProviderTile inherits Rectangle {
+    in property <string> name;
+    in property <string> kind;
+    in property <string> mono;
+    in property <color> tint;
+    in property <bool> available: false;
+    in property <bool> selected: false;
+
+    // The four tiles of a row share its width equally, whatever their texts.
+    horizontal-stretch: 1;
+    preferred-width: 0px;
+    min-width: 0px;
+    height: 44px;
+    border-radius: Theme.radius-md;
+    background: root.available ? Theme.content : Theme.chip;
+    border-width: root.selected ? 2px : 0.5px;
+    border-color: root.selected ? Theme.accent : Theme.sep-strong;
+    accessible-role: radio-button;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    accessible-enabled: root.available;
+    accessible-label: root.available ? @tr("{}, {}", root.name, root.kind) : @tr("{}, Coming soon", root.name);
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        VCenter {
+            MonoTile {
+                mono: root.mono;
+                tint: root.tint;
+                opacity: root.available ? 1 : 0.5;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.name;
+                color: root.available ? Theme.label : Theme.label2;
+                font-size: Theme.font-body;
+                font-weight: Theme.weight-semibold;
+                overflow: elide;
+            }
+            Text {
+                text: root.available ? root.kind : @tr("Coming soon");
+                color: Theme.label2;
+                font-size: Theme.font-small;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// One option of the "Sign in with" segmented control (mockup `.seg`).
+component Segment inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected: false;
+    in property <bool> available: true;
+
+    height: 24px;
+    border-radius: 6px;
+    background: root.selected ? Theme.control : transparent;
+    border-width: root.selected ? 0.5px : 0px;
+    border-color: Theme.control-border;
+    accessible-role: radio-button;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    accessible-enabled: root.available;
+    accessible-label: root.available ? root.text : @tr("{}, Coming soon", root.text);
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+
+        Text {
+            text: root.text;
+            color: root.available ? Theme.label : Theme.label3;
+            font-size: Theme.font-body;
+            font-weight: root.selected ? Theme.weight-semibold : 400;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The outcome of the last connection test, or "Connecting…" while one is running (mockup: the
+// green box under the form). It is a live region, so assistive technology announces it.
+component ResultBox inherits Rectangle {
+    in property <string> text;
+    in property <bool> ok;
+    in property <bool> busy;
+
+    background: root.busy ? Theme.chip : (root.ok ? Theme.green-soft : Theme.red-soft);
+    border-radius: Theme.radius-md;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.busy ? @tr("Connecting…") : root.text;
+    accessible-live-region: polite;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 12px;
+
+        VCenter {
+            Image {
+                source: root.busy ? Icons.refresh : (root.ok ? Icons.check : Icons.warn);
+                colorize: root.busy ? Theme.label2 : (root.ok ? Theme.green : Theme.red);
+                width: 20px;
+                height: 20px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.busy ? @tr("Connecting…") : root.text;
+            color: root.busy ? Theme.label2 : (root.ok ? Theme.green : Theme.red);
+            font-size: Theme.font-body;
+            font-weight: Theme.weight-semibold;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+export component AddSiteSheet inherits Rectangle {
+    // Names of the regions to pick from, in the order the app maps them to region codes.
+    in property <[string]> region-names;
+    // `https://{host}/{zone}/`, worked out by the app from the zone and region reported by `changed`.
+    in property <string> endpoint;
+    // Outcome of the last test. Cleared here when the zone, region or password is edited, since
+    // it then describes something else.
+    in-out property <string> result;
+    in property <bool> result-ok;
+    // A connection attempt is running: testing and adding are off, cancelling is not.
+    in property <bool> busy;
+    // Messages from the app's validation, each shown under its field and cleared when the field
+    // is edited.
+    in-out property <string> zone-error;
+    in-out property <string> region-error;
+    in-out property <string> password-error;
+    // Counts the times the app showed an error: each one moves the focus to the first field that
+    // has a message, so that the user lands where the problem is (and hears it).
+    in property <int> error-serial;
+
+    // The zone or region changed, so the endpoint shown has to be worked out again.
+    callback changed(string /* zone */, int /* region */);
+    // Arguments of `test` and `save`: site name, zone, region index, password.
+    callback test(string, string, int, string);
+    callback save(string, string, int, string);
+    callback cancel();
+
+    background: Theme.scrim;
+
+    // The sheet's controls, in Tab order.
+    property <bool> on-last-stop: add-button.has-focus || (root.busy && cancel-button.has-focus);
+
+    function submit() {
+        if (!root.busy) {
+            root.save(name-field.text, zone-field.text, region-box.current-index, password-field.text);
+        }
+    }
+
+    changed error-serial => {
+        if (root.zone-error != "") {
+            zone-field.focus();
+        } else if (root.region-error != "") {
+            region-box.focus();
+        } else if (root.password-error != "") {
+            password-field.focus();
+        }
+    }
+
+    function focus-last-stop() {
+        if (root.busy) {
+            cancel-button.focus();
+        } else {
+            add-button.focus();
+        }
+    }
+
+    // A sheet that opens is a fresh one: no messages left over from the last time, the focus in
+    // the first field, and the app asked for the endpoint of the starting zone and region.
+    init => {
+        root.zone-error = "";
+        root.region-error = "";
+        root.password-error = "";
+        root.result = "";
+        zone-field.focus();
+        root.changed(zone-field.text, region-box.current-index);
+    }
+
+    // Swallows the pointer: nothing behind the sheet sees a click, hover or scroll.
+    TouchArea {
+        scroll-event(event) => { accept }
+    }
+
+    // Keeps the keyboard inside the sheet. It is not a Tab stop itself; it takes the focus when
+    // blank space on the sheet is clicked.
+    trap := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Tab && !event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && root.on-last-stop) {
+                zone-field.focus();
+                return accept;
+            }
+            if ((event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && (zone-field.has-focus || trap.has-focus)) {
+                root.focus-last-stop();
+                return accept;
+            }
+            return reject;
+        }
+
+        sheet := Rectangle {
+            width: min(760px, parent.width - 32px);
+            height: content.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: max(12px, min(64px, parent.height - self.height - 12px));
+            background: Theme.sheet;
+            border-radius: Theme.radius-xl;
+            border-width: 0.5px;
+            border-color: Theme.sep-strong;
+            drop-shadow-blur: 64px;
+            drop-shadow-offset-y: 24px;
+            drop-shadow-color: Theme.shadow-sheet;
+            clip: true;
+            accessible-role: form;
+            accessible-label: @tr("Add Site");
+
+            content := VerticalLayout {
+                // Header: app icon, title and what the sheet is for.
+                HorizontalLayout {
+                    padding-left: 22px;
+                    padding-right: 22px;
+                    padding-top: 20px;
+                    padding-bottom: 12px;
+                    spacing: 14px;
+
+                    Rectangle {
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 11px;
+                        background: @linear-gradient(160deg, Theme.app-icon-top, Theme.app-icon-bottom);
+
+                        Image {
+                            source: Icons.globe;
+                            colorize: Theme.on-accent;
+                            width: 26px;
+                            height: 26px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+
+                        Text {
+                            text: @tr("Add Site");
+                            color: Theme.label;
+                            font-size: 17px;
+                            font-weight: Theme.weight-semibold;
+                        }
+                        Text {
+                            text: @tr("Connect to cloud storage over HTTPS. Passwords and keys are stored in Windows Credential Manager, never in plain files.");
+                            color: Theme.label2;
+                            font-size: Theme.font-body;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Body: provider tiles, then the form, then the test result.
+                VerticalLayout {
+                    padding-left: 22px;
+                    padding-right: 22px;
+                    padding-bottom: 12px;
+                    spacing: 12px;
+
+                    VerticalLayout {
+                        spacing: 8px;
+                        accessible-role: radio-group;
+                        accessible-label: @tr("Storage provider");
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            ProviderTile {
+                                name: @tr("Bunny Storage");
+                                kind: @tr("HTTP API");
+                                mono: "B";
+                                tint: Theme.provider-bunny;
+                                available: true;
+                                selected: true;
+                            }
+                            ProviderTile {
+                                name: @tr("Amazon S3");
+                                kind: @tr("S3");
+                                mono: "S3";
+                                tint: Theme.provider-s3;
+                            }
+                            ProviderTile {
+                                name: @tr("Cloudflare R2");
+                                kind: @tr("S3-compatible");
+                                mono: "R2";
+                                tint: Theme.provider-r2;
+                            }
+                            ProviderTile {
+                                name: @tr("Backblaze B2");
+                                kind: @tr("S3-compatible");
+                                mono: "B2";
+                                tint: Theme.provider-b2;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            ProviderTile {
+                                name: @tr("Wasabi");
+                                kind: @tr("S3-compatible");
+                                mono: "W";
+                                tint: Theme.provider-wasabi;
+                            }
+                            ProviderTile {
+                                name: @tr("DigitalOcean Spaces");
+                                kind: @tr("S3-compatible");
+                                mono: "DO";
+                                tint: Theme.provider-do;
+                            }
+                            ProviderTile {
+                                name: @tr("MinIO");
+                                kind: @tr("S3-compatible");
+                                mono: "M";
+                                tint: Theme.provider-minio;
+                            }
+                            ProviderTile {
+                                name: @tr("Other S3");
+                                kind: @tr("Custom endpoint");
+                                mono: "…";
+                                tint: Theme.provider-other;
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        FormRow {
+                            label: @tr("Sign in with");
+                            HorizontalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    background: Theme.chip;
+                                    border-radius: 8px;
+                                    accessible-role: radio-group;
+                                    accessible-label: @tr("Sign-in method");
+
+                                    HorizontalLayout {
+                                        padding: 2px;
+                                        spacing: 2px;
+                                        Segment {
+                                            text: @tr("Storage zone password");
+                                            selected: true;
+                                        }
+                                        Segment {
+                                            text: @tr("Bunny account key");
+                                            available: false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        FormRow {
+                            label: @tr("Storage zone");
+                            zone-field := Field {
+                                label: @tr("Storage zone");
+                                error: root.zone-error;
+                                edited => {
+                                    root.zone-error = "";
+                                    root.result = "";
+                                    root.changed(self.text, region-box.current-index);
+                                }
+                                accepted => { root.submit(); }
+                            }
+                            if root.zone-error != "": ErrorLine { text: root.zone-error; }
+                        }
+
+                        FormRow {
+                            label: @tr("Region");
+                            region-box := RegionPicker {
+                                model: root.region-names;
+                                label: @tr("Region");
+                                error: root.region-error;
+                                selected(index) => {
+                                    root.region-error = "";
+                                    root.result = "";
+                                    root.changed(zone-field.text, index);
+                                }
+                            }
+                            if root.region-error != "": ErrorLine { text: root.region-error; }
+                        }
+
+                        FormRow {
+                            label: @tr("Password");
+                            password-field := Field {
+                                label: @tr("Password");
+                                error: root.password-error;
+                                input-type: password;
+                                edited => {
+                                    root.password-error = "";
+                                    root.result = "";
+                                }
+                                accepted => { root.submit(); }
+                            }
+                            if root.password-error != "": ErrorLine { text: root.password-error; }
+                            Text {
+                                text: @tr("Bunny dashboard → Storage → your zone → FTP & API Access. Use the full password, not the read-only one.");
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        FormRow {
+                            label: @tr("Endpoint");
+                            Rectangle {
+                                height: 28px;
+                                border-radius: 7px;
+                                background: Theme.chip;
+                                border-width: 0.5px;
+                                border-color: Theme.control-border;
+
+                                HorizontalLayout {
+                                    padding-left: 9px;
+                                    padding-right: 9px;
+                                    spacing: 6px;
+
+                                    VCenter {
+                                        Image {
+                                            source: Icons.lock;
+                                            colorize: Theme.green;
+                                            width: 14px;
+                                            height: 14px;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.endpoint;
+                                        color: Theme.label;
+                                        font-family: Theme.font-mono;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+
+                        FormRow {
+                            label: @tr("Site name");
+                            name-field := Field {
+                                label: @tr("Site name");
+                                placeholder: zone-field.text != "" ? zone-field.text : @tr("Same as the storage zone");
+                                accepted => { root.submit(); }
+                            }
+                        }
+                    }
+
+                    if root.busy || root.result != "": ResultBox {
+                        text: root.result;
+                        ok: root.result-ok;
+                        busy: root.busy;
+                    }
+                }
+
+                // Footer: Test Connection to the left, Cancel and the default button, Add Site,
+                // to the right.
+                Rectangle {
+                    height: 1px;
+                    background: Theme.sep;
+                }
+                HorizontalLayout {
+                    padding-left: 22px;
+                    padding-right: 22px;
+                    padding-top: 14px;
+                    padding-bottom: 18px;
+                    spacing: 8px;
+
+                    test-button := CapsuleButton {
+                        text: @tr("Test Connection");
+                        icon: Icons.refresh;
+                        enabled: !root.busy;
+                        clicked => {
+                            root.test(name-field.text, zone-field.text, region-box.current-index, password-field.text);
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    cancel-button := CapsuleButton {
+                        text: @tr("Cancel");
+                        clicked => { root.cancel(); }
+                    }
+                    add-button := CapsuleButton {
+                        text: @tr("Add Site");
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => { root.submit(); }
+                    }
+                }
+            }
+        }
+    }
+}

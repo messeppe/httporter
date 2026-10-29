@@ -1,0 +1,256 @@
+// HTTPorter main window: toolbar, sidebar, main area and status bar (see docs/design/mockups/Main.dc.html).
+
+import "fonts/Inter-Regular.ttf";
+import "fonts/Inter-Medium.ttf";
+import "fonts/Inter-SemiBold.ttf";
+import "fonts/Inter-Bold.ttf";
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { FileKind, FileRow, SiteItem } from "types.slint";
+import { Toolbar } from "components/toolbar.slint";
+import { Sidebar } from "components/sidebar.slint";
+import { StatusBar } from "components/statusbar.slint";
+import { Pane } from "components/pane.slint";
+import { AddSiteSheet } from "components/add_site.slint";
+
+export { FileKind, FileRow, SiteItem, Theme }
+
+// Error message shown above the panes.
+component ErrorBanner inherits Rectangle {
+    in property <string> text;
+
+    background: Theme.red-soft;
+    border-radius: Theme.radius-sm;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 8px;
+
+        Image {
+            source: Icons.warn;
+            colorize: Theme.red;
+            width: 16px;
+            height: 16px;
+        }
+        Text {
+            text: root.text;
+            color: Theme.red;
+            font-size: Theme.font-body;
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: @tr("HTTPorter");
+    default-font-family: Theme.font-family;
+    default-font-size: Theme.font-body;
+    background: Theme.win;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 960px;
+    min-height: 600px;
+
+    in property <[SiteItem]> sites;
+    in-out property <int> selected-site: -1;
+    in property <string> connection-text;
+    in property <bool> connection-ok;
+    in property <string> endpoint-text;
+    in property <string> status-left;
+    in property <string> status-right;
+    in property <string> error-text;
+    in property <[FileRow]> local-rows;
+    in property <[FileRow]> remote-rows;
+    in property <[string]> local-crumbs;
+    in property <[string]> remote-crumbs;
+    // Storage endpoint shown as a chip in the cloud pane's header.
+    in property <string> remote-chip;
+    // Selected row of each pane (-1 for none) and its sorted column (0 name, 1 size, 2 modified).
+    in-out property <int> local-selected: -1;
+    in-out property <int> remote-selected: -1;
+    in-out property <int> local-sort-column: 0;
+    in-out property <bool> local-sort-ascending: true;
+    in-out property <int> remote-sort-column: 0;
+    in-out property <bool> remote-sort-ascending: true;
+
+    // The Add Site sheet. The window opens it when the sidebar's Add Site button is pressed (and
+    // still tells the app through `add-site`); the app opens it too, and closes it once the site
+    // is saved. `region-names` is the list the sheet offers, in the order the app maps to codes.
+    in-out property <bool> add-site-open: false;
+    in property <[string]> region-names;
+    // `https://{host}/{zone}/` for the zone and region last reported by `add-site-changed`.
+    in property <string> add-site-endpoint;
+    // The outcome of the last test and whether it worked. The sheet clears the text when the zone,
+    // region or password is edited, and when it opens.
+    in-out property <string> add-site-result;
+    in property <bool> add-site-result-ok;
+    // A test or save is running: the sheet turns those two buttons off.
+    in property <bool> add-site-busy;
+    // Messages from the form's validation, shown under the field they name (see `add_site.rs`).
+    // The sheet clears one when its field is edited, and all of them when it opens.
+    in-out property <string> add-site-zone-error;
+    in-out property <string> add-site-region-error;
+    in-out property <string> add-site-password-error;
+    // Bumped by `show_field_error` each time it shows an error; the sheet then focuses that field.
+    in property <int> add-site-error-serial;
+
+    callback site-selected(int);
+    callback add-site();
+    callback open-settings();
+    // Row index into the pane's `rows`, as the user sees them.
+    callback open-local(int);
+    callback open-remote(int);
+    callback local-up();
+    callback remote-up();
+    // Column number: 0 name, 1 size, 2 modified. The pane has already updated its sort properties.
+    callback sort-local(int);
+    callback sort-remote(int);
+    // A breadcrumb other than the last was pressed: the index into the pane's crumbs, where 0 is the
+    // drive (This PC pane) or the zone (cloud pane).
+    callback local-crumb-clicked(int);
+    callback remote-crumb-clicked(int);
+    // The zone or region on the sheet changed (also called once when it opens): the app answers
+    // with `add-site-endpoint`.
+    callback add-site-changed(string /* zone */, int /* region index */);
+    // Test Connection and Add Site: site name, zone, region index, password. The name may be
+    // empty (it then defaults to the zone). The app validates, and answers with field errors, a
+    // test result, or by closing the sheet.
+    callback add-site-test(string, string, int, string);
+    callback add-site-save(string, string, int, string);
+    // The sheet was cancelled (Cancel button or Escape); it has already closed itself. If a test or
+    // save was running (`add-site-busy`), the app should give up on it and clear the flag.
+    callback add-site-cancel();
+
+    out property <bool> sidebar-visible: true;
+    // Where the cloud pane is, in window coordinates and logical pixels, for telling which pane a
+    // point is over. The panes sit side by side when the main area is wide enough and are stacked
+    // otherwise (`panes-stacked`). Side by side, a point is over the cloud pane when
+    // `x >= pane-split`; stacked, when `y >= remote-pane-y` (and `pane-split` is the left edge of
+    // both panes, so it says nothing).
+    out property <bool> panes-stacked: !panes.side-by-side;
+    // Absolute x of the cloud pane's left edge.
+    out property <length> pane-split: remote-pane.absolute-position.x;
+    // Absolute y of the cloud pane's top edge.
+    out property <length> remote-pane-y: remote-pane.absolute-position.y;
+    property <bool> has-selection: root.selected-site >= 0 && root.selected-site < root.sites.length;
+
+    VerticalLayout {
+        Toolbar {
+            title: root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter");
+            subtitle: root.endpoint-text;
+            connection-text: root.connection-text;
+            connection-ok: root.connection-ok;
+            toggle-sidebar => { root.sidebar-visible = !root.sidebar-visible; }
+        }
+
+        HorizontalLayout {
+            // The main area already pads itself by 8 px, so only the sidebar needs the left margin.
+            padding-left: root.sidebar-visible ? 8px : 0px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+
+            if root.sidebar-visible: Sidebar {
+                width: 220px;
+                sites: root.sites;
+                selected-site: root.selected-site;
+                sheet-open: root.add-site-open;
+                site-selected(index) => {
+                    root.selected-site = index;
+                    root.site-selected(index);
+                }
+                add-site => {
+                    root.add-site-open = true;
+                    root.add-site();
+                }
+                open-settings => { root.open-settings(); }
+            }
+
+            // Main area: the two file panes.
+            VerticalLayout {
+                padding: 8px;
+                spacing: 8px;
+
+                if root.error-text != "": ErrorBanner { text: root.error-text; }
+
+                // Side by side when each pane can have the mockup's 420 px, stacked otherwise
+                // (mockup `.panes`: a wrapping row). The panes are placed by hand rather than in a
+                // layout so that they keep their state when the window crosses that width.
+                panes := Rectangle {
+                    property <bool> side-by-side: self.width >= 2 * 420px + 8px;
+
+                    vertical-stretch: 1;
+
+                    Pane {
+                        x: 0px;
+                        y: 0px;
+                        width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
+                        height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
+                        title: @tr("This PC");
+                        icon: Icons.pc;
+                        crumbs: root.local-crumbs;
+                        rows: root.local-rows;
+                        selected <=> root.local-selected;
+                        sort-column <=> root.local-sort-column;
+                        sort-ascending <=> root.local-sort-ascending;
+                        open(index) => { root.open-local(index); }
+                        up => { root.local-up(); }
+                        crumb-clicked(index) => { root.local-crumb-clicked(index); }
+                        sort(column) => { root.sort-local(column); }
+                    }
+                    remote-pane := Pane {
+                        x: panes.side-by-side ? (panes.width + 8px) / 2 : 0px;
+                        y: panes.side-by-side ? 0px : (panes.height + 8px) / 2;
+                        width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
+                        height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
+                        title: root.has-selection ? root.sites[root.selected-site].name : @tr("No site selected");
+                        icon: Icons.cloud;
+                        crumbs: root.remote-crumbs;
+                        rows: root.remote-rows;
+                        header-chip: root.remote-chip;
+                        selected <=> root.remote-selected;
+                        sort-column <=> root.remote-sort-column;
+                        sort-ascending <=> root.remote-sort-ascending;
+                        open(index) => { root.open-remote(index); }
+                        up => { root.remote-up(); }
+                        crumb-clicked(index) => { root.remote-crumb-clicked(index); }
+                        sort(column) => { root.sort-remote(column); }
+                    }
+                }
+            }
+        }
+
+        StatusBar {
+            left-text: root.status-left;
+            right-text: root.status-right;
+        }
+    }
+
+    // On top of everything else, so that it also dims the toolbar and swallows the pointer.
+    if root.add-site-open: AddSiteSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        region-names: root.region-names;
+        endpoint: root.add-site-endpoint;
+        result <=> root.add-site-result;
+        result-ok: root.add-site-result-ok;
+        busy: root.add-site-busy;
+        zone-error <=> root.add-site-zone-error;
+        region-error <=> root.add-site-region-error;
+        password-error <=> root.add-site-password-error;
+        error-serial: root.add-site-error-serial;
+        changed(zone, region) => { root.add-site-changed(zone, region); }
+        test(name, zone, region, password) => { root.add-site-test(name, zone, region, password); }
+        save(name, zone, region, password) => { root.add-site-save(name, zone, region, password); }
+        cancel => {
+            root.add-site-open = false;
+            root.add-site-cancel();
+        }
+    }
+}

@@ -1,0 +1,580 @@
+// File pane (mockup `.pane`): a header with icon, title, breadcrumbs and a chip, the Name / Size /
+// Modified column headers, and a virtualized list of rows. The Status column and the compare chips
+// arrive with the compare milestone.
+//
+// Keyboard: Tab reaches the list, then the breadcrumbs, then the three column headers. In the list,
+// Up and Down move the selection (Home, End, PageUp and PageDown too), Enter opens the selected row
+// and Backspace goes up one folder. Space or Return on a breadcrumb goes to that folder and on a
+// column header sorts by it. Every breadcrumb except the last (the current folder) is a button.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { FileKind, FileRow } from "../types.slint";
+import { Activation } from "buttons.slint";
+import { VCenter } from "layout.slint";
+
+// Sizes shared by the column headers and the rows (mockup `.cols, .row`: padding 0 12px, gap 8px).
+global Cols {
+    out property <length> pad: 12px;
+    out property <length> gap: 8px;
+    out property <length> size: 76px;
+    out property <length> modified: 128px;
+}
+
+// One breadcrumb that goes to its folder when pressed (mockup `.crumbs`), in the secondary text
+// colour. Reachable with Tab, activated with Space or Return.
+component Crumb inherits Rectangle {
+    in property <string> text;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    forward-focus: key-focus;
+    border-radius: 4px;
+    background: area.has-hover ? Theme.hover : transparent;
+    accessible-role: button;
+    accessible-label: @tr("Go to {}", root.text);
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 3px;
+        padding-right: 3px;
+
+        Text {
+            text: root.text;
+            color: Theme.label2;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+    }
+
+    // Focus ring, as on the column headers: inside the control's own bounds.
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// One column title that sorts the list when pressed (mockup `.cols`). The sorted column is shown
+// in the label colour with a caret that points up for ascending and down for descending (two
+// icons: the software renderer does not rotate images).
+// Reachable with Tab, activated with Space or Return.
+component ColumnHeader inherits Rectangle {
+    in property <string> text;
+    in property <bool> sorted;
+    in property <bool> ascending: true;
+    in property <bool> right-aligned: false;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    forward-focus: key-focus;
+    accessible-role: button;
+    accessible-label: root.sorted ? (root.ascending ? @tr("{}, sorted ascending", root.text) : @tr("{}, sorted descending", root.text)) : @tr("Sort by {}", root.text);
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        alignment: root.right-aligned ? end : start;
+        spacing: 4px;
+
+        Text {
+            text: root.text;
+            color: root.sorted ? Theme.label : Theme.label2;
+            font-size: Theme.font-small;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        if root.sorted: VCenter {
+            Image {
+                source: root.ascending ? Icons.sort : Icons.sort-down;
+                colorize: Theme.label;
+                width: 12px;
+                height: 12px;
+                accessible-role: none;
+            }
+        }
+    }
+
+    // Focus ring, 4 px wider than the text on each side so that it does not touch the letters.
+    Rectangle {
+        x: -4px;
+        width: parent.width + 8px;
+        border-radius: 4px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// One file or folder (mockup `.row`): folder disclosure chevron, kind icon and name, then size and
+// modified date. Alternate rows get the `row-alt` background; the selected row fills with the
+// accent colour and white text.
+component PaneRow inherits Rectangle {
+    in property <FileRow> item;
+    in property <int> index;
+    in property <int> count;
+    in property <bool> selected;
+    callback clicked();
+    callback opened();
+
+    property <string> kind-label: root.item.kind == FileKind.code ? @tr("code file") : root.item.kind == FileKind.image ? @tr("image") : @tr("document");
+    property <image> kind-icon: root.item.kind == FileKind.folder ? Icons.folder : root.item.kind == FileKind.code ? Icons.code : root.item.kind == FileKind.image ? Icons.image : Icons.doc;
+    property <color> kind-color: root.selected ? Theme.sel-text : root.item.kind == FileKind.folder ? Theme.folder : root.item.kind == FileKind.image ? Theme.green : Theme.label2;
+    property <color> detail-color: root.selected ? Theme.sel-text : Theme.label2;
+
+    height: Theme.row-height;
+    background: root.selected ? Theme.sel : (Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent);
+    accessible-role: list-item;
+    accessible-label: root.item.folder ? @tr("{}, folder, modified {}", root.item.name, root.item.modified) : @tr("{}, {}, {}, modified {}", root.item.name, root.kind-label, root.item.size, root.item.modified);
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+    accessible-action-default => { root.opened(); }
+
+    HorizontalLayout {
+        padding-left: Cols.pad;
+        padding-right: Cols.pad;
+        spacing: Cols.gap;
+
+        Rectangle {
+            horizontal-stretch: 1;
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                VCenter {
+                    Image {
+                        source: Icons.chev-r;
+                        colorize: root.selected ? Theme.sel-text : Theme.label3;
+                        opacity: root.item.folder ? 1 : 0;
+                        width: 10px;
+                        height: 10px;
+                        accessible-role: none;
+                    }
+                }
+                VCenter {
+                    Image {
+                        source: root.kind-icon;
+                        colorize: root.kind-color;
+                        width: 16px;
+                        height: 16px;
+                        accessible-role: none;
+                    }
+                }
+                Text {
+                    text: root.item.name;
+                    color: root.selected ? Theme.sel-text : Theme.label;
+                    font-size: Theme.font-body;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+        }
+        Text {
+            text: root.item.size;
+            width: Cols.size;
+            color: root.detail-color;
+            font-size: 12px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        Text {
+            text: root.item.modified;
+            width: Cols.modified;
+            color: root.detail-color;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.opened(); }
+    }
+}
+
+// A pane of files: "This PC" on the left, the cloud site on the right.
+export component Pane inherits Rectangle {
+    in property <string> title;
+    in property <image> icon;
+    in property <[string]> crumbs;
+    in property <[FileRow]> rows;
+    in property <string> header-chip;
+    // Index into `rows` of the selected row, or -1 for none.
+    in-out property <int> selected: -1;
+    // Sorted column: 0 name, 1 size, 2 modified. Pressing a column header changes these two and
+    // then calls `sort`.
+    in-out property <int> sort-column: 0;
+    in-out property <bool> sort-ascending: true;
+    out property <bool> has-focus: key-focus.has-focus;
+    // True when the keyboard (not the mouse) last drove the focus: the strong focus ring shows then.
+    out property <bool> focus-visible: root.has-focus && root.keyboard-focus;
+    callback open(int);
+    callback up();
+    // A breadcrumb other than the last was pressed: the index into `crumbs`, 0 being the root.
+    callback crumb-clicked(int);
+    callback sort(int);
+
+    property <bool> keyboard-focus: false;
+
+    forward-focus: key-focus;
+    accessible-role: region;
+    accessible-label: root.title;
+
+    function pick(index: int) {
+        root.selected = index;
+        root.keyboard-focus = false;
+        key-focus.focus();
+    }
+
+    function move-to(index: int) {
+        if (root.rows.length > 0) {
+            root.selected = Math.max(0, Math.min(root.rows.length - 1, index));
+        }
+    }
+
+    function sort-by(column: int) {
+        if (root.sort-column == column) {
+            root.sort-ascending = !root.sort-ascending;
+        } else {
+            root.sort-column = column;
+            root.sort-ascending = true;
+        }
+        root.sort(column);
+    }
+
+    // Scroll so that the selected row is fully in view; with no selection, back to the top. Does
+    // nothing before the list has been laid out (its visible height is 0 then).
+    function reveal() {
+        if (list.visible-height <= 0px) {
+            return;
+        }
+        if (root.selected < 0) {
+            list.content-y = 0px;
+        } else if (root.selected < root.rows.length) {
+            if (root.selected * Theme.row-height < -list.content-y) {
+                list.content-y = -root.selected * Theme.row-height;
+            } else if ((root.selected + 1) * Theme.row-height > -list.content-y + list.visible-height) {
+                if ((root.selected + 1) * Theme.row-height > -list.content-y + 1.5 * list.visible-height) {
+                    // A long way down: the list snaps a jump of more than a screen and a half to a
+                    // whole row, so line the row up with the top of the list, where that is exact.
+                    list.content-y = -root.selected * Theme.row-height;
+                } else {
+                    list.content-y = list.visible-height - (root.selected + 1) * Theme.row-height;
+                }
+            }
+        }
+    }
+
+    changed selected => { root.reveal(); }
+
+    // First child, so that the list is the pane's first Tab stop, ahead of the column headers. Zero
+    // width so that clicks do not focus it; a click on a row focuses it through `pick`.
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        focus-gained(reason) => {
+            if (reason == FocusReason.tab-navigation) {
+                root.keyboard-focus = true;
+            }
+        }
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.DownArrow) {
+                root.keyboard-focus = true;
+                root.move-to(root.selected + 1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.keyboard-focus = true;
+                root.move-to(root.selected < 0 ? root.rows.length - 1 : root.selected - 1);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.keyboard-focus = true;
+                root.move-to(0);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.keyboard-focus = true;
+                root.move-to(root.rows.length - 1);
+                return accept;
+            }
+            if (event.text == Key.PageDown) {
+                root.keyboard-focus = true;
+                root.move-to(root.selected + Math.max(1, Math.floor(list.visible-height / Theme.row-height) - 1));
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                root.keyboard-focus = true;
+                root.move-to(root.selected - Math.max(1, Math.floor(list.visible-height / Theme.row-height) - 1));
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.keyboard-focus = true;
+                if (!event.repeat && root.selected >= 0 && root.selected < root.rows.length) {
+                    root.open(root.selected);
+                }
+                return accept;
+            }
+            if (event.text == Key.Backspace) {
+                root.keyboard-focus = true;
+                if (!event.repeat) {
+                    root.up();
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    // Soft glow around the pane while it holds the focus (mockup `.pane.focus`).
+    Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: Theme.radius-md + 2px;
+        background: Theme.accent-soft;
+        visible: root.has-focus;
+    }
+
+    card := Rectangle {
+        background: Theme.content;
+        border-radius: Theme.radius-md;
+        border-width: 0.5px;
+        border-color: Theme.sep-strong;
+        clip: true;
+
+        VerticalLayout {
+            // Header (mockup `.pane-head`).
+            Rectangle {
+                height: 37px;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 10px;
+                    spacing: 8px;
+
+                    VCenter {
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Image {
+                                source: root.icon;
+                                colorize: Theme.label;
+                                width: 16px;
+                                height: 16px;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: root.title;
+                                color: Theme.label;
+                                font-size: Theme.font-body;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                        }
+                    }
+                    // Breadcrumbs (mockup `.crumbs`). Every crumb but the last is a button; the last
+                    // is the current folder, in plain text. A path too long for the header shrinks
+                    // the names with an ellipsis instead of overflowing it.
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        clip: true;
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 2px;
+
+                            for crumb[i] in root.crumbs: HorizontalLayout {
+                                spacing: 2px;
+
+                                if i > 0: VCenter {
+                                    Image {
+                                        source: Icons.chev-r;
+                                        colorize: Theme.label3;
+                                        width: 12px;
+                                        height: 12px;
+                                        accessible-role: none;
+                                    }
+                                }
+                                if i < root.crumbs.length - 1: Crumb {
+                                    text: crumb;
+                                    clicked => { root.crumb-clicked(i); }
+                                }
+                                if i == root.crumbs.length - 1: HorizontalLayout {
+                                    padding-left: 3px;
+                                    padding-right: 3px;
+
+                                    Text {
+                                        text: crumb;
+                                        // The current folder keeps its name (up to 160 px) while the
+                                        // crumbs before it shrink.
+                                        min-width: Math.min(self.preferred-width, 160px);
+                                        color: Theme.label;
+                                        font-size: 12px;
+                                        font-weight: Theme.weight-medium;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.header-chip != "": VCenter {
+                        Rectangle {
+                            height: 20px;
+                            background: Theme.chip;
+                            border-radius: self.height / 2;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                Text {
+                                    text: root.header-chip;
+                                    color: Theme.label2;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-small;
+                                    font-weight: Theme.weight-semibold;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: 1px;
+                    background: Theme.sep;
+                }
+            }
+
+            // Column headers (mockup `.cols`).
+            Rectangle {
+                height: 26px;
+
+                HorizontalLayout {
+                    padding-left: Cols.pad;
+                    padding-right: Cols.pad;
+                    spacing: Cols.gap;
+
+                    ColumnHeader {
+                        horizontal-stretch: 1;
+                        text: @tr("Name");
+                        sorted: root.sort-column == 0;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort-by(0); }
+                    }
+                    ColumnHeader {
+                        width: Cols.size;
+                        text: @tr("Size");
+                        right-aligned: true;
+                        sorted: root.sort-column == 1;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort-by(1); }
+                    }
+                    ColumnHeader {
+                        width: Cols.modified;
+                        text: @tr("Modified");
+                        sorted: root.sort-column == 2;
+                        ascending: root.sort-ascending;
+                        clicked => { root.sort-by(2); }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: 1px;
+                    background: Theme.sep;
+                }
+            }
+
+            // The list view insets its content by 2 px on every side; the list reaches out by that
+            // much so that the rows, and the selection, run edge to edge as in the mockup.
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+
+                list := ListView {
+                    x: -2px;
+                    y: -2px;
+                    width: parent.width + 4px;
+                    height: parent.height + 4px;
+                    accessible-label: @tr("Files in {}", root.title);
+                    accessible-item-count: root.rows.length;
+
+                    for item[i] in root.rows: PaneRow {
+                        item: item;
+                        index: i;
+                        count: root.rows.length;
+                        selected: i == root.selected;
+                        clicked => { root.pick(i); }
+                        opened => {
+                            root.pick(i);
+                            root.open(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Keyboard focus ring, inside the card so that its rounded clip does not cut it.
+        Rectangle {
+            border-radius: card.border-radius;
+            border-width: 2px;
+            border-color: Theme.accent;
+            visible: root.focus-visible;
+        }
+    }
+}

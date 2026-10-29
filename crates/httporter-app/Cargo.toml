@@ -1,0 +1,22 @@
+[package]
+name = "httporter-app"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "httporter"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+httporter-core = { path = "../httporter-core" }
+slint = { version = "1.18", features = ["unstable-winit-030"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[build-dependencies]
+slint-build = "1.18"
+
+[dev-dependencies]
+i-slint-backend-testing = "1.18"
+tempfile = "3.27.0"

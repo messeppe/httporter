@@ -1,0 +1,80 @@
+// Small tinted capsules and marks: chips, the connection pill, status dots and provider tiles.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { VCenter } from "layout.slint";
+
+// Tinted label capsule (mockup `.chip`). Defaults to the neutral grey chip.
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <color> fg: Theme.label2;
+    in property <color> bg: Theme.chip;
+
+    height: 20px;
+    background: root.bg;
+    border-radius: self.height / 2;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+        alignment: center;
+
+        if root.icon.width > 0: VCenter {
+            Image {
+                source: root.icon;
+                colorize: root.fg;
+                width: 14px;
+                height: 14px;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.fg;
+            font-size: Theme.font-small;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Connection state in the toolbar (mockup `.conn`): green with a lock when connected, orange with a warning otherwise.
+export component ConnectionPill inherits Chip {
+    in property <bool> ok: true;
+
+    height: 24px;
+    icon: root.ok ? Icons.lock : Icons.warn;
+    fg: root.ok ? Theme.green : Theme.orange;
+    bg: root.ok ? Theme.green-soft : Theme.orange-soft;
+}
+
+// 7 px status dot (mockup `.dot`).
+export component StatusDot inherits Rectangle {
+    in property <color> tint: Theme.green;
+
+    width: 7px;
+    height: 7px;
+    border-radius: self.height / 2;
+    background: root.tint;
+}
+
+// 18 px provider tile with one or two letters (mockup `.monotile`), filled with the provider's colour.
+export component MonoTile inherits Rectangle {
+    in property <string> mono;
+    in property <color> tint: Theme.accent;
+
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: root.tint;
+
+    Text {
+        text: root.mono;
+        color: Theme.on-accent;
+        font-size: 9px;
+        font-weight: Theme.weight-bold;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
