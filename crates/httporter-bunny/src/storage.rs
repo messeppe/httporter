@@ -143,12 +143,14 @@ impl BunnyStorage {
         let delete_concurrency = cfg.delete_concurrency.clamp(1, DELETE_CONCURRENCY_MAX);
         let transfer_concurrency = cfg.transfer_concurrency.clamp(1, TRANSFER_CONCURRENCY_MAX);
 
+        let proxy = proxy_mode(cfg.base_url.as_deref());
         let client = build_client(
             headers.clone(),
             LIST_CONCURRENCY + delete_concurrency,
             Some(REQUEST_TIMEOUT),
+            proxy,
         )?;
-        let transfer_client = build_client(headers, transfer_concurrency, None)?;
+        let transfer_client = build_client(headers, transfer_concurrency, None, proxy)?;
 
         let base = match &cfg.base_url {
             Some(url) => url.trim_end_matches('/').to_owned(),
@@ -504,12 +506,33 @@ fn network_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
+/// Whether a client consults the system proxy settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyMode {
+    /// reqwest's default: environment variables and the Windows settings.
+    System,
+    /// Never use a proxy.
+    Direct,
+}
+
+/// A configured `base_url` is the test and local-server override, and such an
+/// endpoint must never be routed through a system proxy. The real Bunny host
+/// (no override) honours the system proxy settings.
+fn proxy_mode(base_url: Option<&str>) -> ProxyMode {
+    if base_url.is_some() {
+        ProxyMode::Direct
+    } else {
+        ProxyMode::System
+    }
+}
+
 /// Both clients carry the access key and never follow redirects. Only the
 /// listing and delete client has a total timeout; see the module docs.
 fn build_client(
     headers: HeaderMap,
     pool_size: usize,
     total_timeout: Option<Duration>,
+    proxy: ProxyMode,
 ) -> Result<reqwest::Client, ProviderError> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -521,6 +544,9 @@ fn build_client(
         .default_headers(headers);
     if let Some(timeout) = total_timeout {
         builder = builder.timeout(timeout);
+    }
+    if proxy == ProxyMode::Direct {
+        builder = builder.no_proxy();
     }
     builder
         .build()
@@ -876,13 +902,29 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(400)))
             .mount(&server)
             .await;
-        let bounded = build_client(HeaderMap::new(), 1, Some(Duration::from_millis(150))).unwrap();
-        let unbounded = build_client(HeaderMap::new(), 1, None).unwrap();
+        let timeout = Some(Duration::from_millis(150));
+        let bounded = build_client(HeaderMap::new(), 1, timeout, ProxyMode::Direct).unwrap();
+        let unbounded = build_client(HeaderMap::new(), 1, None, ProxyMode::Direct).unwrap();
 
         let error = bounded.get(server.uri()).send().await.unwrap_err();
         assert!(error.is_timeout(), "{error:?}");
         let response = unbounded.get(server.uri()).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn a_base_url_override_bypasses_the_system_proxy() {
+        // Ruling P15: the override is for tests and local servers, which must
+        // never be routed through a Windows system proxy. The real endpoint
+        // keeps honouring it.
+        assert_eq!(proxy_mode(Some("http://127.0.0.1:8080")), ProxyMode::Direct);
+        assert_eq!(proxy_mode(Some("https://example.test/")), ProxyMode::Direct);
+        assert_eq!(proxy_mode(None), ProxyMode::System);
+
+        let mut cfg = BunnyConfig::new("zone", "storage.bunnycdn.com", "secret");
+        assert_eq!(proxy_mode(cfg.base_url.as_deref()), ProxyMode::System);
+        cfg.base_url = Some("http://127.0.0.1:9".into());
+        assert_eq!(proxy_mode(cfg.base_url.as_deref()), ProxyMode::Direct);
     }
 
     #[test]
