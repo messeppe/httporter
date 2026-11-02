@@ -11,7 +11,7 @@ mod pickers;
 mod taskbar;
 
 pub use clipboard::clipboard_files;
-pub use notify::{notify, notify_or_flash};
+pub use notify::{ensure_app_identity, notify, notify_or_flash};
 pub use pickers::{pick_file, pick_files, pick_folder};
 pub use taskbar::{TaskbarProgress, TaskbarState, flash, is_foreground};
 
@@ -55,4 +55,15 @@ fn with_com<T>(f: impl FnOnce() -> windows::core::Result<T>) -> windows::core::R
         return Err(hr.into());
     };
     f()
+}
+
+#[cfg(test)]
+mod tests {
+    /// The app sets its identity at startup, so the function must be reachable from outside
+    /// the crate as `win::ensure_app_identity`. Only its type is checked: calling it would
+    /// write to the registry.
+    #[test]
+    fn ensure_app_identity_is_exported() {
+        let _startup: fn() -> Result<(), String> = super::ensure_app_identity;
+    }
 }

@@ -64,9 +64,19 @@ fn toast_xml(title: &str, body: &str) -> String {
     )
 }
 
-/// Registers the id and gives it to the process, once per run. Writing the same values
-/// again is harmless, and doing it on every start repairs a key that was deleted or edited.
-fn ensure_app_identity() -> Result<(), String> {
+/// Registers HTTPorter's notification identity (the app user model id) and gives it to the
+/// process.
+///
+/// Call it once at startup, before any window is shown: Windows reads the process id when
+/// it creates a window's taskbar button, so setting it later can leave the button grouped
+/// under the old id. [`notify`] calls it too, so a program that skips the startup call still
+/// gets its toasts, just with the late id.
+///
+/// It is idempotent: only the first successful call per process does anything, and writing
+/// the same registry values again on every start repairs a key that was deleted or edited.
+/// The identity only matters for notifications and taskbar grouping, so a caller may ignore
+/// the `Err` (the next [`notify`] retries and reports the same failure).
+pub fn ensure_app_identity() -> Result<(), String> {
     static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.load(Ordering::Acquire) {
         return Ok(());

@@ -67,7 +67,9 @@ impl TaskbarProgress {
         if hwnd == 0 || !unsafe { IsWindow(Some(as_hwnd(hwnd))) }.as_bool() {
             return None;
         }
-        with_com(taskbar_list).ok()?;
+        // Only a probe: the interface is dropped inside the COM scope, because releasing it
+        // after `CoUninitialize` is not allowed (see `with_com`).
+        with_com(|| taskbar_list().map(drop)).ok()?;
         Some(Self { hwnd })
     }
 
