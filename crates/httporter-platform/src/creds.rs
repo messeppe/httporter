@@ -1,11 +1,12 @@
-//! Storage-password store. Secrets live only in Windows Credential Manager (or, in tests,
-//! in memory); they never reach SQLite, logs or `Debug` output.
+//! Credential store for site passwords, S3 keys and account keys. Secrets live only in
+//! Windows Credential Manager (or, in tests, in memory); they never reach SQLite, logs or
+//! `Debug` output.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
 
-use httporter_core::SiteId;
+use httporter_core::{AccountId, ProviderKind, SiteId};
 
 /// Service name shown in Credential Manager entries written by HTTPorter.
 const SERVICE: &str = "HTTPorter";
@@ -61,8 +62,86 @@ impl CredentialKey {
         Self(format!("{SERVICE}/site/{id}"))
     }
 
+    /// The key of a provider account's secret, such as a Bunny account API key:
+    /// `HTTPorter/account/<account id>`.
+    pub fn account(id: &AccountId) -> Self {
+        Self(format!("{SERVICE}/account/{id}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// The secret a site signs in with, as one credential-store value.
+///
+/// A Bunny site's value is the storage zone password as it is: exactly what the first release
+/// stored, so existing sites keep working. An S3 site's value is a small JSON object holding
+/// both halves of its key pair.
+///
+/// `Debug` shows no secret field, so a stray `{:?}` can't leak one.
+#[derive(Clone, PartialEq, Eq)]
+pub enum SiteSecret {
+    BunnyPassword(String),
+    S3 {
+        access_key_id: String,
+        secret_access_key: String,
+    },
+}
+
+impl SiteSecret {
+    /// The text to hand to [`CredentialStore::set`].
+    pub fn to_stored(&self) -> String {
+        match self {
+            Self::BunnyPassword(password) => password.clone(),
+            Self::S3 {
+                access_key_id,
+                secret_access_key,
+            } => serde_json::json!({
+                "access_key_id": access_key_id,
+                "secret_access_key": secret_access_key,
+            })
+            .to_string(),
+        }
+    }
+
+    /// Reads back what [`Self::to_stored`] wrote (or, for a Bunny site, what the first release
+    /// wrote). The error names no part of `text`, so it is safe to log.
+    pub fn from_stored(kind: ProviderKind, text: &str) -> Result<Self, CredError> {
+        match kind {
+            ProviderKind::Bunny => Ok(Self::BunnyPassword(text.to_owned())),
+            ProviderKind::S3 => Self::parse_s3(text).ok_or(CredError::Other(
+                "stored S3 credential is not in the expected form",
+            )),
+        }
+    }
+
+    /// An object with both key strings; anything else (also a JSON array of two strings) is
+    /// not what [`Self::to_stored`] writes. Unknown extra fields are ignored. Nothing of
+    /// `text` goes into an error: parse errors can quote it, and it is the secret.
+    fn parse_s3(text: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        let object = value.as_object()?;
+        let field = |name: &str| Some(object.get(name)?.as_str()?.to_owned());
+        Some(Self::S3 {
+            access_key_id: field("access_key_id")?,
+            secret_access_key: field("secret_access_key")?,
+        })
+    }
+}
+
+// Deliberately not derived: `Debug` must never print a secret.
+impl fmt::Debug for SiteSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hidden = format_args!("<redacted>");
+        match self {
+            Self::BunnyPassword(_) => f.debug_tuple("BunnyPassword").field(&hidden).finish(),
+            Self::S3 { .. } => f
+                .debug_struct("S3")
+                .field("access_key_id", &hidden)
+                .field("secret_access_key", &hidden)
+                .finish(),
+        }
     }
 }
 
@@ -153,7 +232,7 @@ impl CredentialStore for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use httporter_core::SiteId;
+    use httporter_core::{AccountId, ProviderKind, SiteId};
 
     #[test]
     fn site_key_format() {
@@ -161,6 +240,95 @@ mod tests {
             CredentialKey::site(&SiteId("abc".into())).as_str(),
             "HTTPorter/site/abc"
         );
+    }
+
+    #[test]
+    fn account_key_format() {
+        assert_eq!(
+            CredentialKey::account(&AccountId("acc-1".into())).as_str(),
+            "HTTPorter/account/acc-1"
+        );
+        // Sites and accounts never share a key, even with the same id text.
+        assert_ne!(
+            CredentialKey::account(&AccountId("x".into())),
+            CredentialKey::site(&SiteId("x".into()))
+        );
+    }
+
+    /// Ledger 89: deleting what is not there is fine, so removing a site whose secret was
+    /// never saved (or already removed) can't fail.
+    #[test]
+    fn deleting_a_missing_credential_is_ok() {
+        let store = MemoryStore::default();
+        let key = CredentialKey::account(&AccountId::new());
+        store.delete(&key).unwrap();
+        store.set(&key, "secret").unwrap();
+        store.delete(&key).unwrap();
+        store.delete(&key).unwrap();
+        assert_eq!(store.get(&key).unwrap(), None);
+    }
+
+    #[test]
+    fn site_secret_round_trip_and_debug_redacts() {
+        let bunny = SiteSecret::BunnyPassword("pw-bunny-7f3a".into());
+        // An I1 credential is the bare password: it must still read back as one.
+        assert_eq!(bunny.to_stored(), "pw-bunny-7f3a");
+        assert_eq!(
+            SiteSecret::from_stored(ProviderKind::Bunny, "pw-bunny-7f3a").unwrap(),
+            bunny
+        );
+
+        // Characters that need escaping in JSON survive.
+        for (id, secret) in [
+            ("AKIAEXAMPLE0001", r#"wJalr/XUtn+FEMI\K7MDENG"bPxRfiCY"#),
+            (r#"id"with\quotes"#, "tab\tnewline\n"),
+            ("AKIA", "näive 😀 secret"),
+            ("", ""),
+        ] {
+            let s3 = SiteSecret::S3 {
+                access_key_id: id.into(),
+                secret_access_key: secret.into(),
+            };
+            let stored = s3.to_stored();
+            assert_eq!(
+                SiteSecret::from_stored(ProviderKind::S3, &stored).unwrap(),
+                s3,
+                "{stored}"
+            );
+        }
+
+        // Debug (and so `{:?}` in logs and test failures) shows neither the key nor the secret.
+        let s3 = SiteSecret::S3 {
+            access_key_id: "AKIAEXAMPLE0001".into(),
+            secret_access_key: "s3cr3t-value-9d2".into(),
+        };
+        for (secret, hidden) in [
+            (&bunny, vec!["pw-bunny-7f3a"]),
+            (&s3, vec!["AKIAEXAMPLE0001", "s3cr3t-value-9d2"]),
+        ] {
+            for text in [format!("{secret:?}"), format!("{secret:#?}")] {
+                for needle in &hidden {
+                    assert!(!text.contains(needle), "leaked {needle}: {text}");
+                }
+                assert!(text.contains("redacted"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_malformed_stored_s3_secret_is_an_error_that_does_not_echo_it() {
+        for text in [
+            "",
+            "just-a-password",
+            "{\"access_key_id\":\"AKIA-leaky\"}",
+            "{\"access_key_id\":1,\"secret_access_key\":\"s-leaky\"}",
+            "[\"AKIA-leaky\",\"s-leaky\"]",
+        ] {
+            let err = SiteSecret::from_stored(ProviderKind::S3, text).unwrap_err();
+            let shown = format!("{err:?}{err}");
+            assert!(!shown.contains("leaky"), "{shown}");
+            assert!(!shown.contains("just-a-password"), "{shown}");
+        }
     }
 
     #[test]
@@ -198,6 +366,8 @@ mod tests {
         assert_eq!(s.get(&key).unwrap().as_deref(), Some("pw-test"));
         s.delete(&key).unwrap();
         assert_eq!(s.get(&key).unwrap(), None);
+        // Deleting an entry that is already gone is fine (ledger 89).
+        s.delete(&key).unwrap();
 
         // Same temporary entry: another program stored an odd-length (not UTF-16) blob.
         // Reading it must fail without exposing the blob in `Debug` or `Display`.

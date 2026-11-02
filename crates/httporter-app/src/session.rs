@@ -483,7 +483,7 @@ impl Session {
             notice: None,
         };
         match store.list_sites() {
-            Ok(sites) => book.sites = sites,
+            Ok(list) => book.sites = list.sites,
             Err(e) => book.notice = Some(format!("Couldn't read the saved sites: {e}")),
         }
         let sort = (SortKey::Name, true);
@@ -801,7 +801,7 @@ impl Session {
         };
         let mut book = lock(&self.book);
         match listed {
-            Ok(sites) => book.sites = sites,
+            Ok(list) => book.sites = list.sites,
             Err(e) => book.notice = Some(format!("Couldn't read the saved sites: {e}")),
         }
         if !book.sites.iter().any(|site| site.id == record.id) {
