@@ -3,7 +3,7 @@
 use super::*;
 use crate::session::fakes::{FakeFactory, Gated, session_with};
 use crate::viewmodel::{FileKindData, RowData};
-use httporter_core::{MockOp, MockProvider, ProviderError, StorageProvider};
+use httporter_core::{AuthHint, MockOp, MockProvider, ProviderError, StorageProvider};
 use i_slint_backend_testing as testing;
 use slint::Model;
 use std::time::{Duration, Instant};
@@ -486,7 +486,10 @@ fn valid(zone: &str) -> ValidSite {
 fn add_site_with_a_rejected_password_saves_nothing() {
     let mock = Arc::new(MockProvider::new(Default::default()));
     let b = bound(mock.clone());
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    let rejected = ProviderError::Auth {
+        hint: AuthHint::Unknown,
+    };
+    mock.fail_next(MockOp::List, rejected, 1);
     // References to the storage: this test's and the factory's. A running test holds a third.
     let idle = Arc::strong_count(&mock);
     b.ui.invoke_add_site_save("".into(), "testzone".into(), 4, "wrong".into());

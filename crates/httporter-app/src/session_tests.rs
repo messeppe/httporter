@@ -3,7 +3,7 @@
 
 use super::fakes::*;
 use super::*;
-use httporter_core::{MockOp, MockProvider, RetryPolicy, UploadOptions, UploadSource};
+use httporter_core::{AuthHint, MockOp, MockProvider, RetryPolicy, UploadOptions, UploadSource};
 use httporter_platform::{CredentialKey, MemoryStore};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -158,6 +158,13 @@ const AUTH: &str = "Couldn't sign in to testzone. Check the password, zone name 
 const UNREACHABLE: &str =
     "Couldn't reach sg.storage.bunnycdn.com. Check your internet connection and try again.";
 
+/// The credentials were turned down, for no reason given (as Bunny always does).
+fn rejected() -> ProviderError {
+    ProviderError::Auth {
+        hint: AuthHint::Unknown,
+    }
+}
+
 // ---- The brief's tests ----
 
 #[tokio::test]
@@ -190,7 +197,7 @@ async fn select_site_lists_root() {
 async fn auth_error_shows_exact_message() {
     let mock = site_mock();
     let s = saved(&mock).await;
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    mock.fail_next(MockOp::List, rejected(), 1);
     let view = select(&s, 0).await;
     assert_eq!(view.error.as_deref(), Some(AUTH));
     assert!(view.rows.is_empty());
@@ -217,7 +224,7 @@ async fn navigate_into_folder_and_back() {
 async fn failed_site_turns_unhealthy() {
     let mock = site_mock();
     let s = saved(&mock).await;
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    mock.fail_next(MockOp::List, rejected(), 1);
     select(&s, 0).await;
     let item = &s.site_items()[0];
     assert!(!item.healthy);
@@ -259,7 +266,7 @@ async fn a_site_counts_as_healthy_until_a_request_fails() {
 async fn test_connection_reports_a_rejected_password() {
     let mock = site_mock();
     let (s, _, factory) = session_with(mock.clone());
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    mock.fail_next(MockOp::List, rejected(), 1);
     let r = s.test_connection(&valid("testzone", "sg", "pw")).await;
     assert_eq!(
         r,
@@ -473,7 +480,7 @@ async fn other_errors_name_the_host() {
     let s = saved(&mock).await;
     mock.fail_next(
         MockOp::List,
-        ProviderError::Transient("connection reset".into()),
+        ProviderError::Network("connection reset".into()),
         1,
     );
     let view = select(&s, 0).await;
@@ -495,8 +502,16 @@ async fn each_kind_of_failure_is_told_in_plain_words() {
         ),
         (odd, "sg.storage.bunnycdn.com sent an unexpected response."),
         (
-            ProviderError::Transient("operation timed out".into()),
+            ProviderError::Network("operation timed out".into()),
             UNREACHABLE,
+        ),
+        // The parked I1 item: a server that answers with a failure is not "Couldn't reach".
+        (
+            ProviderError::Server {
+                status: 400,
+                detail: "busy".into(),
+            },
+            "sg.storage.bunnycdn.com had a problem (HTTP 400). Try again in a moment.",
         ),
     ] {
         mock.fail_next(MockOp::List, error, 1);
@@ -518,7 +533,7 @@ fn every_error_kind_has_its_own_plain_words() {
         describe(&error, "testzone", "sg.storage.bunnycdn.com", attempt)
     };
     let cases = [
-        (said(ProviderError::Auth, list), AUTH),
+        (said(rejected(), list), AUTH),
         (
             said(ProviderError::NotFound, list),
             "Couldn't find /wp-content in testzone.",
@@ -528,8 +543,22 @@ fn every_error_kind_has_its_own_plain_words() {
             "sg.storage.bunnycdn.com is busy. Try again in a moment.",
         ),
         (
-            said(ProviderError::Transient("reset".into()), list),
+            said(ProviderError::Network("reset".into()), list),
             UNREACHABLE,
+        ),
+        (
+            said(
+                ProviderError::Server {
+                    status: 503,
+                    detail: "Service Unavailable".into(),
+                },
+                list,
+            ),
+            "sg.storage.bunnycdn.com had a problem (HTTP 503). Try again in a moment.",
+        ),
+        (
+            said(ProviderError::ClockSkew, list),
+            "Your PC's clock is off. Turn on “Set time automatically” in Windows Settings.",
         ),
         (
             said(ProviderError::Permanent("unexpected (418)".into()), list),
@@ -559,9 +588,18 @@ fn every_error_kind_has_its_own_plain_words() {
     ];
     for (text, expected) in cases {
         assert_eq!(text, expected);
-        for label in ["error:", "transient", "permanent", "refused:"] {
+        for label in ["error:", "transient", "permanent", "refused:", "network"] {
             assert!(!text.to_lowercase().contains(label), "{text}");
         }
+    }
+    // Whichever part of the credentials a service blames, it is the I1 sign-in text for now.
+    for hint in [
+        AuthHint::Unknown,
+        AuthHint::AccessKey,
+        AuthHint::Secret,
+        AuthHint::Region,
+    ] {
+        assert_eq!(said(ProviderError::Auth { hint }, Attempt::Setup), AUTH);
     }
     // A long detail from the client is cut short.
     let long = said(ProviderError::Permanent("x".repeat(500)), Attempt::Setup);
@@ -586,7 +624,7 @@ async fn switching_to_a_site_that_fails_drops_the_old_listing() {
     s.save_site(&valid("alpha", "sg", "pw")).await.unwrap();
     s.save_site(&valid("beta", "de", "pw")).await.unwrap();
     assert_eq!(select(&s, 0).await.rows.len(), 2);
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    mock.fail_next(MockOp::List, rejected(), 1);
     let view = select(&s, 1).await;
     assert!(view.rows.is_empty());
     assert_eq!(view.crumbs, ["beta"]);
@@ -853,7 +891,7 @@ async fn a_late_listing_from_a_site_the_user_left_is_dropped() {
 
     // Site A's answer finally comes, and it is a failure: neither its rows nor its error nor its
     // health may reach the pane or the sidebar.
-    gated.mock().fail_next(MockOp::List, ProviderError::Auth, 1);
+    gated.mock().fail_next(MockOp::List, rejected(), 1);
     gated.open();
     let answer = timeout(PROMPTLY, late).await.unwrap().unwrap();
     assert_eq!(answer, b, "the late answer reports the pane as it is");
@@ -1184,7 +1222,7 @@ async fn only_a_failed_connection_turns_the_pill_orange() {
     assert!(s.site_items()[0].healthy);
     mock.fail_next(
         MockOp::List,
-        ProviderError::Transient("connection reset".into()),
+        ProviderError::Network("connection reset".into()),
         1,
     );
     let offline = open_remote(&s, 0).await;
@@ -1201,7 +1239,7 @@ async fn only_a_failed_connection_turns_the_pill_orange() {
 async fn a_site_whose_password_is_rejected_is_not_added() {
     let mock = site_mock();
     let (s, creds, factory) = session_with(mock.clone());
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    mock.fail_next(MockOp::List, rejected(), 1);
     let refused = s
         .add_site(&valid("testzone", "sg", "pw"))
         .await
@@ -1228,7 +1266,7 @@ async fn a_site_that_cannot_be_reached_is_not_added() {
     let (s, creds, _) = session_with(mock.clone());
     mock.fail_next(
         MockOp::List,
-        ProviderError::Transient("operation timed out".into()),
+        ProviderError::Network("operation timed out".into()),
         1,
     );
     let refused = s
@@ -1272,7 +1310,9 @@ async fn adding_a_site_with_an_unknown_region_tries_nothing() {
 
 /// Minor 2: a listing someone is waiting for gives up after 20 s and is tried at most three
 /// times, for browsing, Test Connection and the test before a site is added alike. Transfers and
-/// deletes keep the default policy.
+/// deletes keep the default policy. Ruling F4: the interactive policy also reports a long
+/// `Retry-After` at once rather than waiting it out (pinned against Bunny in
+/// `an_interactive_listing_does_not_wait_out_a_long_retry_after`).
 #[tokio::test]
 async fn listings_someone_waits_for_give_up_sooner() {
     let mock = site_mock();
@@ -1285,12 +1325,7 @@ async fn listings_someone_waits_for_give_up_sooner() {
     let default = BunnyConfig::new("testzone", "sg.storage.bunnycdn.com", "pw");
     for cfg in configs {
         assert_eq!(cfg.list_timeout, Duration::from_secs(20));
-        assert_eq!(
-            cfg.list_retry,
-            Some(RetryPolicy {
-                delays: vec![Duration::from_secs(1), Duration::from_secs(2)]
-            })
-        );
+        assert_eq!(cfg.list_retry, Some(RetryPolicy::interactive()));
         assert_eq!(cfg.retry, default.retry);
         assert_eq!(cfg.transfer_idle_timeout, default.transfer_idle_timeout);
         assert_eq!(cfg.transfer_concurrency, default.transfer_concurrency);
@@ -1346,11 +1381,11 @@ async fn a_failed_listing_clears_the_loading_state_too() {
     let mock = site_mock();
     let s = saved(&mock).await;
     select(&s, 0).await;
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    mock.fail_next(MockOp::List, rejected(), 1);
     let failed = open_remote(&s, 0).await;
     assert_eq!(failed.error.as_deref(), Some(AUTH));
     assert!(!failed.loading);
-    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    mock.fail_next(MockOp::List, rejected(), 1);
     let failed = select(&s, 0).await;
     assert!(failed.error.is_some() && !failed.loading);
 }
@@ -1398,10 +1433,7 @@ async fn refresh_lists_the_cloud_folder_again_and_keeps_the_history() {
     mock.upload(
         &RemotePath::parse("fresh.txt").unwrap(),
         UploadSource::Bytes(b"new".to_vec().into()),
-        &UploadOptions {
-            content_type: "text/plain".into(),
-            sha256: None,
-        },
+        &UploadOptions::new("text/plain"),
     )
     .await
     .unwrap();

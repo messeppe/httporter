@@ -16,6 +16,7 @@ chrono = "0.4.45"
 futures-util = "0.3.34"
 # Exact pin: the credential-store backend must not drift between builds.
 keyring = "=3.6.3"
+mime_guess = { version = "2.0.5", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
 rusqlite = "0.41.1"
 serde = "1.0.229"

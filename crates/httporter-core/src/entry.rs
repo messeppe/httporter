@@ -6,6 +6,9 @@ use crate::{ProviderError, RemotePath};
 pub enum ChecksumKind {
     Sha256,
     Md5,
+    /// An S3 ETag of a multipart upload (`"…-N"`): not a digest of the
+    /// content, so two files can only be compared by size.
+    MultipartEtag,
 }
 
 /// A content hash as reported by the provider; `hex` is always lowercase.

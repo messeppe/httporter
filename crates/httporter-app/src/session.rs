@@ -51,18 +51,15 @@ pub trait ProviderFactory: Send + Sync {
 
 /// How long one try at a listing someone is waiting for may take.
 const INTERACTIVE_LIST_TIMEOUT: Duration = Duration::from_secs(20);
-/// The waits, in seconds, before such a listing is tried again: two retries.
-const INTERACTIVE_LIST_RETRIES: [u64; 2] = [1, 2];
 
 /// `cfg` for a site someone is browsing or adding: a listing gives up after 20 s and is tried at
-/// most three times, 1 s and 2 s apart, so a dead connection is reported in about a minute at
-/// worst (the default, six tries of up to 120 s with 25 s of waits, takes some twelve). Uploads,
-/// downloads and deletes keep the default policy.
+/// most three times, 1 s and 2 s apart ([`RetryPolicy::interactive`]), so a dead connection is
+/// reported in about a minute at worst (the default, six tries of up to 120 s with 25 s of waits,
+/// takes some twelve). A server that asks for more than 5 s of quiet is reported busy at once
+/// rather than waited for. Uploads, downloads and deletes keep the default policy.
 fn interactive(mut cfg: BunnyConfig) -> BunnyConfig {
     cfg.list_timeout = INTERACTIVE_LIST_TIMEOUT;
-    cfg.list_retry = Some(RetryPolicy {
-        delays: INTERACTIVE_LIST_RETRIES.map(Duration::from_secs).to_vec(),
-    });
+    cfg.list_retry = Some(RetryPolicy::interactive());
     cfg
 }
 
@@ -196,7 +193,8 @@ const DETAIL_MAX: usize = 120;
 /// explanation, cut short: no request was made, so there is nothing else to go on.
 fn describe(error: &ProviderError, zone: &str, host: &str, attempt: Attempt<'_>) -> String {
     match (error, attempt) {
-        (ProviderError::Auth, _) => {
+        // Bunny never says which part was wrong; S3's hints get their own words later.
+        (ProviderError::Auth { .. }, _) => {
             format!("Couldn't sign in to {zone}. Check the password, zone name and region.")
         }
         (ProviderError::NotFound, Attempt::List(dir)) => {
@@ -204,10 +202,18 @@ fn describe(error: &ProviderError, zone: &str, host: &str, attempt: Attempt<'_>)
         }
         (ProviderError::NotFound, Attempt::Setup) => format!("Couldn't find {zone}."),
         (ProviderError::RateLimited { .. }, _) => format!("{host} is busy. Try again in a moment."),
-        // No usable answer came back: the connection failed or timed out, or the server kept
-        // failing (5xx) through every retry.
-        (ProviderError::Transient(_), _) => {
+        // No answer came back: the connection failed, was cut or timed out.
+        (ProviderError::Network(_), _) => {
             format!("Couldn't reach {host}. Check your internet connection and try again.")
+        }
+        // The server answered, with a failure of its own (a 5xx, or Bunny's busy 400), through
+        // every retry.
+        (ProviderError::Server { status, .. }, _) => {
+            format!("{host} had a problem (HTTP {status}). Try again in a moment.")
+        }
+        (ProviderError::ClockSkew, _) => {
+            "Your PC's clock is off. Turn on “Set time automatically” in Windows Settings."
+                .to_owned()
         }
         (ProviderError::ChecksumMismatch, _) => {
             format!("{host} received a damaged copy. Try again.")
@@ -1296,6 +1302,9 @@ pub(crate) mod fakes {
         }
         async fn delete_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
             self.inner.delete_folder(dir).await
+        }
+        async fn create_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
+            self.inner.create_folder(dir).await
         }
     }
 

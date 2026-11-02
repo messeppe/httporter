@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use futures_util::future::join_all;
 use httporter_bunny::{BunnyConfig, BunnyStorage};
 use httporter_core::{
-    Capabilities, ChecksumKind, EmptyFolders, ProviderError, RemotePath, RetryPolicy,
+    AuthHint, Capabilities, ChecksumKind, EmptyFolders, ProviderError, RemotePath, RetryPolicy,
     StorageProvider,
 };
 use wiremock::matchers::{header, method, path};
@@ -91,7 +91,12 @@ async fn auth_failure_is_single_request() {
         .mount(&s)
         .await;
     let err = storage(&s).list(&RemotePath::root()).await.unwrap_err();
-    assert_eq!(err, ProviderError::Auth);
+    assert_eq!(
+        err,
+        ProviderError::Auth {
+            hint: AuthHint::Unknown
+        }
+    );
 }
 
 #[tokio::test]
@@ -121,11 +126,14 @@ async fn persistent_server_error_gives_up_after_six_attempts() {
         .mount(&s)
         .await;
     let err = storage(&s).list(&RemotePath::root()).await.unwrap_err();
-    assert!(matches!(err, ProviderError::Transient(_)), "{err:?}");
+    assert!(
+        matches!(err, ProviderError::Server { status: 503, .. }),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
-async fn busy_400_is_transient_and_retried() {
+async fn busy_400_is_a_server_error_and_retried() {
     let s = MockServer::start().await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(400).set_body_string("Unable to process request"))
@@ -235,6 +243,36 @@ async fn rate_limited_maps_retry_after() {
     );
 }
 
+/// Ruling F4: a listing someone is waiting for reports a long `Retry-After` at once instead of
+/// waiting it out (up to five minutes per try before).
+#[tokio::test]
+async fn an_interactive_listing_does_not_wait_out_a_long_retry_after() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "120"))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let mut cfg = config(&s);
+    cfg.list_retry = Some(RetryPolicy::interactive());
+    let storage = BunnyStorage::new(cfg).unwrap();
+    let root = RemotePath::root();
+    let started = Instant::now();
+    let err = tokio::time::timeout(Duration::from_secs(10), storage.list(&root))
+        .await
+        .expect("the listing fails fast")
+        .unwrap_err();
+    assert_eq!(
+        err,
+        ProviderError::RateLimited {
+            retry_after: Some(Duration::from_secs(120))
+        }
+    );
+    // Not even the policy's first one-second wait.
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+}
+
 #[tokio::test]
 async fn listing_reports_latency_and_http_version() {
     let s = MockServer::start().await;
@@ -328,7 +366,7 @@ async fn a_listing_gives_up_after_its_own_timeout_and_retries_by_its_own_policy(
         .list(&RemotePath::root())
         .await
         .unwrap_err();
-    assert!(matches!(err, ProviderError::Transient(_)), "{err:?}");
+    assert!(matches!(err, ProviderError::Network(_)), "{err:?}");
     // Two tries of 200 ms, not six of two seconds.
     let elapsed = started.elapsed();
     assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");

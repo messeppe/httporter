@@ -6,7 +6,7 @@ use futures_util::TryStreamExt;
 use futures_util::future::join_all;
 use httporter_bunny::{BunnyConfig, BunnyStorage};
 use httporter_core::{
-    ByteStream, ProviderError, RemotePath, RetryPolicy, StorageProvider, UploadOptions,
+    AuthHint, ByteStream, ProviderError, RemotePath, RetryPolicy, StorageProvider, UploadOptions,
     UploadSource,
 };
 use sha2::{Digest, Sha256};
@@ -29,10 +29,7 @@ fn rp(path: &str) -> RemotePath {
 }
 
 fn text_plain() -> UploadOptions {
-    UploadOptions {
-        content_type: "text/plain".into(),
-        sha256: None,
-    }
+    UploadOptions::new("text/plain")
 }
 
 /// A file of `len` bytes that is not all one value, so a truncated or
@@ -73,8 +70,8 @@ async fn upload_sends_checksum_content_type_and_body() {
             &rp("a/b.txt"),
             UploadSource::Bytes("hello".into()),
             &UploadOptions {
-                content_type: "text/plain".into(),
                 sha256: Some(sha.into()),
+                ..text_plain()
             },
         )
         .await
@@ -127,10 +124,7 @@ async fn upload_400_with_checksum_is_checksum_mismatch() {
         .expect(1)
         .mount(&s)
         .await;
-    let opts = UploadOptions {
-        content_type: "text/plain".into(),
-        sha256: Some(Sha256::digest(b"hello").into()),
-    };
+    let opts = checksummed();
     let err = storage(&s)
         .upload(&rp("a.txt"), UploadSource::Bytes("hello".into()), &opts)
         .await
@@ -173,7 +167,12 @@ async fn upload_auth_failure_is_single_request() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err, ProviderError::Auth);
+    assert_eq!(
+        err,
+        ProviderError::Auth {
+            hint: AuthHint::Unknown
+        }
+    );
 }
 
 #[tokio::test]
@@ -346,6 +345,18 @@ async fn the_root_is_not_a_file_for_any_operation() {
     assert!(s.received_requests().await.unwrap().is_empty());
 }
 
+/// Until the live probe (Task 7) shows how Bunny keeps empty folders, none is made.
+#[tokio::test]
+async fn create_folder_is_refused_without_a_request() {
+    let s = MockServer::start().await;
+    let err = storage(&s).create_folder(&rp("new")).await.unwrap_err();
+    assert_eq!(
+        err,
+        ProviderError::Refused("Bunny Storage creates a folder with its first file.".into())
+    );
+    assert!(s.received_requests().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn delete_missing_file_is_not_found() {
     let s = MockServer::start().await;
@@ -384,7 +395,10 @@ async fn delete_persistent_server_error_gives_up_after_six_attempts() {
         .mount(&s)
         .await;
     let err = storage(&s).delete_folder(&rp("a")).await.unwrap_err();
-    assert!(matches!(err, ProviderError::Transient(_)), "{err:?}");
+    assert!(
+        matches!(err, ProviderError::Server { status: 503, .. }),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
@@ -474,8 +488,8 @@ async fn an_upload_that_gets_no_answer_for_the_idle_timeout_is_abandoned() {
         .await
         .unwrap_err();
     match err {
-        ProviderError::Transient(m) => assert!(m.contains("upload stalled"), "{m}"),
-        other => panic!("expected Transient, got {other:?}"),
+        ProviderError::Network(m) => assert!(m.contains("upload stalled"), "{m}"),
+        other => panic!("expected Network, got {other:?}"),
     }
     assert!(started.elapsed() < Duration::from_millis(1200));
 }
@@ -494,8 +508,8 @@ async fn a_download_that_gets_no_answer_for_the_idle_timeout_is_abandoned() {
     let started = Instant::now();
     let result = BunnyStorage::new(cfg).unwrap().download(&rp("a.txt")).await;
     match result {
-        Err(ProviderError::Transient(m)) => assert!(m.contains("download stalled"), "{m}"),
-        other => panic!("expected Transient, got {:?}", other.map(|_| "a stream")),
+        Err(ProviderError::Network(m)) => assert!(m.contains("download stalled"), "{m}"),
+        other => panic!("expected Network, got {:?}", other.map(|_| "a stream")),
     }
     assert!(started.elapsed() < Duration::from_millis(1200));
 }
@@ -547,8 +561,8 @@ async fn an_empty_file_uploads_with_a_zero_length_body() {
 
 fn checksummed() -> UploadOptions {
     UploadOptions {
-        content_type: "text/plain".into(),
         sha256: Some(Sha256::digest(b"hello").into()),
+        ..text_plain()
     }
 }
 
@@ -669,5 +683,8 @@ async fn the_listing_policy_does_not_apply_to_deletes() {
     let storage = BunnyStorage::new(cfg).unwrap();
     storage.delete_file(&rp("slow.txt")).await.unwrap();
     let err = storage.delete_file(&rp("failing.txt")).await.unwrap_err();
-    assert!(matches!(err, ProviderError::Transient(_)), "{err:?}");
+    assert!(
+        matches!(err, ProviderError::Server { status: 503, .. }),
+        "{err:?}"
+    );
 }

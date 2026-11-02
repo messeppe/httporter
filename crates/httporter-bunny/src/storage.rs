@@ -27,9 +27,9 @@ use bytes::Bytes;
 use futures_util::future::{Either, select};
 use futures_util::stream::{self, Stream, StreamExt};
 use httporter_core::{
-    ByteStream, Capabilities, ChecksumKind, EmptyFolders, Entry, Listing, ProviderError,
-    RemotePath, RequestInfo, RetryPolicy, StorageProvider, UploadOptions, UploadSource,
-    encode_segment, with_retry,
+    AuthHint, ByteStream, Capabilities, ChecksumKind, EmptyFolders, Entry, Listing,
+    MAX_RETRY_AFTER, ProviderError, RemotePath, RequestInfo, RetryPolicy, StorageProvider,
+    UploadOptions, UploadSource, encode_segment, with_retry,
 };
 use reqwest::header::{
     ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER,
@@ -46,9 +46,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long an upload or download may make no progress by default.
 const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-/// The longest `Retry-After` we will honour, so a hostile or broken server
-/// cannot park a worker for hours.
-const RETRY_AFTER_MAX: Duration = Duration::from_secs(300);
 const USER_AGENT: &str = "HTTPorter/0.1";
 /// The size of the pieces an upload body is fed to the connection in.
 const BODY_CHUNK: usize = 64 * 1024;
@@ -465,6 +462,14 @@ impl StorageProvider for BunnyStorage {
         let url = url.as_str();
         with_retry(&self.retry, move |_| self.delete_once(url)).await
     }
+
+    /// Bunny has no request that makes an empty folder; one appears with its
+    /// first file. (The live probe may change this.)
+    async fn create_folder(&self, _dir: &RemotePath) -> Result<(), ProviderError> {
+        Err(ProviderError::Refused(
+            "Bunny Storage creates a folder with its first file.".into(),
+        ))
+    }
 }
 
 /// The kind of request a response answers, which decides what a 400 means.
@@ -479,12 +484,15 @@ enum Op {
 /// Turns a non-success HTTP status into the error the engine acts on.
 fn map_status(status: StatusCode, retry_after: Option<Duration>, op: Op) -> ProviderError {
     match status.as_u16() {
-        401 | 403 => ProviderError::Auth,
+        // Bunny never says which part of the credentials it rejected.
+        401 | 403 => ProviderError::Auth {
+            hint: AuthHint::Unknown,
+        },
         404 => ProviderError::NotFound,
         429 => ProviderError::RateLimited { retry_after },
         // Bunny answers 400 "Unable to process request" when it is overloaded.
         400 => match op {
-            Op::List | Op::Delete => ProviderError::Transient("server busy".into()),
+            Op::List | Op::Delete => server_busy(),
             Op::Upload {
                 with_checksum: true,
             } => ProviderError::ChecksumMismatch,
@@ -492,8 +500,20 @@ fn map_status(status: StatusCode, retry_after: Option<Duration>, op: Op) -> Prov
                 ProviderError::Permanent(format!("request rejected by server ({status})"))
             }
         },
-        500..=599 => ProviderError::Transient(format!("server error ({status})")),
+        code @ 500..=599 => ProviderError::Server {
+            status: code,
+            detail: status.canonical_reason().unwrap_or_default().to_owned(),
+        },
         _ => ProviderError::Permanent(format!("unexpected response from server ({status})")),
+    }
+}
+
+/// Bunny's "Unable to process request": the server is overloaded, so the
+/// request is worth another try, and fewer at once.
+fn server_busy() -> ProviderError {
+    ProviderError::Server {
+        status: 400,
+        detail: "busy".into(),
     }
 }
 
@@ -506,7 +526,7 @@ fn map_upload_400(body: &[u8], with_checksum: bool) -> ProviderError {
         .to_ascii_lowercase()
         .contains("unable to process request")
     {
-        return ProviderError::Transient("server busy (400)".into());
+        return server_busy();
     }
     match map_status(StatusCode::BAD_REQUEST, None, Op::Upload { with_checksum }) {
         // Without a checksum there is nothing to blame, so say what the
@@ -539,17 +559,17 @@ async fn read_capped(mut response: reqwest::Response, max: usize) -> reqwest::Re
     Ok(body)
 }
 
-/// `Retry-After` as a number of seconds, at most [`RETRY_AFTER_MAX`]; the
+/// `Retry-After` as a number of seconds, at most [`MAX_RETRY_AFTER`]; the
 /// HTTP-date form is ignored.
 fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     let wait = match value.parse::<u64>() {
         Ok(seconds) => Duration::from_secs(seconds),
         // Too big for a number is still a very long wait.
-        Err(e) if *e.kind() == IntErrorKind::PosOverflow => RETRY_AFTER_MAX,
+        Err(e) if *e.kind() == IntErrorKind::PosOverflow => MAX_RETRY_AFTER,
         Err(_) => return None,
     };
-    Some(wait.min(RETRY_AFTER_MAX))
+    Some(wait.min(MAX_RETRY_AFTER))
 }
 
 fn http_version(version: Version) -> &'static str {
@@ -561,8 +581,9 @@ fn http_version(version: Version) -> &'static str {
     }
 }
 
-/// A request that never produced a usable response: worth another try, unless
-/// the request itself could not be built.
+/// A request that never produced a usable response (no connection, a reset, a
+/// timeout): a network error, worth another try, unless the request itself
+/// could not be built.
 fn network_error(error: reqwest::Error) -> ProviderError {
     let mut causes = Vec::new();
     let mut source = error.source();
@@ -580,7 +601,7 @@ fn network_error(error: reqwest::Error) -> ProviderError {
     if builder_error {
         ProviderError::Permanent(message)
     } else {
-        ProviderError::Transient(message)
+        ProviderError::Network(message)
     }
 }
 
@@ -649,8 +670,9 @@ fn local_file_error(path: &Path, error: &io::Error) -> ProviderError {
     ProviderError::Permanent(format!("could not read {}: {error}", path.display()))
 }
 
+/// No progress for `idle`: as good as no answer.
 fn stall_error(what: &str, idle: Duration) -> ProviderError {
-    ProviderError::Transient(format!("the {what} stalled (no progress for {idle:?})"))
+    ProviderError::Network(format!("the {what} stalled (no progress for {idle:?})"))
 }
 
 /// An upload body in pieces, so the connection asks for it a bit at a time.
@@ -714,7 +736,7 @@ impl Activity {
     }
 }
 
-/// Runs `work`, giving up with a transient error if `activity` shows no
+/// Runs `work`, giving up with a network error if `activity` shows no
 /// progress for `limit`.
 async fn until_stalled<T>(
     work: impl Future<Output = T>,
@@ -728,7 +750,7 @@ async fn until_stalled<T>(
     }
 }
 
-/// A download body as the engine sees it. It fails with a transient error if
+/// A download body as the engine sees it. It fails with a network error if
 /// no data arrives for `idle`, and it holds its transfer `slot` until it ends
 /// or is dropped.
 fn guard_download<S>(body: S, slot: OwnedSemaphorePermit, idle: Duration) -> ByteStream
@@ -788,11 +810,22 @@ mod tests {
         StatusCode::from_u16(code).unwrap()
     }
 
+    fn busy() -> ProviderError {
+        ProviderError::Server {
+            status: 400,
+            detail: "busy".into(),
+        }
+    }
+
     #[test]
     fn credentials_and_missing_things_map_directly() {
+        // Bunny never says which part of the credentials it rejected.
+        let auth = ProviderError::Auth {
+            hint: AuthHint::Unknown,
+        };
         for op in [Op::List, Op::Download, Op::Delete] {
-            assert_eq!(map_status(status(401), None, op), ProviderError::Auth);
-            assert_eq!(map_status(status(403), None, op), ProviderError::Auth);
+            assert_eq!(map_status(status(401), None, op), auth);
+            assert_eq!(map_status(status(403), None, op), auth);
             assert_eq!(map_status(status(404), None, op), ProviderError::NotFound);
         }
     }
@@ -812,9 +845,8 @@ mod tests {
 
     #[test]
     fn a_400_depends_on_the_operation() {
-        let busy = ProviderError::Transient("server busy".into());
-        assert_eq!(map_status(status(400), None, Op::List), busy);
-        assert_eq!(map_status(status(400), None, Op::Delete), busy);
+        assert_eq!(map_status(status(400), None, Op::List), busy());
+        assert_eq!(map_status(status(400), None, Op::Delete), busy());
         assert_eq!(
             map_status(
                 status(400),
@@ -843,7 +875,7 @@ mod tests {
 
     #[test]
     fn an_upload_400_is_busy_only_when_the_server_says_so() {
-        let busy = ProviderError::Transient("server busy (400)".into());
+        let busy = busy();
         for with_checksum in [true, false] {
             for body in [
                 "Unable to process request",
@@ -858,6 +890,7 @@ mod tests {
             }
         }
         assert!(busy.is_retryable());
+        assert!(busy.is_slow_down());
     }
 
     #[test]
@@ -894,16 +927,20 @@ mod tests {
     }
 
     #[test]
-    fn server_errors_are_transient_and_everything_else_is_permanent() {
+    fn server_errors_keep_their_status_and_everything_else_is_permanent() {
         for code in [500, 502, 503, 599] {
-            assert!(
-                matches!(
-                    map_status(status(code), None, Op::List),
-                    ProviderError::Transient(_)
-                ),
-                "{code}"
-            );
+            match map_status(status(code), None, Op::List) {
+                ProviderError::Server { status, .. } => assert_eq!(status, code),
+                other => panic!("{code}: expected Server, got {other:?}"),
+            }
         }
+        assert_eq!(
+            map_status(status(503), None, Op::Delete),
+            ProviderError::Server {
+                status: 503,
+                detail: "Service Unavailable".into()
+            }
+        );
         for code in [301, 402, 405, 409, 413, 418] {
             assert!(
                 matches!(
@@ -981,7 +1018,7 @@ mod tests {
             .await
             .expect("the watchdog must fire");
         match done {
-            Err(ProviderError::Transient(m)) => assert!(m.contains("upload stalled"), "{m}"),
+            Err(ProviderError::Network(m)) => assert!(m.contains("upload stalled"), "{m}"),
             other => panic!("expected a stall, got {other:?}"),
         }
         // 80 ms of items, then the limit.
@@ -999,7 +1036,7 @@ mod tests {
         assert_eq!(slots.available_permits(), 0, "held while the body is open");
         assert_eq!(guarded.next().await, Some(Ok(Bytes::from_static(b"x"))));
         match guarded.next().await {
-            Some(Err(ProviderError::Transient(m))) => {
+            Some(Err(ProviderError::Network(m))) => {
                 assert!(m.contains("download stalled"), "{m}");
             }
             other => panic!("expected a stall, got {other:?}"),

@@ -75,6 +75,16 @@ impl RemotePath {
         self.0.is_empty()
     }
 
+    /// `self` is `dir` or somewhere beneath it. Whole segments only: `a/bc`
+    /// is not within `a/b`. Everything is within the root.
+    pub fn is_within(&self, dir: &RemotePath) -> bool {
+        dir.is_root()
+            || self
+                .0
+                .strip_prefix(dir.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -183,5 +193,24 @@ mod tests {
     #[test]
     fn join_rejects_empty_name() {
         assert_eq!(RemotePath::root().join(""), Err(PathError::EmptySegment));
+    }
+
+    /// Ledger 63: "a/bc" shares the text "a/b" but is not inside it.
+    #[test]
+    fn is_within_needs_a_separator_boundary() {
+        let d = RemotePath::parse("a/b").unwrap();
+        assert!(RemotePath::parse("a/b/c").unwrap().is_within(&d));
+        assert!(d.is_within(&d));
+        assert!(!RemotePath::parse("a/bc").unwrap().is_within(&d));
+        assert!(!RemotePath::parse("a").unwrap().is_within(&d));
+        assert!(!RemotePath::parse("a-b/c").unwrap().is_within(&d));
+    }
+
+    #[test]
+    fn everything_is_within_the_root_and_the_root_only_there() {
+        let root = RemotePath::root();
+        assert!(root.is_within(&root));
+        assert!(RemotePath::parse("a/b").unwrap().is_within(&root));
+        assert!(!root.is_within(&RemotePath::parse("a").unwrap()));
     }
 }
