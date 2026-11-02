@@ -38,11 +38,12 @@ impl SqliteJournal {
     }
 
     fn with_connection(conn: Connection) -> Result<Self, StoreError> {
-        // A commit in WAL mode then waits for the log to reach the operating system, not for
-        // the disk to confirm it. A crash of the app loses nothing; only a power cut can cost
-        // the last few state changes, and a job whose "done" is lost is simply offered again.
-        // The engine writes after every file, so this keeps a slow disk from capping speed.
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // FULL: a commit in WAL mode waits for the log to reach the disk, so a state change
+        // that was reported as saved survives a power cut, not only a crash of the app. The
+        // journal is what lets a killed publish resume without re-uploading finished files
+        // (spec S5), so it must not lose its last few changes. The cost is one disk sync per
+        // commit, which is small next to the upload each commit follows.
+        conn.pragma_update(None, "synchronous", "FULL")?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -529,6 +530,18 @@ mod tests {
             .query_row("SELECT count(*) FROM journal", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    /// The journal must survive a power cut (spec S5), so commits wait for the disk.
+    #[test]
+    fn journal_commits_with_synchronous_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SqliteJournal::open(&dir.path().join("httporter.db")).unwrap();
+        let level: i64 = journal
+            .lock()
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(level, 2, "PRAGMA synchronous: 2 is FULL");
     }
 
     #[test]
