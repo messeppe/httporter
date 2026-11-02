@@ -413,7 +413,6 @@ fn site_rows_are_updated_in_place() {
         name: name.into(),
         subtitle: "Bunny · Singapore".into(),
         provider: SiteProvider::Bunny,
-        mono: "B".into(),
         healthy,
     };
     sync_sites(&ui, &[item("a", true), item("b", true)]);
@@ -441,7 +440,6 @@ fn site_rows_carry_the_provider_tile() {
         name: name.into(),
         subtitle: String::new(),
         provider,
-        mono: provider.mono().into(),
         healthy: true,
     };
     sync_sites(

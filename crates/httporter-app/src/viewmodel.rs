@@ -271,6 +271,13 @@ mod tests {
     use slint::Model;
     use std::time::{Duration, Instant};
 
+    /// How long 50,000 rows may take. Unoptimised code is several times slower than the release
+    /// build the number is about, and a test run right after a compile is slower again, so a debug
+    /// build gets four times the time (ledger 229). The release number is what S4 promises.
+    fn budget_for_50k() -> Duration {
+        Duration::from_millis(500) * if cfg!(debug_assertions) { 4 } else { 1 }
+    }
+
     fn now() -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2026, 10, 29)
             .unwrap()
@@ -514,16 +521,25 @@ mod tests {
     }
 
     #[test]
+    fn the_50k_budget_is_four_times_longer_in_debug_builds() {
+        let release = Duration::from_millis(500);
+        assert_eq!(
+            budget_for_50k(),
+            if cfg!(debug_assertions) {
+                release * 4
+            } else {
+                release
+            }
+        );
+    }
+
+    #[test]
     fn converts_50k_entries_quickly() {
         let entries = synthetic_entries(50_000);
         let t = Instant::now();
         let rows = rows_from_remote(&entries, now());
         assert_eq!(rows.len(), 50_000);
-        assert!(
-            t.elapsed() < Duration::from_millis(500),
-            "{:?}",
-            t.elapsed()
-        );
+        assert!(t.elapsed() < budget_for_50k(), "{:?}", t.elapsed());
     }
 
     #[test]
@@ -532,11 +548,7 @@ mod tests {
         let t = Instant::now();
         let rows = rows_from_remote_sorted(&entries, now(), SortKey::Modified, false);
         assert_eq!(rows.len(), 50_000);
-        assert!(
-            t.elapsed() < Duration::from_millis(500),
-            "{:?}",
-            t.elapsed()
-        );
+        assert!(t.elapsed() < budget_for_50k(), "{:?}", t.elapsed());
     }
 
     #[test]
@@ -564,11 +576,7 @@ mod tests {
         let mut entries = synthetic_entries(50_000);
         let t = Instant::now();
         sort_remote_entries(&mut entries, SortKey::Modified, false);
-        assert!(
-            t.elapsed() < Duration::from_millis(500),
-            "{:?}",
-            t.elapsed()
-        );
+        assert!(t.elapsed() < budget_for_50k(), "{:?}", t.elapsed());
         assert_eq!(entries.len(), 50_000);
     }
 

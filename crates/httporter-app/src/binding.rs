@@ -25,8 +25,9 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 use crate::add_site::{AddSiteForm, ValidSite, show_field_error};
+use crate::copy;
 use crate::session::{
-    LocalView, RemoteView, Session, SiteItemData, SiteProvider, Ticket, endpoint_preview, items,
+    LocalView, RemoteView, Session, SiteItemData, SiteProvider, Ticket, endpoint_preview,
 };
 use crate::sort::SortKey;
 use crate::viewmodel::{RowData, sort_key_for_column, to_slint_rows};
@@ -671,7 +672,7 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     ui.set_remote_can_go_back(view.can_back);
     ui.set_remote_can_go_forward(view.can_forward);
     if change.counts() && !failed {
-        ui.set_remote_status(items(view.rows.len()).into());
+        ui.set_remote_status(copy::items(view.rows.len()).into());
         ui.set_status_message(SharedString::new());
     }
 }
@@ -727,7 +728,7 @@ fn sync_sites(ui: &AppWindow, items: &[SiteItemData]) {
             name: item.name.as_str().into(),
             subtitle: item.subtitle.as_str().into(),
             provider: slint_tile(item.provider),
-            mono: item.mono.as_str().into(),
+            mono: item.provider.mono().into(),
             healthy: item.healthy,
         })
         .collect();

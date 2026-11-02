@@ -155,7 +155,9 @@ export component AppWindow inherits Window {
     // save was running (`add-site-busy`), the app should give up on it and clear the flag.
     callback add-site-cancel();
 
-    out property <bool> sidebar-visible: true;
+    // The sidebar is shown. The toolbar button flips it; the app may set it too (to restore what
+    // the user chose last time).
+    in-out property <bool> sidebar-visible: true;
     // Where the cloud pane is, in window coordinates and logical pixels, for telling which pane a
     // point is over. The panes sit side by side when the main area is wide enough and are stacked
     // otherwise (`panes-stacked`). Side by side, a point is over the cloud pane when

@@ -171,9 +171,33 @@ struct Hook {
     on_hover: Box<dyn Fn(bool)>,
     on_drop: Box<dyn Fn(DropBatch)>,
     layout: Box<dyn Fn() -> PaneLayout>,
+    /// Where the cursor is on the screen, in physical pixels. The system's answer
+    /// ([`cursor_on_screen`]); a test says where it likes.
+    cursor_on_screen: Box<dyn Fn() -> Option<(i32, i32)>>,
 }
 
 impl Hook {
+    fn new(
+        on_hover: Box<dyn Fn(bool)>,
+        on_drop: Box<dyn Fn(DropBatch)>,
+        layout: Box<dyn Fn() -> PaneLayout>,
+        cursor_on_screen: Box<dyn Fn() -> Option<(i32, i32)>>,
+    ) -> Rc<Self> {
+        Rc::new(Hook {
+            tracker: RefCell::new(DropTracker::default()),
+            geometry: Cell::new(Geometry {
+                origin: (0, 0),
+                scale: 1.0,
+            }),
+            over_remote: Cell::new(false),
+            poll: Timer::default(),
+            on_hover,
+            on_drop,
+            layout,
+            cursor_on_screen,
+        })
+    }
+
     /// Remember where the window is: the drag events do not say, and the window cannot move
     /// while the user is dragging files over it.
     fn capture_geometry(&self, window: &slint::Window) {
@@ -188,7 +212,7 @@ impl Hook {
 
     /// The cursor in the window's logical pixels.
     fn cursor(&self) -> (f32, f32) {
-        cursor_on_screen().map_or(NOWHERE, |c| to_logical(c, self.geometry.get()))
+        (self.cursor_on_screen)().map_or(NOWHERE, |c| to_logical(c, self.geometry.get()))
     }
 
     fn set_over_remote(&self, over_remote: bool) {
@@ -259,18 +283,12 @@ pub fn install_drop_hook(
 ) {
     use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
 
-    let hook = Rc::new(Hook {
-        tracker: RefCell::new(DropTracker::default()),
-        geometry: Cell::new(Geometry {
-            origin: (0, 0),
-            scale: 1.0,
-        }),
-        over_remote: Cell::new(false),
-        poll: Timer::default(),
-        on_hover: Box::new(on_hover),
-        on_drop: Box::new(on_drop),
-        layout: Box::new(layout),
-    });
+    let hook = Hook::new(
+        Box::new(on_hover),
+        Box::new(on_drop),
+        Box::new(layout),
+        Box::new(cursor_on_screen),
+    );
 
     window.on_winit_window_event(move |window, event| {
         match event {
@@ -454,16 +472,164 @@ mod tests {
         assert_eq!(pane_at(NOWHERE.0, NOWHERE.1, STACKED), PaneSide::Local);
     }
 
+    // ---- The hook's timers, on a clock that only moves when a test moves it ----
+    //
+    // The testing backend keeps its own time (`mock_elapsed_time`): a Slint timer fires when the
+    // test says that long has passed, however long the test really took. So these tests neither
+    // sleep nor depend on how busy the machine is.
+
+    use std::time::Duration;
+
+    use crate::AppWindow;
+    use i_slint_backend_testing::{init_no_event_loop, mock_elapsed_time};
+    use slint::ComponentHandle;
+
+    /// A hook over a window of the testing backend, with a cursor to move and the calls it made.
+    struct Bed {
+        hook: Rc<Hook>,
+        window: AppWindow,
+        cursor: Rc<Cell<(i32, i32)>>,
+        hovers: Rc<RefCell<Vec<bool>>>,
+        drops: Rc<RefCell<Vec<DropBatch>>>,
+    }
+
+    /// The cursor starts over This PC (x = 100); the cloud pane starts at x = 640.
+    fn bed() -> Bed {
+        init_no_event_loop();
+        let cursor = Rc::new(Cell::new((100, 10)));
+        let hovers = Rc::new(RefCell::new(Vec::new()));
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let hook = Hook::new(
+            Box::new({
+                let hovers = hovers.clone();
+                move |over_remote| hovers.borrow_mut().push(over_remote)
+            }),
+            Box::new({
+                let drops = drops.clone();
+                move |batch| drops.borrow_mut().push(batch)
+            }),
+            Box::new(|| SIDE_BY_SIDE),
+            Box::new({
+                let cursor = cursor.clone();
+                move || Some(cursor.get())
+            }),
+        );
+        let window = AppWindow::new().unwrap();
+        window.show().unwrap();
+        Bed {
+            hook,
+            window,
+            cursor,
+            hovers,
+            drops,
+        }
+    }
+
+    /// Lets `ms` milliseconds of the test's clock go by.
+    fn pass(ms: u128) {
+        mock_elapsed_time(Duration::from_millis(ms as u64));
+    }
+
+    const POLL_MS: u128 = HOVER_POLL.as_millis();
+
+    #[test]
+    fn hovering_looks_up_the_pane_every_poll_and_reports_only_a_change() {
+        let b = bed();
+        b.hook.start_hover(b.window.window());
+        assert!(
+            b.hovers.borrow().is_empty(),
+            "over This PC: nothing to report"
+        );
+
+        // The cursor moves into the cloud pane, but nobody looks until the next poll.
+        b.cursor.set((900, 10));
+        pass(POLL_MS - 1);
+        assert!(b.hovers.borrow().is_empty());
+        pass(1);
+        assert_eq!(*b.hovers.borrow(), [true]);
+
+        // Polls that find the same answer say nothing.
+        pass(4 * POLL_MS);
+        assert_eq!(*b.hovers.borrow(), [true]);
+
+        b.cursor.set((100, 10));
+        pass(POLL_MS);
+        assert_eq!(*b.hovers.borrow(), [true, false]);
+    }
+
+    #[test]
+    fn the_polling_stops_when_the_files_stop_hovering() {
+        let b = bed();
+        b.hook.start_hover(b.window.window());
+        b.cursor.set((900, 10));
+        pass(POLL_MS);
+        assert_eq!(*b.hovers.borrow(), [true]);
+
+        // They left the window: the cloud pane is told at once, and the timer is gone.
+        b.hook.end_hover();
+        assert_eq!(*b.hovers.borrow(), [true, false]);
+        pass(10 * POLL_MS);
+        assert_eq!(*b.hovers.borrow(), [true, false]);
+    }
+
+    #[test]
+    fn the_files_of_a_drop_are_handed_over_once_after_the_last_of_them() {
+        let b = bed();
+        b.cursor.set((900, 10));
+        for name in [r"C:\a.txt", r"C:\b", r"C:\c"] {
+            b.hook.drop_file(b.window.window(), Path::new(name));
+        }
+        assert!(
+            b.drops.borrow().is_empty(),
+            "winit has not finished delivering the drop"
+        );
+
+        pass(0);
+        {
+            let drops = b.drops.borrow();
+            assert_eq!(drops.len(), 1, "one batch for the three files");
+            assert_eq!(drops[0].side, PaneSide::Remote);
+            assert_eq!(
+                drops[0].paths,
+                [r"C:\a.txt", r"C:\b", r"C:\c"].map(PathBuf::from)
+            );
+        }
+        pass(10 * POLL_MS);
+        assert_eq!(b.drops.borrow().len(), 1, "nothing is handed over twice");
+
+        // The next drop is a batch of its own, wherever it lands.
+        b.cursor.set((100, 10));
+        b.hook.drop_file(b.window.window(), Path::new(r"C:\d"));
+        pass(0);
+        let drops = b.drops.borrow();
+        assert_eq!(drops.len(), 2);
+        assert_eq!(drops[1].side, PaneSide::Local);
+        assert_eq!(drops[1].paths, [PathBuf::from(r"C:\d")]);
+    }
+
+    #[test]
+    fn a_drop_ends_the_hover() {
+        let b = bed();
+        b.hook.start_hover(b.window.window());
+        b.cursor.set((900, 10));
+        pass(POLL_MS);
+        assert_eq!(*b.hovers.borrow(), [true]);
+
+        b.hook.drop_file(b.window.window(), Path::new(r"C:\a"));
+        assert_eq!(*b.hovers.borrow(), [true, false]);
+        // The poll is stopped, so it cannot light the pane again.
+        pass(10 * POLL_MS);
+        assert_eq!(*b.hovers.borrow(), [true, false]);
+    }
+
     #[test]
     fn the_drop_chip_shows_on_the_cloud_pane_only_while_files_hover() {
-        use crate::AppWindow;
-        use i_slint_backend_testing::{ElementHandle, init_no_event_loop};
-        use slint::ComponentHandle;
+        use i_slint_backend_testing::ElementHandle;
 
         init_no_event_loop();
         let w = AppWindow::new().unwrap();
         w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
-        // Only a selected site lights up (see keyboard_tests for the pane with none).
+        // Only a selected site lights up (see pane_tests for the pane with none).
         let site = crate::keyboard_tests::site("example-shop.com", crate::ProviderTile::Bunny, "B");
         w.set_sites(slint::ModelRc::new(slint::VecModel::from(vec![site])));
         w.set_selected_site(0);

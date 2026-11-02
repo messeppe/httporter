@@ -1,0 +1,421 @@
+// Form controls shared by the app's sheets: a single-line text field, the red line of text under
+// a field, a labelled form row and the region drop-down. Nothing here knows about any one form: a
+// sheet puts its own texts and callbacks on them (the Add Site sheet is the first user).
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { VCenter } from "layout.slint";
+
+// Single-line text field (mockup `.input`: 28 px, 7 px corners; the outline is a full pixel in
+// `field-border` so that the field can be seen). It shows the error border when `error` is set;
+// the message itself is drawn by the caller under the field. A password field shows dots,
+// assistive technology is told it has no readable value, and it cannot be copied or cut.
+export component Field inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <string> label;
+    in property <string> error;
+    in property <InputType> input-type: InputType.text;
+    out property <bool> has-focus: input.has-focus;
+    callback edited();
+    // Return was pressed (not auto-repeat).
+    callback accepted();
+
+    height: 28px;
+    forward-focus: input;
+    border-radius: 7px;
+    background: Theme.field;
+    border-width: 1px;
+    border-color: root.error != "" ? Theme.red : Theme.field-border;
+
+    // Where the text may be drawn: the 9 px inside the border, clipped so that a long value
+    // scrolls instead of spilling out.
+    Rectangle {
+        x: 9px;
+        width: parent.width - 18px;
+        clip: true;
+
+        Text {
+            width: 100%;
+            height: 100%;
+            text: root.placeholder;
+            visible: input.text == "" && input.preedit-text == "";
+            color: Theme.label2;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            // The input carries the placeholder for assistive technology.
+            accessible-role: none;
+        }
+
+        ContextMenuArea {
+            Menu {
+                MenuItem {
+                    title: @tr("Cut");
+                    enabled: input.text != "" && root.input-type != InputType.password;
+                    activated => { input.cut(); }
+                }
+                MenuItem {
+                    title: @tr("Copy");
+                    enabled: input.text != "" && root.input-type != InputType.password;
+                    activated => { input.copy(); }
+                }
+                MenuItem {
+                    title: @tr("Paste");
+                    activated => { input.paste(); }
+                }
+                MenuItem {
+                    title: @tr("Select All");
+                    enabled: input.text != "";
+                    activated => { input.select-all(); }
+                }
+            }
+
+            input := TextInput {
+                property <length> scroll-x;
+
+                x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll-x));
+                width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                single-line: true;
+                input-type: root.input-type;
+                vertical-alignment: center;
+                color: Theme.label;
+                font-size: Theme.font-body;
+                selection-background-color: Theme.accent;
+                selection-foreground-color: Theme.on-accent;
+                accessible-label: root.label;
+                accessible-description: root.error;
+                accessible-placeholder-text: root.placeholder;
+                accessible-value: root.input-type == InputType.password ? "" : self.text;
+
+                cursor-position-changed(position) => {
+                    if (position.x + self.scroll-x < 0px) {
+                        self.scroll-x = -position.x;
+                    } else if (position.x + self.scroll-x > parent.width - self.text-cursor-width) {
+                        self.scroll-x = parent.width - position.x - self.text-cursor-width;
+                    }
+                }
+                edited => { root.edited(); }
+                accepted => { root.accepted(); }
+                key-pressed(event) => {
+                    // A held Return (for example the one that opened the sheet) must not press
+                    // the default button over and over.
+                    if (event.text == Key.Return && event.repeat) {
+                        return accept;
+                    }
+                    // What is typed into a password field must not leave through the clipboard:
+                    // copy and cut (Ctrl+C, Ctrl+X, Ctrl+Insert, Shift+Delete) do nothing there.
+                    if (root.input-type == InputType.password && ((event.modifiers.control && (event.text == "c" || event.text == "C" || event.text == "x" || event.text == "X" || event.text == Key.Insert)) || (event.modifiers.shift && event.text == Key.Delete))) {
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside the field like the buttons' ring.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+}
+
+// One line of red text under a field, with a warning mark so that colour is not the only cue.
+// An assertive live region, so assistive technology announces a new error at once.
+export component ErrorLine inherits Rectangle {
+    in property <string> text;
+
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    accessible-live-region: assertive;
+
+    HorizontalLayout {
+        spacing: 4px;
+
+        VCenter {
+            Image {
+                source: Icons.warn;
+                colorize: Theme.red;
+                width: 12px;
+                height: 12px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.red;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+// A form row (mockup `.form`): the label to the left in a right aligned column (120 px; the
+// mockup's 150 px leaves the password hint too little room for one line), then the field and
+// whatever belongs under it.
+export component FormRow inherits HorizontalLayout {
+    in property <string> label;
+
+    spacing: 14px;
+
+    Text {
+        width: 120px;
+        height: 28px;
+        text: root.label;
+        color: Theme.label;
+        font-size: Theme.font-body;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 4px;
+        @children
+    }
+}
+
+// The rows of the region list: the current region has the selection colour, the one under the
+// pointer a hover tint. Keeps the current row in view when it changes.
+component RegionList inherits Rectangle {
+    in property <[string]> model;
+    in property <int> current-index;
+    in property <length> item-height: 28px;
+    callback chosen(int);
+
+    // Scrolls the list just far enough to show the current row.
+    function reveal() {
+        if (root.current-index * root.item-height < -list.content-y) {
+            list.content-y = -root.current-index * root.item-height;
+        } else if ((root.current-index + 1) * root.item-height > -list.content-y + list.visible-height) {
+            list.content-y = list.visible-height - (root.current-index + 1) * root.item-height;
+        }
+    }
+
+    changed current-index => { root.reveal(); }
+
+    list := ScrollView {
+        VerticalLayout {
+            alignment: start;
+            for name[index] in root.model: Rectangle {
+                height: root.item-height;
+                border-radius: 6px;
+                background: index == root.current-index ? Theme.sel : (area.has-hover ? Theme.hover : transparent);
+                accessible-role: list-item;
+                accessible-label: name;
+                accessible-item-selected: index == root.current-index;
+                accessible-action-default => { root.chosen(index); }
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 6px;
+
+                    VCenter {
+                        Image {
+                            source: Icons.check;
+                            colorize: Theme.sel-text;
+                            width: 12px;
+                            height: 12px;
+                            opacity: index == root.current-index ? 1 : 0;
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        text: name;
+                        color: index == root.current-index ? Theme.sel-text : Theme.label;
+                        font-size: Theme.font-body;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        accessible-role: none;
+                    }
+                }
+
+                area := TouchArea {
+                    clicked => { root.chosen(index); }
+                }
+            }
+        }
+    }
+}
+
+// Drop-down list of the regions (mockup `select.input`). Closed, it shows the current region and
+// Up and Down change it; Return or Space (or a click) opens the list. In the list Up, Down, Home
+// and End change the region, Return or Space close the list, and so does Escape, which then
+// leaves the sheet open.
+export component RegionPicker inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: 0;
+    in property <string> label;
+    in property <string> error;
+    out property <bool> has-focus: key-focus.has-focus || popup.is-open;
+    // The user chose another region.
+    callback selected(int);
+
+    property <string> current-name: root.current-index >= 0 && root.current-index < root.model.length ? root.model[root.current-index] : "";
+
+    function choose(index: int) {
+        if (index >= 0 && index < root.model.length && index != root.current-index) {
+            root.current-index = index;
+            root.selected(index);
+        }
+    }
+
+    function open-list() {
+        if (root.model.length > 0 && !popup.is-open) {
+            popup.show();
+        }
+    }
+
+    height: 28px;
+    forward-focus: key-focus;
+    border-radius: 7px;
+    background: Theme.field;
+    border-width: 1px;
+    border-color: root.error != "" ? Theme.red : Theme.field-border;
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.current-name;
+    accessible-description: root.error;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+    accessible-action-expand => { root.open-list(); }
+    accessible-action-default => { root.open-list(); }
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 6px;
+        spacing: 4px;
+
+        Text {
+            text: root.current-name;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            accessible-role: none;
+        }
+        VCenter {
+            Image {
+                source: Icons.sort-down;
+                colorize: Theme.label2;
+                width: 16px;
+                height: 16px;
+                accessible-role: none;
+            }
+        }
+    }
+
+    // Keyboard focus ring, like the text fields'.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it; the click handler below does.
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.DownArrow) {
+                root.choose(root.current-index + 1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.choose(root.current-index - 1);
+                return accept;
+            }
+            if ((event.text == Key.Return || event.text == Key.Space) && !event.repeat) {
+                root.open-list();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            key-focus.focus();
+            root.open-list();
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        width: root.width;
+        height: min(root.model.length, 8) * 28px + 8px;
+        close-policy: close-on-click-outside;
+        forward-focus: list-scope;
+
+        Rectangle {
+            background: Theme.sheet;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.sep-strong;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.shadow-sheet;
+
+            list-scope := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.Escape || ((event.text == Key.Return || event.text == Key.Space) && !event.repeat)) {
+                        popup.close();
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        root.choose(root.current-index + 1);
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.choose(root.current-index - 1);
+                        return accept;
+                    }
+                    if (event.text == Key.Home) {
+                        root.choose(0);
+                        return accept;
+                    }
+                    if (event.text == Key.End) {
+                        root.choose(root.model.length - 1);
+                        return accept;
+                    }
+                    return reject;
+                }
+
+                RegionList {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    model: root.model;
+                    current-index: root.current-index;
+                    chosen(index) => {
+                        root.choose(index);
+                        popup.close();
+                    }
+                }
+            }
+        }
+    }
+}
