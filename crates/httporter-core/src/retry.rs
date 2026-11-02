@@ -9,6 +9,11 @@ use crate::ProviderError;
 
 /// The longest `Retry-After` any policy honours, so a hostile or broken
 /// server cannot park a request for hours.
+///
+/// Providers clamp a server's Retry-After to `MAX_RETRY_AFTER` before
+/// returning `RateLimited` (spec: honoured up to 300 s), so the default
+/// policy waits at most 300 s; a policy whose `max_retry_after` is below
+/// that (interactive: 5 s) gives up instead of waiting.
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 
 /// The waits before each retry, in seconds: up to five retries.
@@ -70,6 +75,11 @@ impl Default for RetryPolicy {
 /// After a [`ProviderError::RateLimited`] the wait is the longer of the
 /// policy's delay and the server's `retry_after`; a `retry_after` beyond the
 /// policy's `max_retry_after` is returned at once instead of waited out.
+///
+/// Providers clamp a server's Retry-After to [`MAX_RETRY_AFTER`] before
+/// returning `RateLimited` (spec: honoured up to 300 s), so the default
+/// policy waits at most 300 s; a policy whose `max_retry_after` is below
+/// that (interactive: 5 s) gives up instead of waiting.
 pub async fn with_retry<T, F, Fut>(policy: &RetryPolicy, mut op: F) -> Result<T, ProviderError>
 where
     F: FnMut(u32) -> Fut,

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::stream;
+use md5::Md5;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -34,7 +35,8 @@ struct File {
     data: Bytes,
     modified: DateTime<Utc>,
     content_type: Option<String>,
-    checksum: Checksum,
+    /// Listed instead of a digest, as S3 lists a file uploaded in parts.
+    etag: Option<String>,
 }
 
 enum Node {
@@ -73,10 +75,12 @@ impl Calls {
         let max = self.max_in_flight.entry(op).or_default();
         *max = (*max).max(in_flight);
         let latency = self.latency.get(&op).copied().unwrap_or_default();
-        (
-            latency,
-            self.failures.get_mut(&op).and_then(VecDeque::pop_front),
-        )
+        (latency, self.next_failure(op))
+    }
+
+    /// The next error queued for `op`, if any, taken off the queue.
+    fn next_failure(&mut self, op: MockOp) -> Option<ProviderError> {
+        self.failures.get_mut(&op).and_then(VecDeque::pop_front)
     }
 }
 
@@ -151,17 +155,13 @@ impl State {
                 path.as_str()
             )));
         }
-        let checksum = Checksum {
-            kind: ChecksumKind::Sha256,
-            hex: hex::encode(sha256(&data)),
-        };
         self.nodes.insert(
             path.clone(),
             Node::File(File {
                 data,
                 modified: Utc::now(),
                 content_type,
-                checksum,
+                etag: None,
             }),
         );
         Ok(())
@@ -191,9 +191,9 @@ impl State {
         }
     }
 
-    /// The direct children of `dir`, sorted by name. A folder implied by
-    /// several deeper paths is listed once.
-    fn children(&self, dir: &RemotePath) -> Vec<Entry> {
+    /// The direct children of `dir`, sorted by name, with files carrying
+    /// `checksums`. A folder implied by several deeper paths is listed once.
+    fn children(&self, dir: &RemotePath, checksums: Option<ChecksumKind>) -> Vec<Entry> {
         let prefix_len = if dir.is_root() {
             0
         } else {
@@ -211,13 +211,18 @@ impl State {
             };
             by_name
                 .entry(name)
-                .or_insert_with(|| child_entry(dir, name, file));
+                .or_insert_with(|| child_entry(dir, name, file, checksums));
         }
         by_name.into_values().collect()
     }
 }
 
-fn child_entry(dir: &RemotePath, name: &str, file: Option<&File>) -> Entry {
+fn child_entry(
+    dir: &RemotePath,
+    name: &str,
+    file: Option<&File>,
+    checksums: Option<ChecksumKind>,
+) -> Entry {
     let path = dir
         .join(name)
         .expect("a segment of a valid path is a valid segment");
@@ -227,7 +232,7 @@ fn child_entry(dir: &RemotePath, name: &str, file: Option<&File>) -> Entry {
             is_folder: false,
             size: file.data.len() as u64,
             modified: Some(file.modified),
-            checksum: Some(file.checksum.clone()),
+            checksum: listed_checksum(file, checksums),
             content_type: file.content_type.clone(),
             replicated_regions: Vec::new(),
         },
@@ -243,8 +248,31 @@ fn child_entry(dir: &RemotePath, name: &str, file: Option<&File>) -> Entry {
     }
 }
 
+/// What a listing shows as `file`'s checksum: its multipart ETag if it was
+/// given one, otherwise the digest of its content that `kind` names.
+fn listed_checksum(file: &File, kind: Option<ChecksumKind>) -> Option<Checksum> {
+    if let Some(etag) = &file.etag {
+        return Some(Checksum {
+            kind: ChecksumKind::MultipartEtag,
+            hex: etag.clone(),
+        });
+    }
+    let kind = kind?;
+    let hex = match kind {
+        ChecksumKind::Sha256 => hex::encode(sha256(&file.data)),
+        ChecksumKind::Md5 => hex::encode(md5(&file.data)),
+        // Only a file given one with `with_file_etag` lists a multipart ETag.
+        ChecksumKind::MultipartEtag => return None,
+    };
+    Some(Checksum { kind, hex })
+}
+
 fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
+}
+
+fn md5(data: &[u8]) -> [u8; 16] {
+    Md5::digest(data).into()
 }
 
 /// The bytes of an upload. A file must still be the length the caller gave.
@@ -272,14 +300,18 @@ fn read_source(source: UploadSource) -> Result<Bytes, ProviderError> {
 /// empty one. It follows the trait's error rules (a missing path is
 /// `NotFound`, a file/folder collision `Refused`, an upload overwrites) and
 /// its own capabilities:
+/// - listings carry the checksum `checksum_in_listing` names (the SHA-256 or
+///   MD5 of the content, or none); a file given one with
+///   [`with_file_etag`](Self::with_file_etag) lists that multipart ETag;
 /// - without `recursive_delete`, `delete_folder` refuses a folder with
 ///   anything in it;
 /// - `create_folder` refuses unless `empty_folders` is `Markers` or
-///   `Supported`.
+///   `Supported`;
+/// - `delete_batch` refuses more than `batch_delete_max` paths.
 ///
-/// A file source must be the length it claims, and an upload's meter is told
-/// about its body 64 KiB at a time. Listings carry SHA-256 checksums whatever
-/// `checksum_in_listing` says.
+/// A file source must be the length it claims, an upload with `sha256` or
+/// `md5` must match it, and an upload's meter is told about its body 64 KiB
+/// at a time.
 ///
 /// Every call is counted and tracked while in flight. [`set_latency`](Self::set_latency)
 /// makes calls take (virtual) time, and [`fail_next`](Self::fail_next) makes
@@ -309,6 +341,19 @@ impl MockProvider {
         self
     }
 
+    /// Makes the file at `path` list a multipart ETag (`etag`, as given)
+    /// instead of a digest, as S3 lists a file uploaded in parts. An upload
+    /// to the path later replaces it with an ordinary file. Panics if there
+    /// is no file at `path`.
+    pub fn with_file_etag(self, path: &str, etag: &str) -> Self {
+        let path = RemotePath::parse(path).expect("with_file_etag: invalid path");
+        match lock(&self.state).nodes.get_mut(&path) {
+            Some(Node::File(file)) => file.etag = Some(etag.to_owned()),
+            _ => panic!("with_file_etag: no file at {}", path.as_str()),
+        }
+        self
+    }
+
     /// Adds an explicit (possibly empty) folder, whatever the capabilities
     /// say. Panics like [`with_file`](Self::with_file).
     pub fn with_folder(self, path: &str) -> Self {
@@ -321,6 +366,8 @@ impl MockProvider {
 
     /// Makes the next `times` calls of `op` fail with `error`, one error per
     /// call, after being counted. Queues behind errors already pending for `op`.
+    /// A `delete_batch` also takes queued `DeleteFile` errors, one per path, so
+    /// single paths of a batch can fail.
     pub fn fail_next(&self, op: MockOp, error: ProviderError, times: usize) {
         lock(&self.calls)
             .failures
@@ -394,7 +441,7 @@ impl StorageProvider for MockProvider {
             return Err(ProviderError::NotFound);
         }
         Ok(Listing {
-            entries: state.children(dir),
+            entries: state.children(dir, self.capabilities.checksum_in_listing),
             info: RequestInfo {
                 latency: Duration::ZERO,
                 http_version: "HTTP/2".to_owned(),
@@ -415,10 +462,9 @@ impl StorageProvider for MockProvider {
                 meter.chunk(piece.len()).await;
             }
         }
-        if opts
-            .sha256
-            .is_some_and(|expected| expected != sha256(&data))
-        {
+        let sha256_ok = opts.sha256.is_none_or(|expected| expected == sha256(&data));
+        let md5_ok = opts.md5.is_none_or(|expected| expected == md5(&data));
+        if !(sha256_ok && md5_ok) {
             return Err(ProviderError::ChecksumMismatch);
         }
         lock(&self.state).put_file(path, data, Some(opts.content_type.clone()))
@@ -471,14 +517,37 @@ impl StorageProvider for MockProvider {
         }
     }
 
-    /// One call for the whole batch: an injected failure fails every path.
+    /// One call for the whole batch: a `DeleteBatch` failure fails every
+    /// path, and queued `DeleteFile` failures fail single paths.
     async fn delete_batch(&self, paths: &[RemotePath]) -> Vec<Result<(), ProviderError>> {
         let _call = match self.call(MockOp::DeleteBatch).await {
             Ok(call) => call,
             Err(error) => return vec![Err(error); paths.len()],
         };
+        let max = self.capabilities.batch_delete_max;
+        if paths.len() > max as usize {
+            let refused = ProviderError::Refused(format!(
+                "batch of {} exceeds batch_delete_max {max}",
+                paths.len()
+            ));
+            return vec![Err(refused); paths.len()];
+        }
+        let failures: Vec<Option<ProviderError>> = {
+            let mut calls = lock(&self.calls);
+            paths
+                .iter()
+                .map(|_| calls.next_failure(MockOp::DeleteFile))
+                .collect()
+        };
         let mut state = lock(&self.state);
-        paths.iter().map(|path| state.delete_file(path)).collect()
+        paths
+            .iter()
+            .zip(failures)
+            .map(|(path, failure)| match failure {
+                Some(error) => Err(error),
+                None => state.delete_file(path),
+            })
+            .collect()
     }
 
     async fn reachable(&self) -> Result<(), ProviderError> {
@@ -495,6 +564,7 @@ mod tests {
     use std::sync::Arc;
 
     const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    const HELLO_MD5: &str = "5d41402abc4b2a76b9719d911017c592";
 
     fn p(path: &str) -> RemotePath {
         RemotePath::parse(path).unwrap()
@@ -512,6 +582,22 @@ mod tests {
 
     fn with_caps(caps: Capabilities) -> MockProvider {
         MockProvider::new(caps)
+    }
+
+    /// A mock whose listings carry `kind` checksums.
+    fn listing(kind: Option<ChecksumKind>) -> MockProvider {
+        with_caps(Capabilities {
+            checksum_in_listing: kind,
+            ..Capabilities::default()
+        })
+    }
+
+    /// A mock that deletes up to `max` files per batch.
+    fn batching(max: u32) -> MockProvider {
+        with_caps(Capabilities {
+            batch_delete_max: max,
+            ..Capabilities::default()
+        })
     }
 
     fn recursive() -> MockProvider {
@@ -638,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_list_entries_carry_path_size_checksum_and_request_info() {
-        let m = mock().with_file("dir/hello.txt", b"hello");
+        let m = listing(Some(ChecksumKind::Sha256)).with_file("dir/hello.txt", b"hello");
         let l = m.list(&p("dir")).await.unwrap();
         assert_eq!(l.info.latency, std::time::Duration::ZERO);
         assert_eq!(l.info.http_version, "HTTP/2");
@@ -1088,7 +1174,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_delete_batch_answers_for_each_path_in_one_call() {
-        let m = mock()
+        let m = batching(1000)
             .with_file("a.txt", b"1")
             .with_file("b.txt", b"2")
             .with_file("dir/c.txt", b"3");
@@ -1108,6 +1194,131 @@ mod tests {
         assert_eq!(m.calls(MockOp::DeleteBatch), 1);
         assert_eq!(m.calls(MockOp::DeleteFile), 0);
         assert!(m.delete_batch(&[]).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mock_delete_batch_enforces_batch_delete_max() {
+        let m = batching(2)
+            .with_file("a.txt", b"1")
+            .with_file("b.txt", b"2")
+            .with_file("c.txt", b"3");
+        let too_many = m.delete_batch(&[p("a.txt"), p("b.txt"), p("c.txt")]).await;
+        let refused = ProviderError::Refused("batch of 3 exceeds batch_delete_max 2".into());
+        assert_eq!(too_many, vec![Err(refused); 3]);
+        assert_eq!(names(&m, "").await.len(), 3, "nothing was deleted");
+
+        assert_eq!(
+            m.delete_batch(&[p("a.txt"), p("b.txt")]).await,
+            [Ok(()), Ok(())]
+        );
+        assert_eq!(names(&m, "").await, vec![("c.txt".to_string(), false)]);
+        assert_eq!(m.calls(MockOp::DeleteBatch), 2);
+    }
+
+    #[tokio::test]
+    async fn mock_delete_batch_injects_per_path_failures() {
+        let m = batching(1000)
+            .with_file("a.txt", b"1")
+            .with_file("b.txt", b"2")
+            .with_file("c.txt", b"3");
+        let reset = ProviderError::Network("reset".into());
+        let limited = ProviderError::RateLimited { retry_after: None };
+        m.fail_next(MockOp::DeleteFile, reset.clone(), 1);
+        m.fail_next(MockOp::DeleteFile, limited.clone(), 1);
+        let results = m.delete_batch(&[p("a.txt"), p("b.txt"), p("c.txt")]).await;
+        assert_eq!(results, [Err(reset), Err(limited), Ok(())]);
+        assert_eq!(
+            names(&m, "").await,
+            vec![("a.txt".to_string(), false), ("b.txt".to_string(), false)]
+        );
+        // The batch is one call, and the injected failures are used up.
+        assert_eq!(m.calls(MockOp::DeleteBatch), 1);
+        assert_eq!(m.calls(MockOp::DeleteFile), 0);
+        assert_eq!(
+            m.delete_batch(&[p("a.txt"), p("b.txt")]).await,
+            [Ok(()), Ok(())]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_listing_checksum_follows_capabilities() {
+        let sha256 = Checksum {
+            kind: ChecksumKind::Sha256,
+            hex: HELLO_SHA256.into(),
+        };
+        let md5 = Checksum {
+            kind: ChecksumKind::Md5,
+            hex: HELLO_MD5.into(),
+        };
+        for (kind, expected) in [
+            (Some(ChecksumKind::Sha256), Some(sha256)),
+            (Some(ChecksumKind::Md5), Some(md5)),
+            (None, None),
+        ] {
+            let m = listing(kind).with_file("a.txt", b"hello");
+            m.upload(&p("b.txt"), bytes(b"hello"), &opts())
+                .await
+                .unwrap();
+            let entries = m.list(&RemotePath::root()).await.unwrap().entries;
+            for entry in &entries {
+                assert_eq!(entry.checksum, expected, "{kind:?} {:?}", entry.path);
+            }
+            assert_eq!(entries.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_with_file_etag_reports_multipart() {
+        let etag = "9b2cf535f27731c974343645a3985328-5";
+        let m = listing(Some(ChecksumKind::Md5))
+            .with_file("big.bin", b"parts")
+            .with_file_etag("big.bin", etag)
+            .with_file("small.txt", b"hello");
+        let checksums = |entries: Vec<Entry>| -> Vec<Option<Checksum>> {
+            entries.into_iter().map(|e| e.checksum).collect()
+        };
+        let md5 = Checksum {
+            kind: ChecksumKind::Md5,
+            hex: HELLO_MD5.into(),
+        };
+        assert_eq!(
+            checksums(m.list(&RemotePath::root()).await.unwrap().entries),
+            [
+                Some(Checksum {
+                    kind: ChecksumKind::MultipartEtag,
+                    hex: etag.into(),
+                }),
+                Some(md5.clone()),
+            ]
+        );
+        // Uploaded again in one piece, it is listed like any other file.
+        m.upload(&p("big.bin"), bytes(b"hello"), &opts())
+            .await
+            .unwrap();
+        assert_eq!(
+            checksums(m.list(&RemotePath::root()).await.unwrap().entries),
+            [Some(md5.clone()), Some(md5)]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_rejects_md5_mismatch() {
+        let m = mock();
+        let good: [u8; 16] = hex::decode(HELLO_MD5).unwrap().try_into().unwrap();
+        let with_md5 = |md5| UploadOptions {
+            md5: Some(md5),
+            ..opts()
+        };
+        m.upload(&p("ok.txt"), bytes(b"hello"), &with_md5(good))
+            .await
+            .unwrap();
+        let err = m
+            .upload(&p("bad.txt"), bytes(b"hello!"), &with_md5(good))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ProviderError::ChecksumMismatch);
+        assert_eq!(m.contents(&p("bad.txt")), None);
+        assert_eq!(m.contents(&p("ok.txt")), Some(Bytes::from_static(b"hello")));
     }
 
     #[tokio::test]

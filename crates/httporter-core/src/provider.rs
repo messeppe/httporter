@@ -143,7 +143,13 @@ pub struct Listing {
 ///   deleting one (`delete_file`, `delete_folder`);
 /// - a write that collides with what is there, such as a file uploaded onto
 ///   a folder or below another file, is [`ProviderError::Refused`];
-/// - an upload to an existing file overwrites it.
+/// - an upload to an existing file overwrites it;
+/// - a server's Retry-After is clamped to [`crate::MAX_RETRY_AFTER`] before
+///   it is returned in [`ProviderError::RateLimited`] (spec: honoured up to
+///   300 s).
+///
+/// A wrapper around another provider forwards every method, those with
+/// defaults included, or the inner provider's own versions are bypassed.
 #[async_trait]
 pub trait StorageProvider: Send + Sync {
     fn capabilities(&self) -> &Capabilities;

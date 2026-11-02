@@ -188,7 +188,8 @@ enum Attempt<'a> {
 const DETAIL_MAX: usize = 120;
 
 /// What to tell the user about a failed attempt to talk to `zone` on `host`: plain words for each
-/// kind of error, without the labels the errors carry for the code ("transient error: …"), and
+/// kind of error, without the labels the errors carry for the code ("network error: …", "server
+/// error (HTTP 503): …"), and
 /// never the password or a request URL. Only a client that could not be set up adds its own
 /// explanation, cut short: no request was made, so there is nothing else to go on.
 fn describe(error: &ProviderError, zone: &str, host: &str, attempt: Attempt<'_>) -> String {
@@ -1305,6 +1306,12 @@ pub(crate) mod fakes {
         }
         async fn create_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
             self.inner.create_folder(dir).await
+        }
+        async fn delete_batch(&self, paths: &[RemotePath]) -> Vec<Result<(), ProviderError>> {
+            self.inner.delete_batch(paths).await
+        }
+        async fn reachable(&self) -> Result<(), ProviderError> {
+            self.inner.reachable().await
         }
     }
 

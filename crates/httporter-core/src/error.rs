@@ -22,6 +22,8 @@ pub enum ProviderError {
     #[error("not found")]
     NotFound,
     /// The service asked us to slow down, optionally saying for how long.
+    /// Providers clamp `retry_after` to [`crate::MAX_RETRY_AFTER`] (spec:
+    /// honoured up to 300 s); a policy with a lower limit gives up instead.
     #[error("rate limited")]
     RateLimited { retry_after: Option<Duration> },
     #[error("checksum mismatch")]

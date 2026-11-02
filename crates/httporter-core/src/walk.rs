@@ -11,6 +11,10 @@ use crate::{Entry, ProviderError, RemotePath, StorageProvider};
 /// particular order. Folders are listed side by side, at most
 /// `capabilities().list_concurrency` at a time. The first listing that
 /// fails ends the walk with its error.
+///
+/// Only entries strictly inside the folder listed are taken. The folder
+/// itself (S3 lists the marker `a/` under the prefix `a/`) would be walked
+/// again forever, and a path from elsewhere would lead out of `root`.
 pub async fn walk(
     provider: &dyn StorageProvider,
     root: &RemotePath,
@@ -23,12 +27,18 @@ pub async fn walk(
         while listing.len() < limit
             && let Some(dir) = waiting.pop_front()
         {
-            listing.push(async move { provider.list(&dir).await });
+            listing.push(async move {
+                let result = provider.list(&dir).await;
+                (dir, result)
+            });
         }
-        let Some(result) = listing.next().await else {
+        let Some((dir, result)) = listing.next().await else {
             return Ok(found);
         };
         for entry in result?.entries {
+            if entry.path == dir || !entry.path.is_within(&dir) {
+                continue;
+            }
             if entry.is_folder {
                 waiting.push_back(entry.path.clone());
             }
@@ -40,7 +50,10 @@ pub async fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuthHint, Capabilities, MockOp, MockProvider};
+    use crate::{
+        AuthHint, ByteStream, Capabilities, Listing, MockOp, MockProvider, UploadOptions,
+        UploadSource,
+    };
     use std::time::Duration;
 
     fn p(path: &str) -> RemotePath {
@@ -108,7 +121,7 @@ mod tests {
         );
         let leaf = walk(&m, &p("a/b/c")).await.unwrap();
         assert_eq!(leaf.len(), 2);
-        assert!(leaf.iter().all(|e| e.size == 1 && e.checksum.is_some()));
+        assert!(leaf.iter().all(|e| e.size == 1 && !e.is_folder));
     }
 
     #[tokio::test]
@@ -149,5 +162,78 @@ mod tests {
         assert_eq!(m.calls(MockOp::List), 1 + 6 + 18);
         // Never more than the provider allows, and the walk does use what it allows.
         assert_eq!(m.max_in_flight(MockOp::List), 2);
+    }
+
+    /// Lists like the mock inside, plus the folder listed and a folder from elsewhere: what a
+    /// broken listing returns, or S3 when the marker `a/` comes back under the prefix `a/`.
+    struct Stray(MockProvider);
+
+    fn folder(path: RemotePath) -> Entry {
+        Entry {
+            path,
+            is_folder: true,
+            size: 0,
+            modified: None,
+            checksum: None,
+            content_type: None,
+            replicated_regions: Vec::new(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StorageProvider for Stray {
+        fn capabilities(&self) -> &Capabilities {
+            self.0.capabilities()
+        }
+        fn endpoint(&self) -> String {
+            self.0.endpoint()
+        }
+        async fn list(&self, dir: &RemotePath) -> Result<Listing, ProviderError> {
+            let mut listing = self.0.list(dir).await?;
+            listing.entries.push(folder(dir.clone()));
+            listing.entries.push(folder(p("elsewhere")));
+            Ok(listing)
+        }
+        async fn upload(
+            &self,
+            path: &RemotePath,
+            source: UploadSource,
+            opts: &UploadOptions,
+        ) -> Result<(), ProviderError> {
+            self.0.upload(path, source, opts).await
+        }
+        async fn download(&self, path: &RemotePath) -> Result<ByteStream, ProviderError> {
+            self.0.download(path).await
+        }
+        async fn delete_file(&self, path: &RemotePath) -> Result<(), ProviderError> {
+            self.0.delete_file(path).await
+        }
+        async fn delete_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
+            self.0.delete_folder(dir).await
+        }
+        async fn create_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
+            self.0.create_folder(dir).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn walk_skips_self_and_stray_entries() {
+        let m = Stray(
+            MockProvider::new(Capabilities::default())
+                .with_file("a/one.txt", b"1")
+                .with_file("a/b/two.txt", b"2")
+                .with_file("elsewhere/x.txt", b"3"),
+        );
+        // A walk that went in circles would never give the clock back without this.
+        m.0.set_latency(MockOp::List, Duration::from_millis(1));
+        let walked = tokio::time::timeout(Duration::from_secs(5), walk(&m, &p("a")))
+            .await
+            .expect("the walk ends")
+            .unwrap();
+        assert_eq!(
+            found(&walked),
+            [("a/b", true), ("a/b/two.txt", false), ("a/one.txt", false)]
+        );
+        assert_eq!(m.0.calls(MockOp::List), 2, "a and a/b, once each");
     }
 }
