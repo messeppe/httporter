@@ -6,3 +6,30 @@ resolver = "3"
 edition = "2024"
 version = "0.1.0"
 publish = false
+
+# Shared dependency versions. Members opt in with `name.workspace = true` and
+# add only the features they need (features are additive across members).
+[workspace.dependencies]
+async-trait = "0.1.92"
+bytes = "1.12.1"
+chrono = "0.4.45"
+futures-util = "0.3.34"
+# Exact pin: the credential-store backend must not drift between builds.
+keyring = "=3.6.3"
+reqwest = { version = "0.13.5", default-features = false }
+rusqlite = "0.41.1"
+serde = "1.0.229"
+serde_json = "1.0.154"
+slint = "1.18"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = "1.54.1"
+uuid = "1.29.0"
+windows-sys = "0.61.2"
+wiremock = "0.6.5"
+
+# Never set `panic = "abort"`: the app relies on unwinding.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

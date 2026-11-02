@@ -5,12 +5,12 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
-chrono = "0.4.45"
+chrono.workspace = true
 dirs = "7.0.0"
 httporter-core = { version = "0.1.0", path = "../httporter-core" }
-keyring = { version = "3", features = ["windows-native"] }
-rusqlite = { version = "0.41.1", features = ["bundled"] }
-thiserror = "2.0.21"
+keyring = { workspace = true, features = ["windows-native"] }
+rusqlite = { workspace = true, features = ["bundled"] }
+thiserror.workspace = true
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile.workspace = true

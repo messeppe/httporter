@@ -9,19 +9,19 @@ name = "httporter"
 path = "src/main.rs"
 
 [dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+chrono.workspace = true
 httporter-bunny = { path = "../httporter-bunny" }
 httporter-core = { path = "../httporter-core" }
 httporter-platform = { path = "../httporter-platform" }
-slint = { version = "1.18", features = ["unstable-winit-030"] }
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
+slint = { workspace = true, features = ["unstable-winit-030"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 slint-build = "1.18"
 
 [dev-dependencies]
-async-trait = "0.1.92"
+async-trait.workspace = true
 i-slint-backend-testing = "1.18"
-tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

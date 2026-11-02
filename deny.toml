@@ -1,0 +1,63 @@
+# cargo-deny policy. Checked by tools/check.ps1 and CI:
+#   cargo deny check licenses bans
+#
+# I5 licence review: MPL-2.0 (option-ext) requires telling recipients where its
+# source is; BSL-1.0 needs its notice in the third-party licences file.
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+    "OFL-1.1",
+]
+
+# Our own crates are `publish = false` and carry no licence field.
+private = { ignore = true }
+
+# The allow list is a policy, not an inventory: stay quiet about entries (such
+# as OFL-1.1) that no current dependency uses.
+unused-allowed-license = "allow"
+
+# Slint is offered as GPL-3.0-only OR a royalty-free / commercial licence; this
+# project takes the GPL option (spec section 16). Allowed for Slint crates only.
+# cargo-deny matches exact crate names here (no globs), so the i-slint-* family
+# is listed out; add new ones here when a Slint upgrade pulls them in.
+exceptions = [
+    { allow = ["GPL-3.0-only"], crate = "slint" },
+    { allow = ["GPL-3.0-only"], crate = "slint-build" },
+    { allow = ["GPL-3.0-only"], crate = "slint-macros" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-backend-selector" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-backend-winit" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-common" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-compiler" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-core" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-core-macros" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-renderer-femtovg" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-renderer-skia" },
+    { allow = ["GPL-3.0-only"], crate = "i-slint-renderer-software" },
+
+    # Other permissive / weak-copyleft crates outside the allow list; each is
+    # named so a new dependency with the same licence is still rejected.
+    # BSL-1.0, via the Slint winit backend (arboard clipboard).
+    { allow = ["BSL-1.0"], crate = "clipboard-win" },
+    # BSL-1.0, via clipboard-win (Slint winit backend).
+    { allow = ["BSL-1.0"], crate = "error-code" },
+    # MPL-2.0, via dirs -> dirs-sys (httporter-platform).
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+    # Unlicense, Linux-only tray support via i-slint-core; not in the Windows build.
+    { allow = ["Unlicense"], crate = "ksni" },
+]
+
+[bans]
+# Slint/winit pull in dozens of duplicate crate versions we cannot control;
+# "warn" prints ~4000 lines on every run, so duplicates are allowed.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
