@@ -119,6 +119,17 @@ impl BunnyConfig {
     ///
     /// The Transfers settings decide the rest: transfers at once (at most 96), the request
     /// timeout (which is also the idle timeout), the protocol, keep-alive and the proxy.
+    ///
+    /// An upload gets extra time once its whole body has been handed to the connection: the
+    /// idle timeout again, for what the connection buffered to cross the link unseen, plus the
+    /// request timeout for the server to answer.
+    ///
+    /// Very slow links can still be cut off (Ruling Q35). Mid-body, that is a link moving less
+    /// than about one 64 KiB piece per idle period. At the end, it is one that can't drain the
+    /// buffered tail (a few hundred KiB) in the extra time: a few KiB/s. At the Settings
+    /// choices (60, 120 or 300 s) the worst case is about 1 KiB/s mid-body and 3 KiB/s for the
+    /// tail. It bites mainly at the shorter timeouts only hand-edited settings reach (5 s
+    /// floor).
     pub fn for_site(
         zone: impl Into<String>,
         host: impl Into<String>,
@@ -797,8 +808,8 @@ mod tests {
         }
     }
 
-    /// reqwest offers no way to read a built client's settings back, so these look at the
-    /// builder's `Debug` output.
+    /// reqwest offers no way to read a client's settings back, so this looks at the builder's
+    /// `Debug` output.
     fn described(connections: &Connections) -> String {
         format!("{:?}", client_builder(connections, 4, None).unwrap())
     }
@@ -838,17 +849,41 @@ mod tests {
         assert_eq!(effective_proxy(&ProxyMode::System, None), ProxyMode::System);
         assert_eq!(effective_proxy(&ProxyMode::System, local), ProxyMode::None);
 
+        // Both clients of a zone, as built. `build()` adds the Windows proxy unless `no_proxy()`
+        // or a custom proxy turned it off, and a built client's `Debug` lists its proxies.
+        let clients = |proxy: &ProxyMode, base_url: Option<&str>| {
+            let mut cfg = BunnyConfig::new("zone", "storage.bunnycdn.com", "secret");
+            cfg.proxy = proxy.clone();
+            cfg.base_url = base_url.map(str::to_owned);
+            let storage = BunnyStorage::new(cfg).unwrap();
+            [
+                format!("{:?}", storage.client),
+                format!("{:?}", storage.transfer_client),
+            ]
+        };
+        // Not printed: it would show this machine's proxy settings.
+        for client in clients(&ProxyMode::System, None) {
+            assert!(client.contains("proxies"), "System keeps the Windows proxy");
+        }
+        for client in clients(&ProxyMode::None, None) {
+            assert!(!client.contains("proxies"), "{client}");
+        }
+        // Ruling P15: a test endpoint never goes through the Windows proxy.
+        for client in clients(&ProxyMode::System, local) {
+            assert!(!client.contains("proxies"), "{client}");
+        }
+        for base_url in [None, local] {
+            for client in clients(&custom, base_url) {
+                assert!(client.contains("proxies"), "{client}");
+                assert!(client.contains("proxy.test:8080"), "{client}");
+            }
+        }
+
+        // A bad address is refused, without repeating it (it may hold a password).
         let with = |proxy: &ProxyMode| Connections {
             proxy: proxy.clone(),
             ..connections()
         };
-        let via_custom = described(&with(&custom));
-        assert!(via_custom.contains("proxy.test:8080"), "{via_custom}");
-        assert!(!described(&with(&ProxyMode::None)).contains("proxies"));
-        assert!(!described(&with(&ProxyMode::System)).contains("proxies"));
-        build_client(&with(&custom), 4, None).unwrap();
-
-        // A bad address is refused, without repeating it (it may hold a password).
         let bad = ProxyMode::Custom("http://user:s3cret@[::1".into());
         match client_builder(&with(&bad), 4, None) {
             Err(ProviderError::Permanent(m)) => assert!(!m.contains("s3cret"), "{m}"),
