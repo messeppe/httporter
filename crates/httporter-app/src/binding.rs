@@ -9,6 +9,9 @@
 //! window out of order. Each pane's view carries a version, and the window applies only a view
 //! newer than the one it shows ([`Shown`]). The sidebar and the banner's notice are read from the
 //! session when a view is applied: both are short reads of state kept in memory.
+//!
+//! A request that lists a folder first hands the window a loading view (the pane says
+//! "Loading…" and keeps its rows), then the listed one.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use httporter_bunny::REGIONS;
+use httporter_core::SiteRecord;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
@@ -28,11 +32,22 @@ use crate::sort::SortKey;
 use crate::viewmodel::{RowData, sort_key_for_column, to_slint_rows};
 use crate::{AppWindow, FileRow, SiteItem};
 
-/// What a view changes: a new listing replaces the rows; a new sort only reorders them.
+/// What a view changes: a new listing replaces the rows; a refresh replaces them with the same
+/// folder's (so the selected row stays, found by name); a new sort only reorders them; a loading
+/// view only says that a listing is on its way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Change {
     Listed,
+    Refreshed,
     Sorted,
+    Loading,
+}
+
+impl Change {
+    /// The view brings a new item count for the status bar (unless the listing failed).
+    fn counts(self) -> bool {
+        matches!(self, Self::Listed | Self::Refreshed)
+    }
 }
 
 /// Something the cloud pane was asked to do. Clicks on a row or a crumb carry the version of the
@@ -45,6 +60,7 @@ enum RemoteOp {
     Crumb(usize, u64),
     Back,
     Forward,
+    Refresh,
     Sort(SortKey, bool),
 }
 
@@ -52,6 +68,7 @@ impl RemoteOp {
     fn change(self) -> Change {
         match self {
             Self::Sort(..) => Change::Sorted,
+            Self::Refresh => Change::Refreshed,
             _ => Change::Listed,
         }
     }
@@ -65,17 +82,25 @@ enum LocalOp {
     Crumb(usize, u64),
     Back,
     Forward,
+    Refresh,
     Sort(SortKey, bool),
 }
 
 impl LocalOp {
-    async fn run(self, session: &Session, ticket: Ticket) -> LocalView {
+    /// Runs the request; `started` gets the loading view of one that lists a folder.
+    async fn run(
+        self,
+        session: &Session,
+        ticket: Ticket,
+        started: impl FnOnce(LocalView) + Send,
+    ) -> LocalView {
         match self {
-            Self::Open(row, seen) => session.open_local(ticket, row, seen).await,
-            Self::Up => session.local_up(ticket).await,
-            Self::Crumb(index, seen) => session.local_crumb(ticket, index, seen).await,
-            Self::Back => session.local_back(ticket).await,
-            Self::Forward => session.local_forward(ticket).await,
+            Self::Open(row, seen) => session.open_local(ticket, row, seen, started).await,
+            Self::Up => session.local_up(ticket, started).await,
+            Self::Crumb(index, seen) => session.local_crumb(ticket, index, seen, started).await,
+            Self::Back => session.local_back(ticket, started).await,
+            Self::Forward => session.local_forward(ticket, started).await,
+            Self::Refresh => session.local_refresh(ticket, started).await,
             Self::Sort(key, ascending) => session.sort_local(key, ascending),
         }
     }
@@ -83,6 +108,7 @@ impl LocalOp {
     fn change(self) -> Change {
         match self {
             Self::Sort(..) => Change::Sorted,
+            Self::Refresh => Change::Refreshed,
             _ => Change::Listed,
         }
     }
@@ -172,6 +198,10 @@ impl Ctx {
         let ticket = self.session.remote_ticket();
         let (session, shown, ui) = (self.session.clone(), self.shown.clone(), self.ui.clone());
         let task = self.rt.spawn(async move {
+            let started = {
+                let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
+                move |view| post_remote(&ui, &shown, &session, view, Change::Loading)
+            };
             let view = match op {
                 RemoteOp::Select(index) => {
                     let switched = {
@@ -180,11 +210,14 @@ impl Ctx {
                     };
                     session.select_site(ticket, index, switched).await
                 }
-                RemoteOp::Open(row, seen) => session.open_remote(ticket, row, seen).await,
-                RemoteOp::Up => session.remote_up(ticket).await,
-                RemoteOp::Crumb(index, seen) => session.remote_crumb(ticket, index, seen).await,
-                RemoteOp::Back => session.remote_back(ticket).await,
-                RemoteOp::Forward => session.remote_forward(ticket).await,
+                RemoteOp::Open(row, seen) => session.open_remote(ticket, row, seen, started).await,
+                RemoteOp::Up => session.remote_up(ticket, started).await,
+                RemoteOp::Crumb(index, seen) => {
+                    session.remote_crumb(ticket, index, seen, started).await
+                }
+                RemoteOp::Back => session.remote_back(ticket, started).await,
+                RemoteOp::Forward => session.remote_forward(ticket, started).await,
+                RemoteOp::Refresh => session.remote_refresh(ticket, started).await,
                 RemoteOp::Sort(key, ascending) => session.sort_remote(key, ascending),
             };
             post_remote(&ui, &shown, &session, view, op.change());
@@ -203,10 +236,12 @@ impl Ctx {
         let ticket = self.session.local_ticket();
         let (session, shown, ui) = (self.session.clone(), self.shown.clone(), self.ui.clone());
         self.rt.spawn(async move {
-            let view = op.run(&session, ticket).await;
-            let _ = ui.upgrade_in_event_loop(move |ui| {
-                show_local(&ui, &shown, &session, &view, op.change());
-            });
+            let started = {
+                let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
+                move |view| post_local(&ui, &shown, &session, view, Change::Loading)
+            };
+            let view = op.run(&session, ticket, started).await;
+            post_local(&ui, &shown, &session, view, op.change());
         });
     }
 
@@ -225,6 +260,16 @@ impl Ctx {
             } else {
                 RemoteOp::Forward
             });
+        }
+    }
+
+    /// Refresh (F5, Ctrl+R) for the pane last used or focused, as Back and Forward.
+    fn refresh(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        if ui.get_local_pane_active() {
+            self.local(LocalOp::Refresh);
+        } else {
+            self.remote(RemoteOp::Refresh);
         }
     }
 
@@ -268,6 +313,9 @@ impl Ctx {
         self.sheet.replace(task);
     }
 
+    /// Add Site (also Return in a field of the sheet): tests the connection, and saves the site
+    /// only if that works ([`Session::add_site`]). The sheet stays busy meanwhile, and Cancel
+    /// gives the whole run up.
     fn save_site(&self, form: AddSiteForm) {
         let Some(ui) = self.ui.upgrade() else { return };
         let Some(site) = validated(&ui, &form) else {
@@ -280,37 +328,10 @@ impl Ctx {
             self.ui.clone(),
         );
         let task = self.rt.spawn(async move {
-            let saved = session.save_site(&site).await;
-            let index = saved.as_ref().ok().and_then(|record| {
-                session
-                    .sites()
-                    .iter()
-                    .position(|s| s.id == record.id)
-                    .and_then(|i| i32::try_from(i).ok())
-            });
+            let added = session.add_site(&site).await;
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 let latest = runs.load(Ordering::SeqCst) == run;
-                match saved {
-                    Ok(_) => {
-                        // Saved even if the sheet was cancelled meanwhile: the list must show it.
-                        sync_sites(&ui, &session.site_items());
-                        if latest {
-                            ui.set_add_site_busy(false);
-                            ui.set_add_site_open(false);
-                        }
-                        if let Some(index) = index {
-                            ui.set_selected_site(index);
-                            ui.invoke_site_selected(index);
-                        }
-                    }
-                    Err(message) => {
-                        if latest {
-                            ui.set_add_site_busy(false);
-                            ui.set_add_site_result(message.into());
-                            ui.set_add_site_result_ok(false);
-                        }
-                    }
-                }
+                show_added(&ui, &session, latest, added);
             });
         });
         self.sheet.replace(task);
@@ -322,6 +343,40 @@ impl Ctx {
         self.sheet.abort();
         if let Some(ui) = self.ui.upgrade() {
             ui.set_add_site_busy(false);
+        }
+    }
+}
+
+/// Shows what became of Add Site. `latest` is false when the sheet has been cancelled or
+/// reopened since the run started; the sheet is then left as it is.
+///
+/// A saved site joins the sidebar and opens, and the sheet closes (a site saved after a cancel is
+/// still listed and opened: it exists). A site that failed its connection test, or could not be
+/// saved, was not added: the sheet stays open with the reason in its result box.
+fn show_added(ui: &AppWindow, session: &Session, latest: bool, added: Result<SiteRecord, String>) {
+    match added {
+        Ok(record) => {
+            sync_sites(ui, &session.site_items());
+            if latest {
+                ui.set_add_site_busy(false);
+                ui.set_add_site_open(false);
+            }
+            let index = session
+                .sites()
+                .iter()
+                .position(|s| s.id == record.id)
+                .and_then(|i| i32::try_from(i).ok());
+            if let Some(index) = index {
+                ui.set_selected_site(index);
+                ui.invoke_site_selected(index);
+            }
+        }
+        Err(message) => {
+            if latest {
+                ui.set_add_site_busy(false);
+                ui.set_add_site_result(message.into());
+                ui.set_add_site_result_ok(false);
+            }
         }
     }
 }
@@ -447,6 +502,10 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         let ctx = ctx.clone();
         move || ctx.travel(false)
     });
+    ui.on_refresh({
+        let ctx = ctx.clone();
+        move || ctx.refresh()
+    });
 
     ui.on_add_site_changed({
         let weak = ui.as_weak();
@@ -513,6 +572,18 @@ fn show_remote(
     sync_sites(ui, &session.site_items());
 }
 
+/// Hands a This PC view to the window (from a task).
+fn post_local(
+    ui: &Weak<AppWindow>,
+    shown: &Arc<Mutex<Shown>>,
+    session: &Arc<Session>,
+    view: LocalView,
+    change: Change,
+) {
+    let (shown, session) = (shown.clone(), session.clone());
+    let _ = ui.upgrade_in_event_loop(move |ui| show_local(&ui, &shown, &session, &view, change));
+}
+
 /// As [`show_remote`], for the This PC pane.
 fn show_local(
     ui: &AppWindow,
@@ -558,8 +629,8 @@ fn reselect(old: &ModelRc<FileRow>, selected: i32, rows: &[RowData]) -> i32 {
         .unwrap_or(-1)
 }
 
-/// The selection for a pane's new rows: none in a new folder; otherwise (a new sort, or a failed
-/// listing that left the folder as it was) the same row as before.
+/// The selection for a pane's new rows: none in a new folder; otherwise (a refresh, a new sort,
+/// or a failed listing that left the folder as it was) the same row as before.
 fn selection(
     change: Change,
     failed: bool,
@@ -574,8 +645,13 @@ fn selection(
     }
 }
 
-/// Puts a cloud view on screen (everything but the banner, which [`Shown`] puts together).
+/// Puts a cloud view on screen (everything but the banner, which [`Shown`] puts together). A
+/// loading view only marks the pane: its rows stay until the listing is in.
 fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
+    ui.set_remote_loading(view.loading);
+    if change == Change::Loading {
+        return;
+    }
     let failed = view.error.is_some();
     let selected = selection(
         change,
@@ -594,13 +670,18 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     ui.set_status_right(view.status_right.as_str().into());
     ui.set_remote_can_go_back(view.can_back);
     ui.set_remote_can_go_forward(view.can_forward);
-    if change == Change::Listed && !failed {
-        ui.set_status_left(items(view.rows.len()).into());
+    if change.counts() && !failed {
+        ui.set_remote_status(items(view.rows.len()).into());
+        ui.set_status_message(SharedString::new());
     }
 }
 
-/// Puts a This PC view on screen (everything but the banner).
+/// Puts a This PC view on screen (everything but the banner), as [`apply_remote`].
 fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
+    ui.set_local_loading(view.loading);
+    if change == Change::Loading {
+        return;
+    }
     let failed = view.error.is_some();
     let selected = selection(
         change,
@@ -614,8 +695,9 @@ fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
     ui.set_local_selected(selected);
     ui.set_local_can_go_back(view.can_back);
     ui.set_local_can_go_forward(view.can_forward);
-    if change == Change::Listed && !failed {
-        ui.set_status_left(view.status.as_str().into());
+    if change.counts() && !failed {
+        ui.set_local_status(view.status.as_str().into());
+        ui.set_status_message(SharedString::new());
     }
 }
 

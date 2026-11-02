@@ -3,7 +3,7 @@
 
 use super::fakes::*;
 use super::*;
-use httporter_core::{MockOp, MockProvider};
+use httporter_core::{MockOp, MockProvider, RetryPolicy, UploadOptions, UploadSource};
 use httporter_platform::{CredentialKey, MemoryStore};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -68,7 +68,7 @@ fn current_remote(s: &Session) -> RemoteView {
 
 /// Sends the This PC pane to `dir` (`None`: the drives).
 async fn navigate_local(s: &Session, dir: Option<PathBuf>) -> LocalView {
-    s.navigate_local(s.local_ticket(), Step::Go, move |_| Some(dir))
+    s.navigate_local(s.local_ticket(), Step::Go, move |_| Some(dir), |_| {})
         .await
 }
 
@@ -81,38 +81,54 @@ async fn select(s: &Session, index: usize) -> RemoteView {
 
 async fn open_remote(s: &Session, row: usize) -> RemoteView {
     let seen = lock(&s.remote).version;
-    s.open_remote(s.remote_ticket(), row, seen).await
+    s.open_remote(s.remote_ticket(), row, seen, |_| {}).await
 }
 
 async fn remote_up(s: &Session) -> RemoteView {
-    s.remote_up(s.remote_ticket()).await
+    s.remote_up(s.remote_ticket(), |_| {}).await
 }
 
 async fn remote_crumb(s: &Session, index: usize) -> RemoteView {
     let seen = lock(&s.remote).version;
-    s.remote_crumb(s.remote_ticket(), index, seen).await
+    s.remote_crumb(s.remote_ticket(), index, seen, |_| {}).await
 }
 
 async fn remote_back(s: &Session) -> RemoteView {
-    s.remote_back(s.remote_ticket()).await
+    s.remote_back(s.remote_ticket(), |_| {}).await
 }
 
 async fn remote_forward(s: &Session) -> RemoteView {
-    s.remote_forward(s.remote_ticket()).await
+    s.remote_forward(s.remote_ticket(), |_| {}).await
+}
+
+async fn remote_refresh(s: &Session) -> RemoteView {
+    s.remote_refresh(s.remote_ticket(), |_| {}).await
 }
 
 async fn open_local(s: &Session, row: usize) -> LocalView {
     let seen = lock(&s.local).version;
-    s.open_local(s.local_ticket(), row, seen).await
+    s.open_local(s.local_ticket(), row, seen, |_| {}).await
 }
 
 async fn local_up(s: &Session) -> LocalView {
-    s.local_up(s.local_ticket()).await
+    s.local_up(s.local_ticket(), |_| {}).await
 }
 
 async fn local_crumb(s: &Session, index: usize) -> LocalView {
     let seen = lock(&s.local).version;
-    s.local_crumb(s.local_ticket(), index, seen).await
+    s.local_crumb(s.local_ticket(), index, seen, |_| {}).await
+}
+
+async fn local_back(s: &Session) -> LocalView {
+    s.local_back(s.local_ticket(), |_| {}).await
+}
+
+async fn local_forward(s: &Session) -> LocalView {
+    s.local_forward(s.local_ticket(), |_| {}).await
+}
+
+async fn local_refresh(s: &Session) -> LocalView {
+    s.local_refresh(s.local_ticket(), |_| {}).await
 }
 
 /// `view` without its version, to compare what two views show.
@@ -139,6 +155,8 @@ async fn until_held(gated: &Gated) {
 }
 
 const AUTH: &str = "Couldn't sign in to testzone. Check the password, zone name and region.";
+const UNREACHABLE: &str =
+    "Couldn't reach sg.storage.bunnycdn.com. Check your internet connection and try again.";
 
 // ---- The brief's tests ----
 
@@ -287,9 +305,10 @@ async fn a_missing_password_is_reported_without_a_request() {
     let view = select(&s, 0).await;
     assert_eq!(
         view.error.as_deref(),
-        Some("No password saved for testzone. Edit the site to add it.")
+        Some("No password saved for testzone. Remove this site and add it again.")
     );
     assert!(view.rows.is_empty());
+    assert!(!view.loading, "nothing is on its way");
     assert_eq!(mock.calls(MockOp::List), 0);
 }
 
@@ -458,10 +477,95 @@ async fn other_errors_name_the_host() {
         1,
     );
     let view = select(&s, 0).await;
+    assert_eq!(view.error.as_deref(), Some(UNREACHABLE));
+}
+
+/// Final review Minor 1: every kind of failure is told in plain words, with no error labels and
+/// no "Couldn't reach" when the server did answer.
+#[tokio::test]
+async fn each_kind_of_failure_is_told_in_plain_words() {
+    let mock = site_mock();
+    let s = saved(&mock).await;
+    let busy = ProviderError::RateLimited { retry_after: None };
+    let odd = ProviderError::Permanent("unexpected response from server (not JSON)".into());
+    for (error, said) in [
+        (
+            busy,
+            "sg.storage.bunnycdn.com is busy. Try again in a moment.",
+        ),
+        (odd, "sg.storage.bunnycdn.com sent an unexpected response."),
+        (
+            ProviderError::Transient("operation timed out".into()),
+            UNREACHABLE,
+        ),
+    ] {
+        mock.fail_next(MockOp::List, error, 1);
+        assert_eq!(select(&s, 0).await.error.as_deref(), Some(said));
+    }
+    mock.fail_next(MockOp::List, ProviderError::Permanent("x".into()), 1);
+    let tested = s.test_connection(&valid("testzone", "sg", "pw")).await;
     assert_eq!(
-        view.error.as_deref(),
-        Some("Couldn't reach sg.storage.bunnycdn.com: transient error: connection reset")
+        tested.text,
+        "sg.storage.bunnycdn.com sent an unexpected response."
     );
+}
+
+#[test]
+fn every_error_kind_has_its_own_plain_words() {
+    let dir = RemotePath::parse("wp-content").unwrap();
+    let list = Attempt::List(&dir);
+    let said = |error: ProviderError, attempt| {
+        describe(&error, "testzone", "sg.storage.bunnycdn.com", attempt)
+    };
+    let cases = [
+        (said(ProviderError::Auth, list), AUTH),
+        (
+            said(ProviderError::NotFound, list),
+            "Couldn't find /wp-content in testzone.",
+        ),
+        (
+            said(ProviderError::RateLimited { retry_after: None }, list),
+            "sg.storage.bunnycdn.com is busy. Try again in a moment.",
+        ),
+        (
+            said(ProviderError::Transient("reset".into()), list),
+            UNREACHABLE,
+        ),
+        (
+            said(ProviderError::Permanent("unexpected (418)".into()), list),
+            "sg.storage.bunnycdn.com sent an unexpected response.",
+        ),
+        (
+            said(ProviderError::ChecksumMismatch, list),
+            "sg.storage.bunnycdn.com received a damaged copy. Try again.",
+        ),
+        (
+            said(
+                ProviderError::Refused("the zone root is a folder".into()),
+                list,
+            ),
+            "The zone root is a folder.",
+        ),
+        (
+            said(
+                ProviderError::Permanent(
+                    "the storage password cannot be sent as an HTTP header".into(),
+                ),
+                Attempt::Setup,
+            ),
+            "Couldn't set up a connection to sg.storage.bunnycdn.com. The storage password cannot \
+             be sent as an HTTP header.",
+        ),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(text, expected);
+        for label in ["error:", "transient", "permanent", "refused:"] {
+            assert!(!text.to_lowercase().contains(label), "{text}");
+        }
+    }
+    // A long detail from the client is cut short.
+    let long = said(ProviderError::Permanent("x".repeat(500)), Attempt::Setup);
+    assert!(long.chars().count() < 250, "{long}");
 }
 
 #[tokio::test]
@@ -883,10 +987,12 @@ async fn the_switch_to_a_site_is_shown_before_it_connects() {
     assert_eq!(switched.chip, "https://sg.storage.bunnycdn.com");
     assert_eq!(switched.status_right, "sg.storage.bunnycdn.com");
     assert_eq!(switched.error, None);
+    assert!(switched.loading, "the root listing is on its way");
 
     hold.release();
     let listed = timeout(PROMPTLY, task).await.unwrap().unwrap();
     assert!(listed.version > switched.version);
+    assert!(!listed.loading);
     assert_eq!(listed.connection, "HTTPS · 0 ms");
     assert_eq!(names(&listed.rows), ["wp-content", "index.html"]);
 }
@@ -933,12 +1039,18 @@ async fn a_click_on_rows_that_have_changed_since_is_ignored() {
     assert_eq!(names(&seen.rows), ["alpha", "zeta"]);
     let resorted = s.sort_remote(SortKey::Name, false);
     let calls = mock.calls(MockOp::List);
-    let ignored = s.open_remote(s.remote_ticket(), 0, seen.version).await;
+    let ignored = s
+        .open_remote(s.remote_ticket(), 0, seen.version, |_| {})
+        .await;
     assert_eq!(ignored, resorted);
-    let ignored = s.remote_crumb(s.remote_ticket(), 0, seen.version).await;
+    let ignored = s
+        .remote_crumb(s.remote_ticket(), 0, seen.version, |_| {})
+        .await;
     assert_eq!(ignored, resorted);
     assert_eq!(mock.calls(MockOp::List), calls);
-    let opened = s.open_remote(s.remote_ticket(), 0, resorted.version).await;
+    let opened = s
+        .open_remote(s.remote_ticket(), 0, resorted.version, |_| {})
+        .await;
     assert_eq!(opened.crumbs, ["testzone", "zeta"]);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -946,11 +1058,17 @@ async fn a_click_on_rows_that_have_changed_since_is_ignored() {
     std::fs::create_dir(tmp.path().join("zeta")).unwrap();
     let seen = navigate_local(&s, Some(tmp.path().to_path_buf())).await;
     let resorted = s.sort_local(SortKey::Name, false);
-    let ignored = s.open_local(s.local_ticket(), 0, seen.version).await;
+    let ignored = s
+        .open_local(s.local_ticket(), 0, seen.version, |_| {})
+        .await;
     assert_eq!(ignored, resorted);
-    let ignored = s.local_crumb(s.local_ticket(), 0, seen.version).await;
+    let ignored = s
+        .local_crumb(s.local_ticket(), 0, seen.version, |_| {})
+        .await;
     assert_eq!(ignored, resorted);
-    let opened = s.open_local(s.local_ticket(), 0, resorted.version).await;
+    let opened = s
+        .open_local(s.local_ticket(), 0, resorted.version, |_| {})
+        .await;
     assert_eq!(opened.crumbs.last().map(String::as_str), Some("zeta"));
 }
 
@@ -1039,18 +1157,18 @@ async fn back_and_forward_retrace_the_local_folders() {
     assert!(top.can_back && !top.can_forward);
     open_local(&s, 0).await;
 
-    let back = s.local_back(s.local_ticket()).await;
+    let back = local_back(&s).await;
     assert_eq!(back.crumbs, top.crumbs);
     assert!(back.can_back && back.can_forward);
-    let drives = s.local_back(s.local_ticket()).await;
+    let drives = local_back(&s).await;
     assert!(drives.crumbs.is_empty());
     assert!(!drives.can_back && drives.can_forward);
-    let forward = s.local_forward(s.local_ticket()).await;
+    let forward = local_forward(&s).await;
     assert_eq!(forward.crumbs, top.crumbs);
 
     let up = local_up(&s).await;
     assert!(up.can_back && !up.can_forward);
-    assert_eq!(s.local_back(s.local_ticket()).await.crumbs, top.crumbs);
+    assert_eq!(local_back(&s).await.crumbs, top.crumbs);
 }
 
 /// Ruling P24: a folder that is not there is not a connection failure (see also
@@ -1073,4 +1191,267 @@ async fn only_a_failed_connection_turns_the_pill_orange() {
     assert!(!offline.connection_ok);
     assert_eq!(offline.connection, "Not connected");
     assert!(!s.site_items()[0].healthy);
+}
+
+// ---- Final fix wave ----
+
+/// Important #1: Add Site lists the zone first (as Test Connection does) and saves nothing when
+/// the password is rejected.
+#[tokio::test]
+async fn a_site_whose_password_is_rejected_is_not_added() {
+    let mock = site_mock();
+    let (s, creds, factory) = session_with(mock.clone());
+    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    let refused = s
+        .add_site(&valid("testzone", "sg", "pw"))
+        .await
+        .unwrap_err();
+    assert_eq!(refused, AUTH);
+    assert!(s.sites().is_empty());
+    assert!(s.site_items().is_empty());
+    assert_eq!(format!("{creds:?}"), "MemoryStore { entries: 0, .. }");
+    assert_eq!(mock.calls(MockOp::List), 1);
+    // The test used exactly what was typed.
+    assert_eq!(
+        factory.configs(),
+        [(
+            "testzone".to_owned(),
+            "sg.storage.bunnycdn.com".to_owned(),
+            "pw".to_owned()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_site_that_cannot_be_reached_is_not_added() {
+    let mock = site_mock();
+    let (s, creds, _) = session_with(mock.clone());
+    mock.fail_next(
+        MockOp::List,
+        ProviderError::Transient("operation timed out".into()),
+        1,
+    );
+    let refused = s
+        .add_site(&valid("testzone", "sg", "pw"))
+        .await
+        .unwrap_err();
+    assert_eq!(refused, UNREACHABLE);
+    assert!(s.sites().is_empty());
+    assert_eq!(format!("{creds:?}"), "MemoryStore { entries: 0, .. }");
+}
+
+#[tokio::test]
+async fn a_site_that_answers_is_added_once() {
+    let mock = site_mock();
+    let (s, creds, _) = session_with(mock.clone());
+    let added = s.add_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    assert_eq!(s.sites(), std::slice::from_ref(&added));
+    assert_eq!(mock.calls(MockOp::List), 1);
+    assert_eq!(
+        creds
+            .get(&CredentialKey::site(&added.id))
+            .unwrap()
+            .as_deref(),
+        Some("pw")
+    );
+    assert_eq!(format!("{creds:?}"), "MemoryStore { entries: 1, .. }");
+}
+
+#[tokio::test]
+async fn adding_a_site_with_an_unknown_region_tries_nothing() {
+    let mock = site_mock();
+    let (s, _, factory) = session_with(mock.clone());
+    let refused = s
+        .add_site(&valid("testzone", "xx", "pw"))
+        .await
+        .unwrap_err();
+    assert_eq!(refused, "Choose a region.");
+    assert!(s.sites().is_empty());
+    assert!(factory.configs().is_empty());
+}
+
+/// Minor 2: a listing someone is waiting for gives up after 20 s and is tried at most three
+/// times, for browsing, Test Connection and the test before a site is added alike. Transfers and
+/// deletes keep the default policy.
+#[tokio::test]
+async fn listings_someone_waits_for_give_up_sooner() {
+    let mock = site_mock();
+    let (s, _, factory) = session_with(mock.clone());
+    s.add_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    s.test_connection(&valid("testzone", "sg", "pw")).await;
+    select(&s, 0).await;
+    let configs = factory.full_configs();
+    assert_eq!(configs.len(), 3, "added, tested, opened");
+    let default = BunnyConfig::new("testzone", "sg.storage.bunnycdn.com", "pw");
+    for cfg in configs {
+        assert_eq!(cfg.list_timeout, Duration::from_secs(20));
+        assert_eq!(
+            cfg.list_retry,
+            Some(RetryPolicy {
+                delays: vec![Duration::from_secs(1), Duration::from_secs(2)]
+            })
+        );
+        assert_eq!(cfg.retry, default.retry);
+        assert_eq!(cfg.transfer_idle_timeout, default.transfer_idle_timeout);
+        assert_eq!(cfg.transfer_concurrency, default.transfer_concurrency);
+        assert_eq!(cfg.delete_concurrency, default.delete_concurrency);
+    }
+}
+
+/// Minor 2: while a folder's listing is out the pane says it is loading, and keeps showing the
+/// folder it is in; the answer clears it.
+#[tokio::test]
+async fn a_cloud_pane_is_loading_while_its_listing_is_out() {
+    let gated = Gated::new(
+        MockProvider::new(Default::default())
+            .with_file("slow/late.txt", b"l")
+            .with_file("readme.txt", b"r"),
+        "slow",
+    );
+    let (s, _, _) = session_with(gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    let root = select(&s, 0).await;
+    assert!(!root.loading);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let seen = root.version;
+    let ticket = s.remote_ticket();
+    let task = tokio::spawn({
+        let s = s.clone();
+        async move {
+            s.open_remote(ticket, 0, seen, move |view| {
+                let _ = tx.send(view);
+            })
+            .await
+        }
+    });
+    let loading = timeout(PROMPTLY, rx).await.unwrap().unwrap();
+    until_held(&gated).await;
+    assert!(loading.loading);
+    assert!(loading.version > root.version, "a view the window takes");
+    assert_eq!((&loading.rows, &loading.crumbs), (&root.rows, &root.crumbs));
+    assert_eq!(current_remote(&s), loading);
+    // Anything that goes nowhere meanwhile reports the pane as loading still.
+    assert!(remote_up(&s).await.loading);
+
+    gated.open();
+    let listed = timeout(PROMPTLY, task).await.unwrap().unwrap();
+    assert!(!listed.loading);
+    assert_eq!(listed.crumbs, ["testzone", "slow"]);
+}
+
+#[tokio::test]
+async fn a_failed_listing_clears_the_loading_state_too() {
+    let mock = site_mock();
+    let s = saved(&mock).await;
+    select(&s, 0).await;
+    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    let failed = open_remote(&s, 0).await;
+    assert_eq!(failed.error.as_deref(), Some(AUTH));
+    assert!(!failed.loading);
+    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    let failed = select(&s, 0).await;
+    assert!(failed.error.is_some() && !failed.loading);
+}
+
+#[tokio::test]
+async fn the_local_pane_is_loading_while_its_listing_is_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"a").unwrap();
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let before = s.local_view();
+    let mut started = None;
+    let dir = tmp.path().to_path_buf();
+    let listed = s
+        .navigate_local(
+            s.local_ticket(),
+            Step::Go,
+            move |_| Some(Some(dir)),
+            |view| started = Some(view),
+        )
+        .await;
+    let started = started.expect("the pane said it was loading");
+    assert!(started.loading);
+    assert!(started.version > before.version);
+    assert_eq!(
+        started.rows, before.rows,
+        "the drives stay until the answer"
+    );
+    assert!(!listed.loading);
+    assert_eq!(names(&listed.rows), ["a.txt"]);
+
+    // A folder that can't be read clears it as well.
+    let failed = navigate_local(&s, Some(tmp.path().join("missing"))).await;
+    assert!(failed.error.is_some() && !failed.loading);
+}
+
+/// Minor 3: Refresh lists the folder shown again, and leaves the history as it is.
+#[tokio::test]
+async fn refresh_lists_the_cloud_folder_again_and_keeps_the_history() {
+    let mock = Arc::new(MockProvider::new(Default::default()).with_file("a/x.txt", b"x"));
+    let s = saved(&mock).await;
+    select(&s, 0).await;
+    open_remote(&s, 0).await;
+    let root = remote_back(&s).await;
+    assert!(!root.can_back && root.can_forward);
+    mock.upload(
+        &RemotePath::parse("fresh.txt").unwrap(),
+        UploadSource::Bytes(b"new".to_vec().into()),
+        &UploadOptions {
+            content_type: "text/plain".into(),
+            sha256: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let calls = mock.calls(MockOp::List);
+    let refreshed = remote_refresh(&s).await;
+    assert_eq!(mock.calls(MockOp::List), calls + 1);
+    assert_eq!(names(&refreshed.rows), ["a", "fresh.txt"]);
+    assert_eq!(refreshed.crumbs, root.crumbs);
+    assert_eq!(
+        (refreshed.can_back, refreshed.can_forward),
+        (root.can_back, root.can_forward)
+    );
+    assert!(refreshed.version > root.version);
+    assert_eq!(remote_forward(&s).await.crumbs, ["testzone", "a"]);
+}
+
+#[tokio::test]
+async fn refresh_with_no_site_or_no_client_does_nothing() {
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let empty = current_remote(&s);
+    assert_eq!(remote_refresh(&s).await, empty);
+
+    // A site with no password has no client to list with.
+    let mock = site_mock();
+    let (s, creds, _) = session_with(mock.clone());
+    let rec = s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    creds.delete(&CredentialKey::site(&rec.id)).unwrap();
+    let failed = select(&s, 0).await;
+    assert_eq!(remote_refresh(&s).await, failed);
+    assert_eq!(mock.calls(MockOp::List), 0);
+}
+
+#[tokio::test]
+async fn refresh_lists_the_local_folder_again_and_keeps_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"a").unwrap();
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    let top = navigate_local(&s, Some(tmp.path().to_path_buf())).await;
+    std::fs::write(tmp.path().join("b.txt"), b"b").unwrap();
+    let refreshed = local_refresh(&s).await;
+    assert_eq!(names(&refreshed.rows), ["a.txt", "b.txt"]);
+    assert_eq!(refreshed.crumbs, top.crumbs);
+    assert_eq!(refreshed.status, "2 items");
+    assert_eq!(
+        (refreshed.can_back, refreshed.can_forward),
+        (top.can_back, top.can_forward)
+    );
+    // Back still goes where it went before.
+    assert!(local_back(&s).await.crumbs.is_empty());
+    // The list of drives can be refreshed too.
+    assert!(local_refresh(&s).await.rows.iter().any(|r| r.name == "C:"));
 }

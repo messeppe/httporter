@@ -3,7 +3,7 @@
 use super::*;
 use crate::session::fakes::{FakeFactory, Gated, session_with};
 use crate::viewmodel::{FileKindData, RowData};
-use httporter_core::{MockProvider, StorageProvider};
+use httporter_core::{MockOp, MockProvider, ProviderError, StorageProvider};
 use i_slint_backend_testing as testing;
 use slint::Model;
 use std::time::{Duration, Instant};
@@ -201,7 +201,7 @@ fn picking_a_site_empties_the_cloud_pane_and_drops_its_error_only() {
     ui.set_remote_rows(to_slint_rows(&[row("old.txt", false)]));
     ui.set_remote_crumbs(super::strings(&["old-zone".into()]));
     ui.set_remote_selected(0);
-    ui.set_status_left("3 items".into());
+    ui.set_remote_status("3 items".into());
     let shown = Mutex::new(Shown {
         remote_error: Some("Couldn't sign in to old-zone.".into()),
         local_error: Some("Couldn't open D:\\x: Access is denied.".into()),
@@ -296,13 +296,14 @@ fn a_site_can_be_added_while_a_cloud_listing_hangs() {
     ui.invoke_add_site_save("other".into(), "other-zone".into(), 0, "pw".into());
     wait_for("the save", || (session.sites().len() == 2).then_some(()));
     ui.invoke_add_site_test("".into(), "other-zone".into(), 0, "pw".into());
+    // One client for the test made before saving, one for Test Connection.
     wait_for("the test", || {
         (factory
             .configs()
             .iter()
             .filter(|c| c.0 == "other-zone")
             .count()
-            == 1)
+            == 2)
             .then_some(())
     });
     assert_eq!(
@@ -327,6 +328,7 @@ fn a_remote_view_is_applied_to_the_window() {
         status_right: "HTTP/2 · sg.storage.bunnycdn.com".into(),
         can_back: true,
         can_forward: false,
+        loading: false,
         error: None,
     };
     ui.set_remote_selected(1);
@@ -347,7 +349,7 @@ fn a_remote_view_is_applied_to_the_window() {
         connection: "Not connected".into(),
         connection_ok: false,
         status_right: String::new(),
-        error: Some("Couldn't reach x: y".into()),
+        error: Some("Couldn't reach x. Check your internet connection and try again.".into()),
         rows: vec![row("a", false)],
         ..view
     };
@@ -368,6 +370,7 @@ fn a_local_view_is_applied_to_the_window() {
         status: "2 items · 1 couldn't be read".into(),
         can_back: false,
         can_forward: true,
+        loading: false,
         error: None,
     };
     ui.set_local_selected(0);
@@ -375,7 +378,7 @@ fn a_local_view_is_applied_to_the_window() {
     assert!(!ui.get_local_can_go_back() && ui.get_local_can_go_forward());
     assert_eq!(ui.get_local_rows().row_count(), 2);
     assert_eq!(strings(ui.get_local_crumbs()), ["D:", "site"]);
-    assert_eq!(ui.get_status_left(), "2 items · 1 couldn't be read");
+    assert_eq!(ui.get_local_status(), "2 items · 1 couldn't be read");
     assert_eq!(ui.get_local_selected(), -1);
 }
 
@@ -389,7 +392,7 @@ fn sorting_keeps_the_selected_row_selected() {
     };
     apply_remote(&ui, &listed, Change::Listed);
     ui.set_remote_selected(2);
-    ui.set_status_left("dropped".into());
+    ui.set_status_message("dropped".into());
     let sorted = RemoteView {
         rows: vec![row("c", false), row("b", false), row("a", false)],
         ..RemoteView::default()
@@ -437,7 +440,7 @@ fn back_and_forward_act_on_the_pane_last_used() {
     let c = drives.rows.iter().position(|r| r.name == "C:").unwrap();
     let ticket = b.session.local_ticket();
     let inside =
-        b.rt.block_on(b.session.open_local(ticket, c, drives.version));
+        b.rt.block_on(b.session.open_local(ticket, c, drives.version, |_| {}));
     assert_eq!(inside.crumbs, ["C:"]);
     assert!(inside.can_back);
 
@@ -462,4 +465,249 @@ fn back_and_forward_act_on_the_pane_last_used() {
     // Using the cloud pane makes it the one again.
     b.ui.invoke_remote_up();
     assert!(!b.ui.get_local_pane_active());
+}
+
+// ---- Final fix wave ----
+
+const AUTH: &str = "Couldn't sign in to testzone. Check the password, zone name and region.";
+
+fn valid(zone: &str) -> ValidSite {
+    ValidSite {
+        name: zone.into(),
+        zone: zone.into(),
+        region_code: "sg".into(),
+        password: "pw".into(),
+    }
+}
+
+/// Important #1: Add Site (the sheet's default button, also pressed by Return in a field) tests
+/// the connection first, and a rejected password saves nothing.
+#[test]
+fn add_site_with_a_rejected_password_saves_nothing() {
+    let mock = Arc::new(MockProvider::new(Default::default()));
+    let b = bound(mock.clone());
+    mock.fail_next(MockOp::List, ProviderError::Auth, 1);
+    // References to the storage: this test's and the factory's. A running test holds a third.
+    let idle = Arc::strong_count(&mock);
+    b.ui.invoke_add_site_save("".into(), "testzone".into(), 4, "wrong".into());
+    assert!(b.ui.get_add_site_busy(), "busy while the test runs");
+    wait_for("the zone to be listed", || {
+        (mock.calls(MockOp::List) == 1).then_some(())
+    });
+    wait_for("the test to end", || {
+        (Arc::strong_count(&mock) == idle).then_some(())
+    });
+    assert!(b.session.sites().is_empty());
+    assert_eq!(
+        b.factory.configs(),
+        [(
+            "testzone".to_owned(),
+            "sg.storage.bunnycdn.com".to_owned(),
+            "wrong".to_owned()
+        )]
+    );
+}
+
+/// The sheet stays busy while Add Site tests the zone, and Cancel gives the test up: the site is
+/// never saved.
+#[test]
+fn cancel_gives_up_on_adding_a_site_while_it_is_tested() {
+    // Its root listing is held back for good, like a server that stopped answering.
+    let hanging = Gated::new(MockProvider::new(Default::default()), "");
+    let b = bound(hanging.clone());
+    let idle = Arc::strong_count(&hanging);
+    b.ui.invoke_add_site_save("".into(), "testzone".into(), 4, "pw".into());
+    assert!(b.ui.get_add_site_busy());
+    wait_for("the test to start", || {
+        (hanging.waiting() == 1).then_some(())
+    });
+    assert!(
+        b.session.sites().is_empty(),
+        "nothing is saved before the test"
+    );
+
+    b.ui.invoke_add_site_cancel();
+    assert!(!b.ui.get_add_site_busy());
+    wait_for("the test to be given up", || {
+        (Arc::strong_count(&hanging) == idle).then_some(())
+    });
+    assert_eq!(hanging.waiting(), 0);
+    assert!(b.session.sites().is_empty());
+}
+
+#[test]
+fn a_site_that_fails_its_test_keeps_the_sheet_open_and_says_why() {
+    let b = bound(empty());
+    b.ui.set_add_site_open(true);
+    b.ui.set_add_site_busy(true);
+    show_added(&b.ui, &b.session, true, Err(AUTH.into()));
+    assert!(b.ui.get_add_site_open());
+    assert!(!b.ui.get_add_site_busy());
+    assert_eq!(b.ui.get_add_site_result(), AUTH);
+    assert!(!b.ui.get_add_site_result_ok());
+    assert_eq!(b.ui.get_sites().row_count(), 0);
+
+    // After a cancel (or once the sheet has been reopened) the old answer is not shown.
+    b.ui.set_add_site_result("".into());
+    b.ui.set_add_site_busy(true);
+    show_added(&b.ui, &b.session, false, Err(AUTH.into()));
+    assert_eq!(b.ui.get_add_site_result(), "");
+    assert!(b.ui.get_add_site_busy());
+}
+
+#[test]
+fn a_site_that_passes_its_test_is_saved_once_and_opened() {
+    let mock = Arc::new(MockProvider::new(Default::default()));
+    let b = bound(mock.clone());
+    b.ui.set_add_site_open(true);
+    b.ui.invoke_add_site_save("".into(), "testzone".into(), 4, "pw".into());
+    let saved = wait_for("the save", || b.session.sites().first().cloned());
+    assert_eq!(mock.calls(MockOp::List), 1, "one listing: the test");
+    assert_eq!(b.session.sites().len(), 1);
+
+    show_added(&b.ui, &b.session, true, Ok(saved));
+    assert!(!b.ui.get_add_site_open());
+    assert!(!b.ui.get_add_site_busy());
+    assert_eq!(b.ui.get_sites().row_count(), 1);
+    assert_eq!(b.ui.get_selected_site(), 0);
+    wait_for("the new site to open", || {
+        (b.factory.configs().len() == 2).then_some(())
+    });
+}
+
+/// Minor 2: a loading view marks the pane and leaves its rows and selection alone; the answer
+/// clears it.
+#[test]
+fn a_loading_view_marks_the_pane_and_leaves_its_rows() {
+    let b = bound(empty());
+    let shown = Mutex::new(Shown::default());
+    let listed = RemoteView {
+        version: 1,
+        rows: vec![row("a", false), row("b", false)],
+        ..RemoteView::default()
+    };
+    show_remote(&b.ui, &shown, &b.session, &listed, Change::Listed);
+    b.ui.set_remote_selected(1);
+    let loading = RemoteView {
+        version: 2,
+        loading: true,
+        ..listed.clone()
+    };
+    show_remote(&b.ui, &shown, &b.session, &loading, Change::Loading);
+    assert!(b.ui.get_remote_loading());
+    assert!(!b.ui.get_local_loading());
+    assert_eq!(row_names(&b.ui), ["a", "b"]);
+    assert_eq!(b.ui.get_remote_selected(), 1);
+    let done = RemoteView {
+        version: 3,
+        rows: vec![row("c", false)],
+        ..RemoteView::default()
+    };
+    show_remote(&b.ui, &shown, &b.session, &done, Change::Listed);
+    assert!(!b.ui.get_remote_loading());
+    assert_eq!(row_names(&b.ui), ["c"]);
+
+    let loading = LocalView {
+        version: 9,
+        rows: vec![row("C:", true)],
+        loading: true,
+        ..LocalView::default()
+    };
+    show_local(&b.ui, &shown, &b.session, &loading, Change::Loading);
+    assert!(b.ui.get_local_loading());
+    let failed = LocalView {
+        version: 10,
+        loading: false,
+        error: Some("Couldn't open D:\\x: Access is denied.".into()),
+        ..loading
+    };
+    show_local(&b.ui, &shown, &b.session, &failed, Change::Listed);
+    assert!(!b.ui.get_local_loading());
+}
+
+/// Minor 3: F5 and Ctrl+R list the pane last used again, by the same rule as Back and Forward.
+#[test]
+fn refresh_lists_the_pane_last_used_again() {
+    let mock = Arc::new(MockProvider::new(Default::default()).with_file("a.txt", b"a"));
+    let b = bound(mock.clone());
+    b.rt.block_on(b.session.save_site(&valid("testzone")))
+        .unwrap();
+    let ticket = b.session.remote_ticket();
+    b.rt.block_on(b.session.select_site(ticket, 0, |_| {}));
+    let calls = mock.calls(MockOp::List);
+
+    // The cloud pane is the one at first.
+    assert!(!b.ui.get_local_pane_active());
+    let local = b.session.local_view().version;
+    b.ui.invoke_refresh();
+    wait_for("the cloud folder to be listed again", || {
+        (mock.calls(MockOp::List) == calls + 1).then_some(())
+    });
+
+    // Once This PC has been used, it is the one refreshed.
+    b.ui.set_local_pane_active(true);
+    b.ui.invoke_refresh();
+    wait_for("This PC to be listed again", || {
+        (b.session.local_view().version >= local + 2).then_some(())
+    });
+    assert_eq!(mock.calls(MockOp::List), calls + 1);
+}
+
+/// Minor 3: a refreshed folder keeps the selected row (found by name) and updates the count.
+#[test]
+fn a_refresh_keeps_the_selected_row_by_name() {
+    testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let listed = RemoteView {
+        rows: vec![row("a", false), row("b", false), row("c", false)],
+        ..RemoteView::default()
+    };
+    apply_remote(&ui, &listed, Change::Listed);
+    ui.set_remote_selected(1);
+    let refreshed = RemoteView {
+        rows: vec![
+            row("a", false),
+            row("a2", false),
+            row("b", false),
+            row("c", false),
+        ],
+        ..RemoteView::default()
+    };
+    apply_remote(&ui, &refreshed, Change::Refreshed);
+    assert_eq!(ui.get_remote_selected(), 2);
+    assert_eq!(ui.get_status_left(), "4 items");
+}
+
+/// Minor 11: each pane has its own count, and the status bar shows the one of the pane last used.
+#[test]
+fn the_status_bar_counts_the_items_of_the_pane_last_used() {
+    testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let local = LocalView {
+        rows: vec![row("a", false), row("b", false), row("c", false)],
+        status: "3 items".into(),
+        ..LocalView::default()
+    };
+    let remote = |n: usize| RemoteView {
+        rows: (0..n).map(|i| row(&format!("r{i}"), false)).collect(),
+        ..RemoteView::default()
+    };
+    apply_local(&ui, &local, Change::Listed);
+    apply_remote(&ui, &remote(2), Change::Listed);
+    assert!(!ui.get_local_pane_active());
+    assert_eq!(ui.get_status_left(), "2 items");
+    ui.set_local_pane_active(true);
+    assert_eq!(ui.get_status_left(), "3 items");
+
+    // A listing in the other pane does not take the status bar over.
+    apply_remote(&ui, &remote(5), Change::Listed);
+    assert_eq!(ui.get_status_left(), "3 items");
+    ui.set_local_pane_active(false);
+    assert_eq!(ui.get_status_left(), "5 items");
+
+    // A message (what a drop did) shows until that pane is listed again.
+    ui.set_status_message("dropped".into());
+    assert_eq!(ui.get_status_left(), "dropped");
+    apply_remote(&ui, &remote(1), Change::Listed);
+    assert_eq!(ui.get_status_left(), "1 item");
 }

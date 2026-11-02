@@ -145,6 +145,42 @@ component ColumnHeader inherits Rectangle {
     }
 }
 
+// Shown in the pane's header while a listing for it is on its way (mockup `.chip`, neutral). The
+// rows below are still those of the folder shown until the answer arrives. A polite live region,
+// so assistive technology announces it.
+component LoadingMark inherits Rectangle {
+    height: 20px;
+    background: Theme.chip;
+    border-radius: self.height / 2;
+    accessible-role: AccessibleRole.text;
+    accessible-label: @tr("Loading…");
+    accessible-live-region: polite;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+
+        VCenter {
+            Image {
+                source: Icons.refresh;
+                colorize: Theme.label2;
+                width: 14px;
+                height: 14px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: @tr("Loading…");
+            color: Theme.label2;
+            font-size: Theme.font-small;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
 // One file or folder (mockup `.row`): folder disclosure chevron, kind icon and name, then size and
 // modified date. Alternate rows get the `row-alt` background; the selected row fills with the
 // accent colour and white text.
@@ -249,6 +285,8 @@ export component Pane inherits Rectangle {
     // upload" chip. Slint's own drop events do not see files from other apps, so the window sets
     // this from the OS drag events.
     in property <bool> drop-hover: false;
+    // A listing for this pane is on its way: the header says "Loading…" until it is in.
+    in property <bool> loading: false;
     // Index into `rows` of the selected row, or -1 for none.
     in-out property <int> selected: -1;
     // Sorted column: 0 name, 1 size, 2 modified. Pressing a column header changes these two and
@@ -484,6 +522,9 @@ export component Pane inherits Rectangle {
                                 }
                             }
                         }
+                    }
+                    if root.loading: VCenter {
+                        LoadingMark { }
                     }
                     if root.header-chip != "": VCenter {
                         Rectangle {

@@ -61,7 +61,14 @@ export component AppWindow inherits Window {
     in property <string> connection-text;
     in property <bool> connection-ok;
     in property <string> endpoint-text;
-    in property <string> status-left;
+    // The left of the status bar: the item count of the pane last used or focused (the same rule
+    // as Back and Forward, see `local-pane-active`), unless a message has been put there since
+    // (what a drop did). The message stays until that pane is listed again or the other pane is
+    // used.
+    in property <string> local-status;
+    in property <string> remote-status;
+    in-out property <string> status-message;
+    out property <string> status-left: root.status-message != "" ? root.status-message : (root.local-pane-active ? root.local-status : root.remote-status);
     in property <string> status-right;
     in property <string> error-text;
     in property <[FileRow]> local-rows;
@@ -71,9 +78,13 @@ export component AppWindow inherits Window {
     // Storage endpoint shown as a chip in the cloud pane's header.
     in property <string> remote-chip;
     // Explorer files are being dragged over the cloud pane: it shows the accent ring and a "Release
-    // to upload" chip. Set from the OS drag events (see src/drop_hook.rs), since Slint's DropArea
-    // does not see files dragged in from other apps.
+    // to upload" chip, if a site is selected (with none there is nothing to upload to). Set from
+    // the OS drag events (see src/drop_hook.rs), since Slint's DropArea does not see files dragged
+    // in from other apps.
     in property <bool> drop-hover-remote: false;
+    // A listing for the pane is on its way: the pane says "Loading…" until it is in.
+    in property <bool> local-loading: false;
+    in property <bool> remote-loading: false;
     // Selected row of each pane (-1 for none) and its sorted column (0 name, 1 size, 2 modified).
     in-out property <int> local-selected: -1;
     in-out property <int> remote-selected: -1;
@@ -105,7 +116,8 @@ export component AppWindow inherits Window {
 
     // Back and Forward in the toolbar (and Alt+Left / Alt+Right) move through the folders of the
     // pane last used or focused, Finder-style: the This PC pane when `local-pane-active`, else the
-    // cloud pane (the one they act on at first). The app says where each pane can go.
+    // cloud pane (the one they act on at first). The app says where each pane can go. Refresh and
+    // the status bar's item count follow the same pane.
     in-out property <bool> local-pane-active: false;
     in property <bool> local-can-go-back;
     in property <bool> local-can-go-forward;
@@ -113,6 +125,8 @@ export component AppWindow inherits Window {
     in property <bool> remote-can-go-forward;
     callback go-back();
     callback go-forward();
+    // F5 or Ctrl+R: list the folder of the pane last used or focused again (as Back and Forward).
+    callback refresh();
 
     callback site-selected(int);
     callback add-site();
@@ -156,12 +170,24 @@ export component AppWindow inherits Window {
     property <bool> can-go-back: root.local-pane-active ? root.local-can-go-back : root.remote-can-go-back;
     property <bool> can-go-forward: root.local-pane-active ? root.local-can-go-forward : root.remote-can-go-forward;
 
+    // Turning to the other pane puts its count in the status bar, over any message.
+    changed local-pane-active => {
+        root.status-message = "";
+    }
+
     // Alt+Left and Alt+Right anywhere in the window (but not on the Add Site sheet, which sits
-    // outside this scope): the Windows keys for Back and Forward. Not a Tab stop itself.
+    // outside this scope): the Windows keys for Back and Forward; F5 and Ctrl+R refresh. Not a Tab
+    // stop itself.
     FocusScope {
         focus-on-click: false;
         focus-on-tab-navigation: false;
         key-pressed(event) => {
+            if (!event.modifiers.alt && !event.modifiers.meta && ((event.text == Key.F5 && !event.modifiers.control) || (event.modifiers.control && (event.text == "r" || event.text == "R")))) {
+                if (!event.repeat) {
+                    root.refresh();
+                }
+                return accept;
+            }
             if (event.modifiers.alt && !event.modifiers.control && !event.modifiers.meta) {
                 if (event.text == Key.LeftArrow) {
                     if (!event.repeat && root.can-go-back) {
@@ -243,6 +269,7 @@ export component AppWindow inherits Window {
                             icon: Icons.pc;
                             crumbs: root.local-crumbs;
                             rows: root.local-rows;
+                            loading: root.local-loading;
                             selected <=> root.local-selected;
                             sort-column <=> root.local-sort-column;
                             sort-ascending <=> root.local-sort-ascending;
@@ -266,7 +293,8 @@ export component AppWindow inherits Window {
                             crumbs: root.remote-crumbs;
                             rows: root.remote-rows;
                             header-chip: root.remote-chip;
-                            drop-hover: root.drop-hover-remote;
+                            loading: root.remote-loading;
+                            drop-hover: root.drop-hover-remote && root.has-selection;
                             selected <=> root.remote-selected;
                             sort-column <=> root.remote-sort-column;
                             sort-ascending <=> root.remote-sort-ascending;

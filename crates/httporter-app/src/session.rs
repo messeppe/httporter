@@ -10,7 +10,12 @@
 //! Requests to move a pane are put in order by [`Ticket`]s, taken on the UI thread when the user
 //! asks. A request takes effect only if no later one already has, and a listing's answer is used
 //! only if its request is still the latest to have taken effect; anything else is from a place
-//! the user has left, and is dropped.
+//! the user has left, and is dropped. From the moment a request takes effect until its answer is
+//! in, the pane says it is loading.
+//!
+//! Every listing someone waits for (a pane, Test Connection, the test before a site is added) uses
+//! a short timeout and few retries ([`interactive`]), so a dead connection is reported within a
+//! minute rather than after twelve.
 //!
 //! A site's password is read from the credential store only when the site is selected, and goes
 //! straight into the storage client's configuration. It is never kept here, written to the site
@@ -21,12 +26,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use chrono::{NaiveDateTime, Utc};
 use httporter_bunny::{BunnyConfig, BunnyStorage, REGIONS, storage_host};
 use httporter_core::{
-    Entry, Listing, ProviderError, ProviderKind, RemotePath, RequestInfo, SiteId, SiteRecord,
-    StorageProvider,
+    Entry, Listing, ProviderError, ProviderKind, RemotePath, RequestInfo, RetryPolicy, SiteId,
+    SiteRecord, StorageProvider,
 };
 use httporter_platform::{CredentialKey, CredentialStore, Store};
 
@@ -41,6 +47,23 @@ use crate::viewmodel::{
 /// Builds the storage client for a site. The app uses [`RealFactory`]; tests hand out mocks.
 pub trait ProviderFactory: Send + Sync {
     fn bunny(&self, cfg: BunnyConfig) -> Result<Arc<dyn StorageProvider>, ProviderError>;
+}
+
+/// How long one try at a listing someone is waiting for may take.
+const INTERACTIVE_LIST_TIMEOUT: Duration = Duration::from_secs(20);
+/// The waits, in seconds, before such a listing is tried again: two retries.
+const INTERACTIVE_LIST_RETRIES: [u64; 2] = [1, 2];
+
+/// `cfg` for a site someone is browsing or adding: a listing gives up after 20 s and is tried at
+/// most three times, 1 s and 2 s apart, so a dead connection is reported in about a minute at
+/// worst (the default, six tries of up to 120 s with 25 s of waits, takes some twelve). Uploads,
+/// downloads and deletes keep the default policy.
+fn interactive(mut cfg: BunnyConfig) -> BunnyConfig {
+    cfg.list_timeout = INTERACTIVE_LIST_TIMEOUT;
+    cfg.list_retry = Some(RetryPolicy {
+        delays: INTERACTIVE_LIST_RETRIES.map(Duration::from_secs).to_vec(),
+    });
+    cfg
 }
 
 /// Talks to the real Bunny Storage API.
@@ -81,6 +104,9 @@ pub struct RemoteView {
     /// There is a folder to go back to, or forward to.
     pub can_back: bool,
     pub can_forward: bool,
+    /// A listing for the pane is on its way: the site's root while it opens, or the folder a
+    /// request is going to. The rows are still those of the folder shown.
+    pub loading: bool,
     pub error: Option<String>,
 }
 
@@ -95,6 +121,8 @@ pub struct LocalView {
     pub status: String,
     pub can_back: bool,
     pub can_forward: bool,
+    /// As [`RemoteView::loading`].
+    pub loading: bool,
     pub error: Option<String>,
 }
 
@@ -150,14 +178,67 @@ pub fn endpoint_preview(zone: &str, region_index: i32) -> String {
     }
 }
 
-/// What to say about a failed request to `zone` on `host` that tried to list `dir`.
-fn describe(error: &ProviderError, zone: &str, host: &str, dir: &RemotePath) -> String {
-    match error {
-        ProviderError::Auth => {
+/// What a failed attempt to talk to a zone was for, which decides how the failure is told.
+#[derive(Clone, Copy, Debug)]
+enum Attempt<'a> {
+    /// Making the storage client, before anything was sent.
+    Setup,
+    /// Listing a folder.
+    List(&'a RemotePath),
+}
+
+/// The most of a client's own explanation that goes into a message.
+const DETAIL_MAX: usize = 120;
+
+/// What to tell the user about a failed attempt to talk to `zone` on `host`: plain words for each
+/// kind of error, without the labels the errors carry for the code ("transient error: …"), and
+/// never the password or a request URL. Only a client that could not be set up adds its own
+/// explanation, cut short: no request was made, so there is nothing else to go on.
+fn describe(error: &ProviderError, zone: &str, host: &str, attempt: Attempt<'_>) -> String {
+    match (error, attempt) {
+        (ProviderError::Auth, _) => {
             format!("Couldn't sign in to {zone}. Check the password, zone name and region.")
         }
-        ProviderError::NotFound => format!("Couldn't find /{} in {zone}.", dir.as_str()),
-        other => format!("Couldn't reach {host}: {other}"),
+        (ProviderError::NotFound, Attempt::List(dir)) => {
+            format!("Couldn't find /{} in {zone}.", dir.as_str())
+        }
+        (ProviderError::NotFound, Attempt::Setup) => format!("Couldn't find {zone}."),
+        (ProviderError::RateLimited { .. }, _) => format!("{host} is busy. Try again in a moment."),
+        // No usable answer came back: the connection failed or timed out, or the server kept
+        // failing (5xx) through every retry.
+        (ProviderError::Transient(_), _) => {
+            format!("Couldn't reach {host}. Check your internet connection and try again.")
+        }
+        (ProviderError::ChecksumMismatch, _) => {
+            format!("{host} received a damaged copy. Try again.")
+        }
+        // Said by this app, in plain words, about a request it would not make.
+        (ProviderError::Refused(reason), _) => sentence(reason),
+        (ProviderError::Permanent(detail), Attempt::Setup) => {
+            format!(
+                "Couldn't set up a connection to {host}. {}",
+                sentence(detail)
+            )
+        }
+        // The server answered, but not with anything that makes sense.
+        (ProviderError::Permanent(_), Attempt::List(_)) => {
+            format!("{host} sent an unexpected response.")
+        }
+    }
+}
+
+/// `text` as one short sentence: trimmed, at most [`DETAIL_MAX`] characters, starting with a
+/// capital and ending with a full stop.
+fn sentence(text: &str) -> String {
+    let text = text.trim().trim_end_matches('.');
+    let mut short: String = text.chars().take(DETAIL_MAX).collect();
+    if short.len() < text.len() {
+        short.push('…');
+    }
+    let mut chars = short.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
     }
 }
 
@@ -249,6 +330,8 @@ struct RemotePane {
     /// Folders within the open site.
     history: History<RemotePath>,
     open: Option<Remote>,
+    /// The listing for request `latest` is on its way.
+    loading: bool,
 }
 
 /// The open cloud site and the folder shown from it.
@@ -293,6 +376,8 @@ struct LocalPane {
     entries: Vec<LocalEntry>,
     skipped: usize,
     error: Option<String>,
+    /// As [`RemotePane::loading`].
+    loading: bool,
 }
 
 /// The PC's drives, as folders named like their breadcrumb ("C:").
@@ -380,6 +465,7 @@ impl Session {
                 sort,
                 history: History::default(),
                 open: None,
+                loading: false,
             }),
             local: Mutex::new(LocalPane {
                 latest: Ticket(0),
@@ -390,6 +476,7 @@ impl Session {
                 entries: drives,
                 skipped: 0,
                 error: None,
+                loading: false,
             }),
             remote_tickets: AtomicU64::new(0),
             local_tickets: AtomicU64::new(0),
@@ -445,10 +532,11 @@ impl Session {
 
     /// Opens the site at `index` in [`Self::sites`] and lists its root.
     ///
-    /// The pane switches to the site at once: empty, "Connecting…", with the site's endpoint and
-    /// a fresh history. `switched` gets that view, so the window can show it before the password
-    /// is read, the client is set up and the listing comes back, all of which can take a while.
-    /// Anything still on its way from the site shown before is dropped when it arrives.
+    /// The pane switches to the site at once: empty, "Connecting…", loading, with the site's
+    /// endpoint and a fresh history. `switched` gets that view, so the window can show it before
+    /// the password is read, the client is set up and the listing comes back, all of which can
+    /// take a while. Anything still on its way from the site shown before is dropped when it
+    /// arrives.
     pub async fn select_site(
         &self,
         ticket: Ticket,
@@ -465,6 +553,7 @@ impl Session {
             pane.version += 1;
             pane.history = History::default();
             pane.open = site.clone().map(Remote::new);
+            pane.loading = site.is_some();
             self.remote_view_of(&pane)
         };
         let Some(site) = site else {
@@ -486,6 +575,7 @@ impl Session {
                 }
                 Err(message) => {
                     remote.error = Some(message);
+                    pane.loading = false;
                     pane.version += 1;
                     return self.remote_view_of(&pane);
                 }
@@ -496,11 +586,21 @@ impl Session {
         self.finish_listing(ticket, Step::Go, root, result)
     }
 
+    // Each request that moves the cloud pane (or the This PC pane, below) hands `started` the
+    // pane as it is once the request has taken effect: loading, still showing the folder it was
+    // in. A request that goes nowhere does not call it.
+
     /// Opens row `row` of the cloud pane if it is a folder. `seen` is the version of the view
     /// the row was on: if the pane has changed since, the row may be another one, and nothing
     /// happens.
-    pub async fn open_remote(&self, ticket: Ticket, row: usize, seen: u64) -> RemoteView {
-        self.navigate_remote(ticket, Step::Go, |pane| {
+    pub async fn open_remote(
+        &self,
+        ticket: Ticket,
+        row: usize,
+        seen: u64,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        let pick = |pane: &RemotePane| {
             if pane.version != seen {
                 return None;
             }
@@ -510,35 +610,66 @@ impl Session {
                 .get(row)
                 .filter(|entry| entry.is_folder)
                 .map(|entry| entry.path.clone())
-        })
-        .await
+        };
+        self.navigate_remote(ticket, Step::Go, pick, started).await
     }
 
-    pub async fn remote_up(&self, ticket: Ticket) -> RemoteView {
-        self.navigate_remote(ticket, Step::Go, |pane| pane.open.as_ref()?.dir.parent())
-            .await
+    pub async fn remote_up(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        let pick = |pane: &RemotePane| pane.open.as_ref()?.dir.parent();
+        self.navigate_remote(ticket, Step::Go, pick, started).await
     }
 
     /// Goes to the folder of cloud breadcrumb `index` (0 is the zone's root), if the crumbs are
     /// still those of view version `seen`.
-    pub async fn remote_crumb(&self, ticket: Ticket, index: usize, seen: u64) -> RemoteView {
-        self.navigate_remote(ticket, Step::Go, |pane| {
+    pub async fn remote_crumb(
+        &self,
+        ticket: Ticket,
+        index: usize,
+        seen: u64,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        let pick = |pane: &RemotePane| {
             if pane.version != seen {
                 return None;
             }
             remote_ancestor(&pane.open.as_ref()?.dir, index)
-        })
-        .await
+        };
+        self.navigate_remote(ticket, Step::Go, pick, started).await
     }
 
-    pub async fn remote_back(&self, ticket: Ticket) -> RemoteView {
-        self.navigate_remote(ticket, Step::Back, |pane| pane.history.back_to())
+    pub async fn remote_back(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        let pick = |pane: &RemotePane| pane.history.back_to();
+        self.navigate_remote(ticket, Step::Back, pick, started)
             .await
     }
 
-    pub async fn remote_forward(&self, ticket: Ticket) -> RemoteView {
-        self.navigate_remote(ticket, Step::Forward, |pane| pane.history.forward_to())
+    pub async fn remote_forward(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        let pick = |pane: &RemotePane| pane.history.forward_to();
+        self.navigate_remote(ticket, Step::Forward, pick, started)
             .await
+    }
+
+    /// Lists the folder shown again (F5, Ctrl+R). The history stays as it is. A request still on
+    /// its way to another folder is given up, as for any later request.
+    pub async fn remote_refresh(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        let pick = |pane: &RemotePane| Some(pane.open.as_ref()?.dir.clone());
+        self.navigate_remote(ticket, Step::Go, pick, started).await
     }
 
     /// Reorders the cloud pane (and every later listing in it).
@@ -552,8 +683,9 @@ impl Session {
         self.remote_view_of(&pane)
     }
 
-    /// Lists the root of the zone the sheet describes, with the password as typed. It uses
-    /// nothing of the session but the factory, so it waits for no listing.
+    /// Lists the root of the zone the sheet describes, with the password as typed (and the
+    /// short policy of [`interactive`]). It uses nothing of the session but the factory, so it
+    /// waits for no listing.
     pub async fn test_connection(&self, v: &ValidSite) -> TestResult {
         let Some(host) = storage_host(&v.region_code) else {
             return TestResult {
@@ -561,15 +693,18 @@ impl Session {
                 text: "Choose a region.".into(),
             };
         };
-        let root = RemotePath::root();
-        let listed = match self
-            .factory
-            .bunny(BunnyConfig::new(&v.zone, &host, &v.password))
-        {
-            Ok(provider) => provider.list(&root).await,
-            Err(error) => Err(error),
+        let cfg = interactive(BunnyConfig::new(&v.zone, &host, &v.password));
+        let provider = match self.factory.bunny(cfg) {
+            Ok(provider) => provider,
+            Err(error) => {
+                return TestResult {
+                    ok: false,
+                    text: describe(&error, &v.zone, &host, Attempt::Setup),
+                };
+            }
         };
-        match listed {
+        let root = RemotePath::root();
+        match provider.list(&root).await {
             Ok(listing) => TestResult {
                 ok: true,
                 text: format!(
@@ -581,12 +716,24 @@ impl Session {
             },
             Err(error) => TestResult {
                 ok: false,
-                text: describe(&error, &v.zone, &host, &root),
+                text: describe(&error, &v.zone, &host, Attempt::List(&root)),
             },
         }
     }
 
-    /// Saves a new site: its password in the credential store, everything else in the database.
+    /// Adds the site the sheet describes if it works: lists the zone's root first, exactly as
+    /// [`Self::test_connection`] does, and saves the site only when that succeeds. Otherwise
+    /// nothing is saved and the error is the test's ("Couldn't sign in to …").
+    pub async fn add_site(&self, v: &ValidSite) -> Result<SiteRecord, String> {
+        let tested = self.test_connection(v).await;
+        if !tested.ok {
+            return Err(tested.text);
+        }
+        self.save_site(v).await
+    }
+
+    /// Saves a new site as it is, without testing it: its password in the credential store,
+    /// everything else in the database. The sheet goes through [`Self::add_site`].
     pub async fn save_site(&self, v: &ValidSite) -> Result<SiteRecord, String> {
         let host = storage_host(&v.region_code).ok_or_else(|| "Choose a region.".to_owned())?;
         let record = SiteRecord {
@@ -629,8 +776,14 @@ impl Session {
 
     /// Opens row `row` of the This PC pane if it is a folder (or a drive), and if the pane is
     /// still at view version `seen` (as for [`Self::open_remote`]).
-    pub async fn open_local(&self, ticket: Ticket, row: usize, seen: u64) -> LocalView {
-        self.navigate_local(ticket, Step::Go, |pane| {
+    pub async fn open_local(
+        &self,
+        ticket: Ticket,
+        row: usize,
+        seen: u64,
+        started: impl FnOnce(LocalView) + Send,
+    ) -> LocalView {
+        let pick = |pane: &LocalPane| {
             if pane.version != seen {
                 return None;
             }
@@ -639,24 +792,34 @@ impl Session {
                 Some(dir) => dir.join(&entry.name),
                 None => PathBuf::from(format!("{}\\", entry.name)),
             }))
-        })
-        .await
+        };
+        self.navigate_local(ticket, Step::Go, pick, started).await
     }
 
     /// Goes to the parent folder; from a drive's root, to the list of drives.
-    pub async fn local_up(&self, ticket: Ticket) -> LocalView {
-        self.navigate_local(ticket, Step::Go, |pane| {
+    pub async fn local_up(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(LocalView) + Send,
+    ) -> LocalView {
+        let pick = |pane: &LocalPane| {
             pane.dir
                 .as_deref()
                 .map(|dir| dir.parent().map(Path::to_path_buf))
-        })
-        .await
+        };
+        self.navigate_local(ticket, Step::Go, pick, started).await
     }
 
     /// Goes to the folder of This PC breadcrumb `index` (0 is the drive), if the crumbs are
     /// still those of view version `seen`.
-    pub async fn local_crumb(&self, ticket: Ticket, index: usize, seen: u64) -> LocalView {
-        self.navigate_local(ticket, Step::Go, |pane| {
+    pub async fn local_crumb(
+        &self,
+        ticket: Ticket,
+        index: usize,
+        seen: u64,
+        started: impl FnOnce(LocalView) + Send,
+    ) -> LocalView {
+        let pick = |pane: &LocalPane| {
             if pane.version != seen {
                 return None;
             }
@@ -664,18 +827,37 @@ impl Session {
                 .as_deref()
                 .and_then(|dir| local_ancestor(dir, index))
                 .map(Some)
-        })
-        .await
+        };
+        self.navigate_local(ticket, Step::Go, pick, started).await
     }
 
-    pub async fn local_back(&self, ticket: Ticket) -> LocalView {
-        self.navigate_local(ticket, Step::Back, |pane| pane.history.back_to())
+    pub async fn local_back(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(LocalView) + Send,
+    ) -> LocalView {
+        let pick = |pane: &LocalPane| pane.history.back_to();
+        self.navigate_local(ticket, Step::Back, pick, started).await
+    }
+
+    pub async fn local_forward(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(LocalView) + Send,
+    ) -> LocalView {
+        let pick = |pane: &LocalPane| pane.history.forward_to();
+        self.navigate_local(ticket, Step::Forward, pick, started)
             .await
     }
 
-    pub async fn local_forward(&self, ticket: Ticket) -> LocalView {
-        self.navigate_local(ticket, Step::Forward, |pane| pane.history.forward_to())
-            .await
+    /// Lists the folder (or the drives) shown again, as [`Self::remote_refresh`].
+    pub async fn local_refresh(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(LocalView) + Send,
+    ) -> LocalView {
+        let pick = |pane: &LocalPane| Some(pane.dir.clone());
+        self.navigate_local(ticket, Step::Go, pick, started).await
     }
 
     /// Reorders the This PC pane (and every later listing in it).
@@ -693,7 +875,7 @@ impl Session {
             Ok(Some(password)) => password,
             Ok(None) => {
                 return Err(format!(
-                    "No password saved for {}. Edit the site to add it.",
+                    "No password saved for {}. Remove this site and add it again.",
                     site.name
                 ));
             }
@@ -705,23 +887,25 @@ impl Session {
             }
         };
         let client = match site.provider {
-            ProviderKind::Bunny => self
-                .factory
-                .bunny(BunnyConfig::new(&site.zone, &site.host, password)),
+            ProviderKind::Bunny => self.factory.bunny(interactive(BunnyConfig::new(
+                &site.zone, &site.host, password,
+            ))),
         };
-        client.map_err(|e| describe(&e, &site.zone, &site.host, &RemotePath::root()))
+        client.map_err(|e| describe(&e, &site.zone, &site.host, Attempt::Setup))
     }
 
     /// Lists the folder `pick` chooses in the open site (if it chooses one) and goes there by
     /// `step`. A request older than one that has taken effect is dropped; a request that goes
-    /// nowhere takes no effect.
+    /// nowhere takes no effect. One that takes effect makes the pane loading and hands that view
+    /// to `started` before the listing is sent.
     async fn navigate_remote(
         &self,
         ticket: Ticket,
         step: Step,
         pick: impl FnOnce(&RemotePane) -> Option<RemotePath>,
+        started: impl FnOnce(RemoteView) + Send,
     ) -> RemoteView {
-        let (provider, dir) = {
+        let (provider, dir, loading) = {
             let mut pane = lock(&self.remote);
             if ticket < pane.latest {
                 return self.remote_view_of(&pane);
@@ -731,8 +915,11 @@ impl Session {
                 return self.remote_view_of(&pane);
             };
             pane.latest = ticket;
-            (provider, dir)
+            pane.loading = true;
+            pane.version += 1;
+            (provider, dir, self.remote_view_of(&pane))
         };
+        started(loading);
         let result = provider.list(&dir).await;
         self.finish_listing(ticket, step, dir, result)
     }
@@ -773,19 +960,24 @@ impl Session {
                         &ProviderError::NotFound,
                         &remote.site.zone,
                         &remote.site.host,
-                        &dir,
+                        Attempt::List(&dir),
                     ));
                 }
                 Err(error) => {
                     remote.info = None;
-                    remote.error =
-                        Some(describe(&error, &remote.site.zone, &remote.site.host, &dir));
+                    remote.error = Some(describe(
+                        &error,
+                        &remote.site.zone,
+                        &remote.site.host,
+                        Attempt::List(&dir),
+                    ));
                 }
             }
             let site = remote.site.id.clone();
             if let Some(left) = left {
                 pane.history.record(step, left);
             }
+            pane.loading = false;
             pane.version += 1;
             (self.remote_view_of(&pane), site)
         };
@@ -824,21 +1016,24 @@ impl Session {
             status_right,
             can_back: !pane.history.back.is_empty(),
             can_forward: !pane.history.forward.is_empty(),
+            loading: pane.loading,
             error: remote.error.clone(),
         }
     }
 
     /// Lists the place `pick` chooses (if it chooses one; `None` inside is the list of drives) on
     /// tokio's blocking threads and goes there by `step`. As for the cloud pane, a request older
-    /// than one that has taken effect is dropped, an answer is used only while its request is
-    /// the latest, and a failure leaves the pane where it was.
+    /// than one that has taken effect is dropped, `started` gets the pane as it is loading, an
+    /// answer is used only while its request is the latest, and a failure leaves the pane where
+    /// it was.
     async fn navigate_local(
         &self,
         ticket: Ticket,
         step: Step,
         pick: impl FnOnce(&LocalPane) -> Option<Option<PathBuf>>,
+        started: impl FnOnce(LocalView) + Send,
     ) -> LocalView {
-        let target = {
+        let (target, loading) = {
             let mut pane = lock(&self.local);
             if ticket < pane.latest {
                 return self.local_view_of(&pane);
@@ -847,8 +1042,11 @@ impl Session {
                 return self.local_view_of(&pane);
             };
             pane.latest = ticket;
-            target
+            pane.loading = true;
+            pane.version += 1;
+            (target, self.local_view_of(&pane))
         };
+        started(loading);
         let listed = match &target {
             None => Ok(LocalListing {
                 entries: drive_entries(),
@@ -884,6 +1082,7 @@ impl Session {
                 pane.error = Some(format!("Couldn't open {place}: {e}"));
             }
         }
+        pane.loading = false;
         pane.version += 1;
         self.local_view_of(&pane)
     }
@@ -897,6 +1096,7 @@ impl Session {
             status: items_status(pane.entries.len(), pane.skipped),
             can_back: !pane.history.back.is_empty(),
             can_forward: !pane.history.forward.is_empty(),
+            loading: pane.loading,
             error: pane.error.clone(),
         }
     }
@@ -992,6 +1192,11 @@ pub(crate) mod fakes {
                 .iter()
                 .map(|c| (c.zone.clone(), c.host.clone(), c.password.clone()))
                 .collect()
+        }
+
+        /// Every configuration handed in so far, whole.
+        pub(crate) fn full_configs(&self) -> Vec<BunnyConfig> {
+            lock(&self.configs).clone()
         }
     }
 

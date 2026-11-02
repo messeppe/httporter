@@ -71,8 +71,9 @@ fn open_session() -> Result<Session, httporter_platform::StoreError> {
     Ok(session)
 }
 
-/// Files dragged in from Explorer: the cloud pane lights up while they are over it. Dropping is
-/// only acknowledged in the status line for now; uploads arrive in I2.
+/// Files dragged in from Explorer: the cloud pane lights up while they are over it (if a site is
+/// selected; the window sees to that). Dropping is only acknowledged in the status line for now;
+/// uploads arrive in I2.
 fn install_drop(ui: &AppWindow) {
     let hover_ui = ui.as_weak();
     let drop_ui = ui.as_weak();
@@ -87,7 +88,7 @@ fn install_drop(ui: &AppWindow) {
         move |batch| {
             if let Some(ui) = drop_ui.upgrade() {
                 let site = selected_site_name(&ui);
-                ui.set_status_left(drop_status(&batch, site.as_deref()).into());
+                ui.set_status_message(drop_status(&batch, site.as_deref()).into());
             }
         },
         move || {

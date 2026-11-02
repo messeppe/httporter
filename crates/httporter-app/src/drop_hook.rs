@@ -463,6 +463,10 @@ mod tests {
         init_no_event_loop();
         let w = AppWindow::new().unwrap();
         w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+        // Only a selected site lights up (see keyboard_tests for the pane with none).
+        let site = crate::keyboard_tests::site("example-shop.com", "B");
+        w.set_sites(slint::ModelRc::new(slint::VecModel::from(vec![site])));
+        w.set_selected_site(0);
         w.show().unwrap();
         let chips =
             || ElementHandle::find_by_accessible_label(&w, "Release to upload").collect::<Vec<_>>();

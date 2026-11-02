@@ -1130,3 +1130,140 @@ fn user_facing_strings_are_wrapped_in_tr() {
         offenders.join("\n")
     );
 }
+
+// ---- Final fix wave ----
+
+/// Minor 3: F5 and Ctrl+R refresh (the window picks the pane last used), once per press.
+#[test]
+fn f5_and_ctrl_r_refresh() {
+    let w = window_with_panes(3, 3);
+    let refreshes = Rc::new(Cell::new(0));
+    w.on_refresh({
+        let refreshes = refreshes.clone();
+        move || refreshes.set(refreshes.get() + 1)
+    });
+    let with_control = |key: &str| {
+        w.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Control.into(),
+        });
+        tap(w.window(), key);
+        w.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Control.into(),
+        });
+    };
+    tab(&w, LOCAL_LIST);
+    tap(w.window(), Key::F5);
+    assert_eq!(refreshes.get(), 1);
+    with_control("r");
+    assert_eq!(refreshes.get(), 2);
+    // From the cloud pane's list too.
+    tab(&w, REMOTE_LIST - LOCAL_LIST);
+    assert!(!w.get_local_pane_active());
+    tap(w.window(), Key::F5);
+    assert_eq!(refreshes.get(), 3);
+
+    // A held key refreshes once, and a plain R is just a letter.
+    w.window().dispatch_event(WindowEvent::KeyPressRepeated {
+        text: Key::F5.into(),
+    });
+    tap(w.window(), "r");
+    assert_eq!(refreshes.get(), 3);
+
+    // Not behind the Add Site sheet.
+    w.set_add_site_open(true);
+    slint::platform::update_timers_and_animations();
+    tap(w.window(), Key::F5);
+    with_control("r");
+    assert_eq!(refreshes.get(), 3);
+}
+
+fn loading_marks(w: &AppWindow) -> Vec<ElementHandle> {
+    ElementHandle::find_by_accessible_label(w, "Loading…")
+        .filter(|e| e.accessible_role() == Some(AccessibleRole::Text))
+        .collect()
+}
+
+fn inside(e: &ElementHandle, pane: &ElementHandle) -> bool {
+    let (p, s) = (e.absolute_position(), pane.absolute_position());
+    let size = pane.size();
+    p.x >= s.x && p.y >= s.y && p.x <= s.x + size.width && p.y <= s.y + size.height
+}
+
+/// Minor 2: a pane whose listing is on its way says "Loading…", on screen and to assistive
+/// technology, until the answer is in.
+#[test]
+fn a_pane_says_it_is_loading() {
+    let w = window_with_panes(3, 3);
+    assert!(loading_marks(&w).is_empty());
+    let cloud = pane_named(&w, "No site selected");
+    let this_pc = pane_named(&w, "This PC");
+
+    w.set_remote_loading(true);
+    let marks = loading_marks(&w);
+    assert_eq!(marks.len(), 1);
+    assert!(inside(&marks[0], &cloud) && !inside(&marks[0], &this_pc));
+    assert_eq!(
+        marks[0].accessible_live_region(),
+        Some(i_slint_backend_testing::AccessibleLiveness::Polite)
+    );
+    // The rows stay while it loads.
+    assert_eq!(
+        row_starting(&w, "remote-00002").accessible_role(),
+        Some(AccessibleRole::ListItem)
+    );
+
+    w.set_local_loading(true);
+    assert_eq!(loading_marks(&w).len(), 2);
+    w.set_remote_loading(false);
+    let marks = loading_marks(&w);
+    assert_eq!(marks.len(), 1);
+    assert!(inside(&marks[0], &this_pc));
+    w.set_local_loading(false);
+    assert!(loading_marks(&w).is_empty());
+}
+
+fn release_chips(w: &AppWindow) -> usize {
+    ElementHandle::find_by_accessible_label(w, "Release to upload").count()
+}
+
+/// Minor 10: with no site there is nothing to upload to, so files dragged over the cloud pane
+/// do not light it up.
+#[test]
+fn with_no_site_dragged_files_do_not_light_up_the_cloud_pane() {
+    let w = window_with_panes(3, 3);
+    w.set_drop_hover_remote(true);
+    assert_eq!(release_chips(&w), 0);
+    w.set_drop_hover_remote(false);
+
+    w.set_sites(ModelRc::new(VecModel::from(vec![site("example-shop.com", "B")])));
+    w.set_selected_site(0);
+    w.set_drop_hover_remote(true);
+    assert_eq!(release_chips(&w), 1);
+    w.set_drop_hover_remote(false);
+    assert_eq!(release_chips(&w), 0);
+}
+
+/// Minor 11: the status bar counts the items of the pane last clicked or focused.
+#[test]
+fn the_status_bar_follows_the_pane_last_used() {
+    let w = window_with_panes(3, 3);
+    w.set_local_status("3 local items".into());
+    w.set_remote_status("3 cloud items".into());
+    assert_eq!(w.get_status_left(), "3 cloud items");
+
+    click(w.window(), center(&row_starting(&w, "local-00001")), 1);
+    assert_eq!(w.get_status_left(), "3 local items");
+    tab(&w, REMOTE_LIST - LOCAL_LIST);
+    assert!(!w.get_local_pane_active());
+    assert_eq!(w.get_status_left(), "3 cloud items");
+
+    // A message from a drop stays until the user turns to the other pane.
+    w.set_status_message("Drop files on the example-shop.com pane to upload them.".into());
+    assert_eq!(
+        w.get_status_left(),
+        "Drop files on the example-shop.com pane to upload them."
+    );
+    click(w.window(), center(&row_starting(&w, "local-00001")), 1);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(w.get_status_left(), "3 local items");
+}
