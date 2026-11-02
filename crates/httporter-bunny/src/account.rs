@@ -82,23 +82,39 @@ impl BunnyAccount {
         })
     }
 
-    /// Every storage zone of the account, in the order the API gives them. Each carries the
+    /// The storage zones of the account, in the order the API gives them. Each carries the
     /// pull zones whose origin is that storage zone (`OriginType` 2 and its `StorageZoneId`),
     /// again in API order.
     ///
+    /// A zone the answer describes in a way that can't be used (no password, a storage hostname
+    /// that is not a plain hostname, or no hostname and a region we don't know) does not fail
+    /// the call: it is left out of [`ZoneList::zones`] and reported in [`ZoneList::unusable`],
+    /// so one odd zone doesn't keep the others from being added. Everything else does fail it:
+    /// a rejected key, no answer, or an answer that isn't a list of zones.
+    ///
     /// It asks for page 0 of the zones, which Bunny answers with all of them as a plain array
-    /// (spec 5.2). One zone the answer describes unusably (no password, or neither a storage
-    /// hostname nor a region to derive one from) fails the whole call, naming that zone.
-    pub async fn list_zones(&self) -> Result<Vec<ZoneInfo>, ProviderError> {
-        let zones: Vec<RawZone> = self.get("/storagezone?page=0", "storage zone list").await?;
-        if zones.is_empty() {
-            return Ok(Vec::new());
+    /// (spec 5.2).
+    pub async fn list_zones(&self) -> Result<ZoneList, ProviderError> {
+        let raw: Vec<RawZone> = self.get("/storagezone?page=0", "storage zone list").await?;
+        let mut list = ZoneList::default();
+        for zone in raw {
+            match check_zone(zone) {
+                Ok(zone) => list.zones.push(zone),
+                Err(unusable) => list.unusable.push(unusable),
+            }
         }
-        let pull_zones: Vec<RawPullZone> = self.get("/pullzone", "pull zone list").await?;
-        zones
-            .into_iter()
-            .map(|zone| zone_info(zone, &pull_zones))
-            .collect()
+        // With no zone to look pull zones up for, don't ask.
+        if !list.zones.is_empty() {
+            let pull_zones: Vec<RawPullZone> = self.get("/pullzone", "pull zone list").await?;
+            for zone in &mut list.zones {
+                zone.pull_zones = pull_zones
+                    .iter()
+                    .filter(|pull_zone| pull_zone.serves(zone.id))
+                    .filter_map(RawPullZone::info)
+                    .collect();
+            }
+        }
+        Ok(list)
     }
 
     /// One attempt at a `GET`, its answer parsed as `T`.
@@ -137,6 +153,25 @@ impl fmt::Debug for BunnyAccount {
             .field("api_key", &"<redacted>")
             .finish()
     }
+}
+
+/// What [`BunnyAccount::list_zones`] found: the zones that can be added, and those that can't.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ZoneList {
+    /// The usable zones, in the order the API gave them.
+    pub zones: Vec<ZoneInfo>,
+    /// The zones left out, in the order the API gave them.
+    pub unusable: Vec<UnusableZone>,
+}
+
+/// A storage zone the account has but that can't be added as a site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusableZone {
+    /// The zone's name, cleaned of control characters, for showing to the user.
+    pub name: String,
+    /// A short plain phrase: `"no password"`, `"invalid storage hostname"` or
+    /// `"unknown region"`. It never contains a password or the account key.
+    pub reason: String,
 }
 
 /// A storage zone of the account, with what it takes to add it as a site.
@@ -238,9 +273,10 @@ impl RawPullZone {
     }
 }
 
-fn zone_info(zone: RawZone, pull_zones: &[RawPullZone]) -> Result<ZoneInfo, ProviderError> {
+/// The zone as a [`ZoneInfo`] without its pull zones, or why it can't be used.
+fn check_zone(zone: RawZone) -> Result<ZoneInfo, UnusableZone> {
     if zone.password.is_empty() {
-        return Err(unusable(&zone.name, "has no password"));
+        return Err(unusable(&zone.name, "no password"));
     }
     let region = zone.region.unwrap_or_default().trim().to_ascii_lowercase();
     let host = match zone
@@ -251,24 +287,9 @@ fn zone_info(zone: RawZone, pull_zones: &[RawPullZone]) -> Result<ZoneInfo, Prov
     {
         // The password will be sent to this host, so it must be one and not a URL.
         Some(host) if is_hostname(host) => host.to_owned(),
-        Some(_) => {
-            return Err(unusable(
-                &zone.name,
-                "has a storage hostname that is not a hostname",
-            ));
-        }
-        None => storage_host(&region).ok_or_else(|| {
-            unusable(
-                &zone.name,
-                "has no storage hostname and its region is not a known one",
-            )
-        })?,
+        Some(_) => return Err(unusable(&zone.name, "invalid storage hostname")),
+        None => storage_host(&region).ok_or_else(|| unusable(&zone.name, "unknown region"))?,
     };
-    let pull_zones = pull_zones
-        .iter()
-        .filter(|pull_zone| pull_zone.serves(zone.id))
-        .filter_map(RawPullZone::info)
-        .collect();
     Ok(ZoneInfo {
         id: zone.id,
         name: zone.name,
@@ -276,7 +297,7 @@ fn zone_info(zone: RawZone, pull_zones: &[RawPullZone]) -> Result<ZoneInfo, Prov
         host,
         password: zone.password,
         read_only_password: zone.read_only_password.unwrap_or_default(),
-        pull_zones,
+        pull_zones: Vec::new(),
     })
 }
 
@@ -291,13 +312,13 @@ fn is_hostname(host: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
 }
 
-/// A zone the answer describes in a way we cannot use. The name is server text, so it is
-/// cleaned like any other; no password or hostname is repeated.
-fn unusable(name: &str, why: &str) -> ProviderError {
-    let name = snippet(name).unwrap_or_default();
-    ProviderError::Permanent(format!(
-        "unexpected response from server (storage zone \"{name}\" {why})"
-    ))
+/// A zone we cannot use. The name is server text, so it is cleaned like any other; the reason
+/// is one of ours, and no password or hostname is repeated.
+fn unusable(name: &str, reason: &str) -> UnusableZone {
+    UnusableZone {
+        name: snippet(name).unwrap_or_default(),
+        reason: reason.to_owned(),
+    }
 }
 
 fn unreadable(what: &str, error: &serde_json::Error) -> ProviderError {

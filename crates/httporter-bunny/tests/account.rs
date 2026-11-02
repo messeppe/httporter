@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use httporter_bunny::{BunnyAccount, PullZoneInfo, ZoneInfo};
+use httporter_bunny::{BunnyAccount, PullZoneInfo, UnusableZone, ZoneInfo};
 use httporter_core::{AuthHint, ProviderError};
 use serde_json::{Value, json};
 use wiremock::matchers::{any, header, method, path, query_param};
@@ -131,10 +131,11 @@ async fn lists_zones_with_pull_zone_hostnames() {
     )
     .await;
 
-    let zones = account(&server).list_zones().await.unwrap();
+    let list = account(&server).list_zones().await.unwrap();
 
+    assert!(list.unusable.is_empty(), "{:?}", list.unusable);
     assert_eq!(
-        zones,
+        list.zones,
         vec![
             ZoneInfo {
                 id: 1,
@@ -192,7 +193,8 @@ async fn an_account_without_zones_is_an_empty_list() {
     let server = MockServer::start().await;
     serve(&server, json!([]), json!([])).await;
 
-    assert!(account(&server).list_zones().await.unwrap().is_empty());
+    let list = account(&server).list_zones().await.unwrap();
+    assert!(list.zones.is_empty() && list.unusable.is_empty());
     // With no zones there is nothing to look up pull zones for.
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
@@ -204,7 +206,7 @@ async fn read_only_password_is_optional() {
     zone.as_object_mut().unwrap().remove("ReadOnlyPassword");
     serve(&server, json!([zone]), json!([])).await;
 
-    let zones = account(&server).list_zones().await.unwrap();
+    let zones = account(&server).list_zones().await.unwrap().zones;
 
     assert_eq!(zones[0].password, "pw-site");
     assert_eq!(zones[0].read_only_password, "");
@@ -270,7 +272,7 @@ async fn whitespace_around_a_pasted_key_is_ignored() {
     let account =
         BunnyAccount::with_base_url(format!("  {KEY}\r\n"), server.uri()).expect("a pasted key");
 
-    assert!(account.list_zones().await.unwrap().is_empty());
+    assert!(account.list_zones().await.unwrap().zones.is_empty());
 }
 
 #[test]
@@ -422,33 +424,147 @@ async fn an_unreadable_answer_is_a_permanent_error_that_leaks_nothing() {
     }
 }
 
+fn unusable(name: &str, reason: &str) -> UnusableZone {
+    UnusableZone {
+        name: name.to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
+/// A zone with its password blanked.
+fn without_password(id: u64, name: &str) -> Value {
+    let mut zone = storage_zone(id, name, "DE", json!("storage.bunnycdn.com"));
+    zone["Password"] = json!("");
+    zone
+}
+
 #[tokio::test]
-async fn a_zone_that_cannot_be_used_names_itself_and_fails_the_list() {
-    let mut no_password = storage_zone(7, "no-password", "DE", json!("storage.bunnycdn.com"));
-    no_password["Password"] = json!("");
-    let cases = [
+async fn a_bad_zone_among_good_ones_is_reported_and_the_others_listed() {
+    let server = MockServer::start().await;
+    serve(
+        &server,
+        json!([
+            storage_zone(1, "good-one", "SG", json!("sg.storage.bunnycdn.com")),
+            // A hostname that would send the zone password somewhere else.
+            storage_zone(2, "odd-host", "DE", json!("evil.example/path@x")),
+            storage_zone(3, "good-two", "DE", json!("")),
+        ]),
+        json!([
+            pull_zone(10, "one-cdn", 2, 1, &[("one.b-cdn.net", true)]),
+            // The unusable zone's pull zone is not offered anywhere.
+            pull_zone(11, "odd-cdn", 2, 2, &[("odd.b-cdn.net", true)]),
+            pull_zone(12, "two-cdn", 2, 3, &[("two.b-cdn.net", true)]),
+        ]),
+    )
+    .await;
+
+    let list = account(&server).list_zones().await.unwrap();
+
+    let usable: Vec<(u64, &str, &[PullZoneInfo])> = list
+        .zones
+        .iter()
+        .map(|z| (z.id, z.host.as_str(), z.pull_zones.as_slice()))
+        .collect();
+    assert_eq!(
+        usable,
+        [
+            (
+                1,
+                "sg.storage.bunnycdn.com",
+                [pz(10, "one-cdn", &["one.b-cdn.net"])].as_slice()
+            ),
+            (
+                3,
+                "storage.bunnycdn.com",
+                [pz(12, "two-cdn", &["two.b-cdn.net"])].as_slice()
+            ),
+        ]
+    );
+    assert_eq!(
+        list.unusable,
+        [unusable("odd-host", "invalid storage hostname")]
+    );
+}
+
+#[tokio::test]
+async fn every_kind_of_unusable_zone_is_reported_with_its_reason_and_no_secret() {
+    let mut cases = vec![
+        (without_password(1, "no-password"), "no password"),
         // Neither a hostname nor a known region to derive one from.
-        storage_zone(5, "no-host", "ZZ", Value::Null),
-        // A hostname that would send the zone password somewhere else.
-        storage_zone(6, "odd-host", "DE", json!("evil.example/path@host")),
-        no_password,
+        (
+            storage_zone(2, "no-host", "ZZ", Value::Null),
+            "unknown region",
+        ),
+        (
+            storage_zone(3, "no-region", "", json!("  ")),
+            "unknown region",
+        ),
     ];
-    for zone in cases {
+    // Anything that is not a plain hostname could send the password somewhere else.
+    for (i, host) in [
+        "evil.example/path@x",
+        "https://evil.example",
+        "evil.example:8080",
+        "user@evil.example",
+        "evil.example?x=1",
+        ".evil.example",
+        "evil example",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("host-{i}");
+        cases.push((
+            storage_zone(10 + i as u64, &name, "DE", json!(host)),
+            "invalid storage hostname",
+        ));
+    }
+    for (zone, reason) in cases {
         let name = zone["Name"].as_str().unwrap().to_owned();
         let server = MockServer::start().await;
         serve(&server, json!([zone]), json!([])).await;
 
-        let err = account(&server).list_zones().await.unwrap_err();
+        let list = account(&server).list_zones().await.unwrap();
 
-        let ProviderError::Permanent(message) = &err else {
-            panic!("{err:?}");
-        };
-        assert!(message.contains(&name), "{message}");
+        assert!(list.zones.is_empty(), "{name}");
+        assert_eq!(list.unusable, [unusable(&name, reason)]);
+        let text = format!("{list:?}");
         assert!(
-            !message.contains("pw-") && !message.contains("ro-"),
-            "{message}"
+            !text.contains("pw-") && !text.contains("ro-") && !text.contains(KEY),
+            "{text}"
         );
     }
+}
+
+#[tokio::test]
+async fn when_every_zone_is_bad_none_are_listed_and_all_are_reported() {
+    let server = MockServer::start().await;
+    serve(
+        &server,
+        json!([
+            without_password(1, "first"),
+            // Server text is cleaned like any other before it is shown.
+            storage_zone(2, "sec\u{202e}ond\n\u{0}zone", "ZZ", Value::Null),
+            storage_zone(3, "third", "DE", json!("a/b")),
+        ]),
+        json!([]),
+    )
+    .await;
+
+    let list = account(&server).list_zones().await.unwrap();
+
+    assert!(list.zones.is_empty());
+    // In the order the API gave them.
+    assert_eq!(
+        list.unusable,
+        [
+            unusable("first", "no password"),
+            unusable("sec ond zone", "unknown region"),
+            unusable("third", "invalid storage hostname"),
+        ]
+    );
+    // With no zone to look pull zones up for, they were not asked for.
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -487,15 +603,16 @@ async fn debug_never_shows_secrets() {
     )
     .await;
     let account = account(&server);
-    let zones = account.list_zones().await.unwrap();
-    let zone = &zones[0];
+    let list = account.list_zones().await.unwrap();
+    let zone = &list.zones[0];
 
     for text in [
         format!("{account:?}"),
         format!("{account:#?}"),
         format!("{zone:?}"),
         format!("{zone:#?}"),
-        format!("{zones:?}"),
+        format!("{list:?}"),
+        format!("{list:#?}"),
     ] {
         for secret in [KEY, &zone.password, &zone.read_only_password] {
             assert!(!text.contains(secret), "{secret} in {text}");
