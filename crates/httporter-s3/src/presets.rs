@@ -185,7 +185,7 @@ pub fn endpoint(
 
 /// The URL of a bucket: `https://bucket.host/` when the endpoint is virtual-hosted, otherwise
 /// `https://host/bucket`. Use it for bucket-level requests (listing, `?delete`, …). An empty
-/// `bucket` gives the service root, where the list of buckets lives.
+/// `bucket` gives the endpoint itself: the service root, where the list of buckets lives.
 pub fn bucket_url(ep: &Endpoint, bucket: &str) -> Url {
     address(ep, bucket, None)
 }
@@ -194,6 +194,11 @@ pub fn bucket_url(ep: &Endpoint, bucket: &str) -> Url {
 /// [`crate::canonical_uri`]), so the signer sees the path the server will. The key never
 /// carries a trailing slash; a folder marker (`name/`) needs one appended to the path. The root
 /// key is the bucket itself.
+///
+/// An empty `bucket` means the endpoint already is one bucket (a custom domain in front of it):
+/// the key follows the host directly, `base/key`, whatever the addressing style. The key is
+/// never dropped, so a request meant for an object cannot turn into a request for the service
+/// root.
 ///
 /// A virtual-hosted endpoint still falls back to path style for a bucket the host name cannot
 /// carry: one with a dot over HTTPS (the `*.s3.amazonaws.com` certificate does not match
@@ -204,11 +209,14 @@ pub fn object_url(ep: &Endpoint, bucket: &str, key: &RemotePath) -> Url {
 }
 
 fn address(ep: &Endpoint, bucket: &str, key: Option<&RemotePath>) -> Url {
-    if bucket.is_empty() {
-        return ep.base.clone();
-    }
     let key_path = key.map(|k| k.to_url_path(false)).unwrap_or_default();
     let mut url = ep.base.clone();
+    if bucket.is_empty() {
+        if !key_path.is_empty() {
+            url.set_path(&format!("/{key_path}"));
+        }
+        return url;
+    }
     if bucket_fits_in_host(ep, bucket) {
         let host = format!("{bucket}.{}", ep.base.host_str().unwrap_or_default());
         if url.set_host(Some(&host)).is_ok() {
@@ -617,6 +625,24 @@ mod tests {
             object_url(&minio, "photos", &key("2024/cat.jpg")).as_str(),
             "http://localhost:9000/photos/2024/cat.jpg"
         );
+    }
+
+    /// No bucket means the endpoint is the whole address (a custom domain that already is one
+    /// bucket): the key follows the host, in either addressing style. It is never dropped.
+    #[test]
+    fn an_empty_bucket_addresses_the_endpoint_itself() {
+        for ep in [
+            made(S3Preset::AwsS3, "eu-west-1", "", "", false),
+            made(S3Preset::CloudflareR2, "", "abc", "", true),
+        ] {
+            let base = ep.base.as_str();
+            assert_eq!(bucket_url(&ep, "").as_str(), base);
+            assert_eq!(object_url(&ep, "", &RemotePath::root()).as_str(), base);
+            assert_eq!(
+                object_url(&ep, "", &key("a b/ü.txt")).as_str(),
+                format!("{base}a%20b/%C3%BC.txt")
+            );
+        }
     }
 
     /// `Other` with the toggle off is virtual-hosted, on any scheme and port.

@@ -45,7 +45,8 @@ impl fmt::Debug for Credentials {
 /// The request to sign.
 #[derive(Debug, Clone, Copy)]
 pub struct SignInput<'a> {
-    /// `GET`, `PUT`, … (upper case).
+    /// `GET`, `PUT`, … Signed in upper case, so `"get"` signs like `"GET"`; the caller must send
+    /// the verb in upper case, as HTTP clients do.
     pub method: &'a str,
     /// The full request URL, exactly as it will be sent.
     pub url: &'a Url,
@@ -274,7 +275,7 @@ fn canonical_request(input: &SignInput, headers: &BTreeMap<String, String>) -> (
     }
     let request = format!(
         "{}\n{}\n{}\n{canonical_headers}\n{signed_names}\n{}",
-        input.method,
+        input.method.to_ascii_uppercase(),
         canonical_path(input.url),
         canonical_query(input.url),
         input.payload_sha256
@@ -321,11 +322,17 @@ mod tests {
             .collect()
     }
 
+    /// The header names only: the values hold the signature and the session token, which no
+    /// assertion message may print.
+    fn names(out: &[(String, String)]) -> Vec<&str> {
+        out.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
     fn get<'a>(out: &'a [(String, String)], name: &str) -> &'a str {
         out.iter()
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
-            .unwrap_or_else(|| panic!("no {name} header in {out:?}"))
+            .unwrap_or_else(|| panic!("no {name} header in {:?}", names(out)))
     }
 
     fn has(out: &[(String, String)], name: &str) -> bool {
@@ -607,12 +614,17 @@ mod tests {
         let without = sign(&input, &plain, "us-east-1", "s3", now);
         let with = sign(&input, &temporary, "us-east-1", "s3", now);
         assert!(!has(&without, "x-amz-security-token"));
-        assert_eq!(get(&with, "x-amz-security-token"), "FQoGZXIvYXdzEXAMPLE");
+        // Not assert_eq!: a failure would print the token.
+        assert!(
+            get(&with, "x-amz-security-token") == "FQoGZXIvYXdzEXAMPLE",
+            "the returned session token is not the one given"
+        );
         assert!(
             get(&with, "authorization").contains(
                 "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token,"
             ),
-            "{with:?}"
+            "headers returned: {:?}",
+            names(&with)
         );
         assert_ne!(get(&with, "authorization"), get(&without, "authorization"));
     }
@@ -758,6 +770,46 @@ mod tests {
     fn an_empty_path_is_a_slash() {
         let request = canonical_for("https://h.example", &[], &[]);
         assert!(request.starts_with("GET\n/\n\n"), "{request}");
+    }
+
+    #[test]
+    fn the_method_is_signed_in_upper_case() {
+        let url = "https://examplebucket.s3.amazonaws.com/test.txt";
+        for (given, canonical) in [("get", "GET"), ("Put", "PUT"), ("dElEtE", "DELETE")] {
+            let lower = sign_s3_docs(given, url, &[], EMPTY_PAYLOAD_SHA256);
+            let upper = sign_s3_docs(canonical, url, &[], EMPTY_PAYLOAD_SHA256);
+            assert_eq!(
+                get(&lower, "authorization"),
+                get(&upper, "authorization"),
+                "{given}"
+            );
+        }
+        // And the canonical request itself starts with the upper-case verb.
+        let url = Url::parse(url).unwrap();
+        let input = SignInput {
+            method: "get",
+            url: &url,
+            headers: &[],
+            payload_sha256: EMPTY_PAYLOAD_SHA256,
+        };
+        let request = canonical_request(&input, &signed_header_map(&input, &[])).0;
+        assert!(request.starts_with("GET\n/test.txt\n"), "{request}");
+    }
+
+    /// A failed lookup reports which headers there were, never their values: they hold the
+    /// signature and, with temporary credentials, the session token.
+    #[test]
+    #[should_panic(
+        expected = r#"no x-amz-missing header in ["authorization", "x-amz-date", "x-amz-content-sha256"]"#
+    )]
+    fn a_missing_header_panic_names_the_headers_and_hides_the_values() {
+        let out = sign_s3_docs(
+            "GET",
+            "https://examplebucket.s3.amazonaws.com/test.txt",
+            &[],
+            EMPTY_PAYLOAD_SHA256,
+        );
+        get(&out, "x-amz-missing");
     }
 
     #[test]
