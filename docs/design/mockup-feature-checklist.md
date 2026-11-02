@@ -9,9 +9,12 @@ Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = wher
 | Feature | Milestone | Status |
 |---|---|---|
 | Native window, Windows caption buttons, Inter font, Cupertino style | I1 | ✅ |
+| Toolbar row is the title bar (no separate Windows title bar), caption buttons at its right end, drag / snap / Snap Layouts | I5 | ⬜ |
+| App icon (blue rounded square, white tray-and-arrow mark) in the exe, taskbar and window | I5 | ⬜ |
 | Light and dark theme following Windows | I1 | ✅ |
 | Toolbar: sidebar toggle | I1 | ✅ |
-| Toolbar: Back / Forward (browsing history, Alt+←/→) | I1 | 🔧 (P22) |
+| Toolbar: Back / Forward (browsing history, Alt+←/→) | I1 | ✅ |
+| Refresh (F5 / Ctrl+R) on each pane | I1 | 🔧 (final fix wave) |
 | Toolbar: site title + subtitle (provider · zone) | I1 | ✅ |
 | Toolbar: green "HTTPS · {ms} ms" connection pill | I1 | ✅ |
 | Toolbar: view toggle, two panes / single pane + inspector | I4 | ⬜ |
@@ -24,7 +27,7 @@ Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = wher
 | Sidebar: Favorites (local and remote folders) | I4 | ⬜ |
 | Sidebar: Editing (files open for edit, auto re-upload) | I4 | ⬜ |
 | Sidebar: Add Site button | I1 | ✅ |
-| Sidebar: Settings button → Settings window | I2 | 🔧 disabled until then (P22) |
+| Sidebar: Settings button → Settings window | I2 | ⬜ (disabled with "later version" note until then ✅) |
 | Pane header: icon, title, clickable breadcrumbs | I1 | ✅ |
 | Pane header: storage endpoint chip (https://…) | I1 | ✅ |
 | Pane header: "Comparing" chip | I3 | ⬜ |
@@ -102,6 +105,32 @@ Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = wher
 | Settings › Transfers: simultaneous transfers, slow down on 429/503, retries, bandwidth limit | `Settings.dc.html` | I2 | ⬜ |
 | Settings › Transfers: HTTP protocol, keep connections open, timeout, proxy | `Settings.dc.html` | I2 | ⬜ |
 | Settings › Transfers: verify checksums, "file exists" defaults, Restore Defaults | `Settings.dc.html` | I2 | ⬜ |
+
+## Spec features without a mockup screen
+
+The design document (§8) also requires these; they have no dedicated mockup but are equally mandatory.
+
+| Feature | Spec | Milestone | Status |
+|---|---|---|---|
+| Test connection on save (refuse to save a site that fails) | §8.1.2 | I1 | 🔧 (final fix wave) |
+| Edit, duplicate and remove sites (remove deletes its Credential Manager entry) | §8.1.6 | I2 | ⬜ |
+| Read-only sites (read-only password / keys disable writes) | §8.1.4 | I4 | ⬜ |
+| Export / import sites without secrets | §8.1.8 | I4 | ⬜ |
+| Multi-select (Ctrl/Shift, Ctrl+A, rubber band) and selection summary | §8.2.9 | I2 | ⬜ |
+| Drop onto a specific remote folder row | §8.3.1 | I2 | ⬜ |
+| Transfer journal and resume after crash or restart | §8.3.11 | I2 | ⬜ |
+| Pause on offline / sleep, resume automatically | §8.3.12 | I2 | ⬜ |
+| Adaptive concurrency on 429/503, bandwidth cap | §8.3.6, §8.3.8 | I2 | ⬜ |
+| Taskbar progress and Windows notification when a long batch finishes | §8.3.13 | I2 | ⬜ |
+| Rename / move (Bunny: copy-then-delete with warning; S3: server-side copy) | §8.4.3 | I4 | ⬜ |
+| Copy public link / presigned link | §8.4.4 | I4 | ⬜ |
+| Edit with auto re-upload, "Editing" list | §8.5.2 | I4 | ⬜ |
+| Tabs, synchronized browsing | §8.2.3, §8.2.8 | I4 | ⬜ |
+| Activity log with filters and export | §8.7.4 | I4 | ⬜ |
+| Undo for local UI actions | §8.7.7 | I5 | ⬜ |
+| System tray progress | §8.7.8 | I5 | ⬜ |
+| CLI (`httporter.com`), scheduled publish, watch folder | §8.8.1–8.8.3 | I6 | ⬜ |
+| Create zones / buckets, zone and bucket settings | §8.8.4–8.8.5 | I6 | ⬜ |
 
 ## Changes to the milestone split
 
