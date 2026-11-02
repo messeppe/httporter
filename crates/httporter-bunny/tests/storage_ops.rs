@@ -644,3 +644,30 @@ async fn only_a_short_snippet_of_a_huge_400_body_reaches_the_error() {
         other => panic!("expected Permanent, got {other:?}"),
     }
 }
+
+/// A short listing policy (for someone waiting on a folder) leaves deletes alone: they keep the
+/// general retries and their own, longer time limit.
+#[tokio::test]
+async fn the_listing_policy_does_not_apply_to_deletes() {
+    let s = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/testzone/slow.txt"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(400)))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/testzone/failing.txt"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(3)
+        .mount(&s)
+        .await;
+    let mut cfg = config(&s);
+    cfg.retry = RetryPolicy::immediate(2);
+    cfg.list_timeout = Duration::from_millis(100);
+    cfg.list_retry = Some(RetryPolicy::immediate(0));
+    let storage = BunnyStorage::new(cfg).unwrap();
+    storage.delete_file(&rp("slow.txt")).await.unwrap();
+    let err = storage.delete_file(&rp("failing.txt")).await.unwrap_err();
+    assert!(matches!(err, ProviderError::Transient(_)), "{err:?}");
+}

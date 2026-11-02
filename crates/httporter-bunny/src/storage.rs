@@ -2,7 +2,9 @@
 //! limits, retries, latency reporting and HTTP-status error mapping.
 //!
 //! There are two HTTP clients. Listings and deletes are short requests and
-//! share a client with a 120 s total timeout. Uploads and downloads can
+//! share a client with a total timeout: 120 s for a delete, and
+//! [`BunnyConfig::list_timeout`] for a listing (someone browsing a folder
+//! wants an answer, or a failure, far sooner). Uploads and downloads can
 //! legitimately take far longer on a slow link, so they use a client with no
 //! total timeout and are abandoned only when they stop making progress for
 //! [`BunnyConfig::transfer_idle_timeout`]. reqwest's own `read_timeout` is not
@@ -40,7 +42,7 @@ use tokio_util::io::ReaderStream;
 use crate::model::{BunnyObject, to_entry};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// The total time a listing or delete may take.
+/// The total time a delete, and by default a listing, may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long an upload or download may make no progress by default.
 const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -76,7 +78,15 @@ pub struct BunnyConfig {
     /// How long an upload or download may make no progress before it is
     /// abandoned (and retried). Transfers have no overall time limit.
     pub transfer_idle_timeout: Duration,
+    /// How long one try at a listing may take in all, from connecting to the
+    /// last byte of the answer. 120 s by default; deletes always have 120 s.
+    pub list_timeout: Duration,
+    /// The retries for uploads, downloads and deletes, and for listings
+    /// unless [`Self::list_retry`] is set.
     pub retry: RetryPolicy,
+    /// The retries for listings, when they should differ from [`Self::retry`]
+    /// (a folder someone is waiting for gives up sooner than a transfer).
+    pub list_retry: Option<RetryPolicy>,
     /// Replaces `https://{host}`, so tests can point at a local server.
     pub base_url: Option<String>,
 }
@@ -94,7 +104,9 @@ impl BunnyConfig {
             transfer_concurrency: 32,
             delete_concurrency: 16,
             transfer_idle_timeout: TRANSFER_IDLE_TIMEOUT,
+            list_timeout: REQUEST_TIMEOUT,
             retry: RetryPolicy::default(),
+            list_retry: None,
             base_url: None,
         }
     }
@@ -110,14 +122,17 @@ impl fmt::Debug for BunnyConfig {
             .field("transfer_concurrency", &self.transfer_concurrency)
             .field("delete_concurrency", &self.delete_concurrency)
             .field("transfer_idle_timeout", &self.transfer_idle_timeout)
+            .field("list_timeout", &self.list_timeout)
             .field("retry", &self.retry)
+            .field("list_retry", &self.list_retry)
             .field("base_url", &self.base_url)
             .finish()
     }
 }
 
 pub struct BunnyStorage {
-    /// For listings and deletes: bounded by [`REQUEST_TIMEOUT`].
+    /// For listings and deletes: bounded by [`REQUEST_TIMEOUT`], and a
+    /// listing by `list_timeout`.
     client: reqwest::Client,
     /// For uploads and downloads: no total timeout, see the module docs.
     transfer_client: reqwest::Client,
@@ -125,6 +140,8 @@ pub struct BunnyStorage {
     base: String,
     zone: String,
     retry: RetryPolicy,
+    list_retry: RetryPolicy,
+    list_timeout: Duration,
     capabilities: Capabilities,
     list_slots: Semaphore,
     delete_slots: Semaphore,
@@ -166,7 +183,9 @@ impl BunnyStorage {
             transfer_client,
             base,
             zone: cfg.zone,
+            list_retry: cfg.list_retry.unwrap_or_else(|| cfg.retry.clone()),
             retry: cfg.retry,
+            list_timeout: cfg.list_timeout,
             capabilities: Capabilities {
                 checksum_in_listing: Some(ChecksumKind::Sha256),
                 server_side_copy: false,
@@ -234,6 +253,7 @@ impl BunnyStorage {
             .client
             .get(url)
             .header(ACCEPT, "application/json")
+            .timeout(self.list_timeout)
             .send()
             .await
             .map_err(network_error)?;
@@ -398,7 +418,8 @@ impl StorageProvider for BunnyStorage {
     async fn list(&self, dir: &RemotePath) -> Result<Listing, ProviderError> {
         let url = self.dir_url(dir);
         let url = url.as_str();
-        let (objects, info) = with_retry(&self.retry, move |_| self.fetch_listing(url)).await?;
+        let (objects, info) =
+            with_retry(&self.list_retry, move |_| self.fetch_listing(url)).await?;
         Ok(Listing {
             entries: to_entries(objects, dir)?,
             info,

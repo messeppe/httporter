@@ -305,3 +305,39 @@ async fn a_password_that_cannot_be_a_header_is_rejected_without_echoing_it() {
         Ok(_) => panic!("expected an error"),
     }
 }
+
+#[tokio::test]
+async fn a_listing_gives_up_after_its_own_timeout_and_retries_by_its_own_policy() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("[]")
+                .set_delay(Duration::from_secs(2)),
+        )
+        .expect(2)
+        .mount(&s)
+        .await;
+    // Uploads, downloads and deletes keep five retries; listings get one.
+    let mut cfg = config(&s);
+    cfg.list_timeout = Duration::from_millis(200);
+    cfg.list_retry = Some(RetryPolicy::immediate(1));
+    let started = Instant::now();
+    let err = BunnyStorage::new(cfg)
+        .unwrap()
+        .list(&RemotePath::root())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProviderError::Transient(_)), "{err:?}");
+    // Two tries of 200 ms, not six of two seconds.
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+}
+
+#[test]
+fn listings_keep_the_long_policy_unless_told_otherwise() {
+    let cfg = BunnyConfig::new("testzone", "storage.bunnycdn.com", "secret");
+    assert_eq!(cfg.list_timeout, Duration::from_secs(120));
+    assert_eq!(cfg.list_retry, None);
+    assert_eq!(cfg.retry, RetryPolicy::default());
+}
