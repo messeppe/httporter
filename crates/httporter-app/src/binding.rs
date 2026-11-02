@@ -19,18 +19,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use httporter_bunny::REGIONS;
-use httporter_core::SiteRecord;
+use httporter_core::{S3Preset, SiteRecord};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 use crate::add_site::{AddSiteForm, ValidSite, show_field_error};
 use crate::session::{
-    LocalView, RemoteView, Session, SiteItemData, Ticket, endpoint_preview, items,
+    LocalView, RemoteView, Session, SiteItemData, SiteProvider, Ticket, endpoint_preview, items,
 };
 use crate::sort::SortKey;
 use crate::viewmodel::{RowData, sort_key_for_column, to_slint_rows};
-use crate::{AppWindow, FileRow, SiteItem};
+use crate::{AppWindow, FileRow, ProviderTile, SiteItem};
 
 /// What a view changes: a new listing replaces the rows; a refresh replaces them with the same
 /// folder's (so the selected row stays, found by name); a new sort only reorders them; a loading
@@ -701,6 +701,22 @@ fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
     }
 }
 
+/// The Slint tile for a site's provider: the tile's colour comes from this.
+fn slint_tile(provider: SiteProvider) -> ProviderTile {
+    match provider {
+        SiteProvider::Bunny => ProviderTile::Bunny,
+        SiteProvider::S3(preset) => match preset {
+            S3Preset::AwsS3 => ProviderTile::S3,
+            S3Preset::CloudflareR2 => ProviderTile::R2,
+            S3Preset::BackblazeB2 => ProviderTile::B2,
+            S3Preset::Wasabi => ProviderTile::Wasabi,
+            S3Preset::DigitalOceanSpaces => ProviderTile::DigitalOcean,
+            S3Preset::Minio => ProviderTile::Minio,
+            S3Preset::Other => ProviderTile::Other,
+        },
+    }
+}
+
 /// Puts the sidebar's rows in the window. The same sites are updated row by row, so the rows (and
 /// the keyboard focus on one of them) stay; a new list of sites replaces the model.
 fn sync_sites(ui: &AppWindow, items: &[SiteItemData]) {
@@ -710,6 +726,7 @@ fn sync_sites(ui: &AppWindow, items: &[SiteItemData]) {
             id: item.id.as_str().into(),
             name: item.name.as_str().into(),
             subtitle: item.subtitle.as_str().into(),
+            provider: slint_tile(item.provider),
             mono: item.mono.as_str().into(),
             healthy: item.healthy,
         })

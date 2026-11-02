@@ -464,7 +464,7 @@ mod tests {
         let w = AppWindow::new().unwrap();
         w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
         // Only a selected site lights up (see keyboard_tests for the pane with none).
-        let site = crate::keyboard_tests::site("example-shop.com", "B");
+        let site = crate::keyboard_tests::site("example-shop.com", crate::ProviderTile::Bunny, "B");
         w.set_sites(slint::ModelRc::new(slint::VecModel::from(vec![site])));
         w.set_selected_site(0);
         w.show().unwrap();

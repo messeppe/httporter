@@ -1,7 +1,7 @@
 //! Keyboard operation and translation guard, driven headlessly with the testing backend.
 
 use crate::viewmodel::{FileKindData, RowData, to_slint_rows};
-use crate::{AppWindow, SiteItem};
+use crate::{AppWindow, ProviderTile, SiteItem};
 use i_slint_backend_testing as testing;
 use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
@@ -54,11 +54,12 @@ pub(crate) fn tap(window: &slint::Window, key: impl Into<SharedString>) {
     window.dispatch_event(WindowEvent::KeyReleased { text });
 }
 
-pub(crate) fn site(name: &str, mono: &str) -> SiteItem {
+pub(crate) fn site(name: &str, provider: ProviderTile, mono: &str) -> SiteItem {
     SiteItem {
         id: name.into(),
         name: name.into(),
         subtitle: "Bunny".into(),
+        provider,
         mono: mono.into(),
         healthy: true,
     }
@@ -68,8 +69,8 @@ fn window_with_two_sites() -> AppWindow {
     testing::init_no_event_loop();
     let w = AppWindow::new().unwrap();
     w.set_sites(ModelRc::new(VecModel::from(vec![
-        site("example-shop.com", "B"),
-        site("media-archive", "R2"),
+        site("example-shop.com", ProviderTile::Bunny, "B"),
+        site("media-archive", ProviderTile::R2, "R2"),
     ])));
     w.show().unwrap();
     w
@@ -1235,7 +1236,11 @@ fn with_no_site_dragged_files_do_not_light_up_the_cloud_pane() {
     assert_eq!(release_chips(&w), 0);
     w.set_drop_hover_remote(false);
 
-    w.set_sites(ModelRc::new(VecModel::from(vec![site("example-shop.com", "B")])));
+    w.set_sites(ModelRc::new(VecModel::from(vec![site(
+        "example-shop.com",
+        ProviderTile::Bunny,
+        "B",
+    )])));
     w.set_selected_site(0);
     w.set_drop_hover_remote(true);
     assert_eq!(release_chips(&w), 1);

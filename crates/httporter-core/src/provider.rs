@@ -34,8 +34,8 @@ pub trait BodyMeter: Send + Sync {
     async fn chunk(&self, len: usize);
 }
 
-/// How far a multipart upload got: enough to resume it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How far a multipart upload got: enough to resume it. The journal stores it as JSON.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MultipartProgress {
     pub upload_id: String,
     pub part_size: u64,

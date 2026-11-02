@@ -10,10 +10,15 @@ export struct FileRow {
     folder: bool,
 }
 
+// The provider tile a site shows (mockup `providers`): Bunny, or an S3 service by preset. The
+// tile's colour comes from this, never from the site's name or its letters.
+export enum ProviderTile { bunny, s3, r2, b2, wasabi, digital-ocean, minio, other }
+
 export struct SiteItem {
     id: string,
     name: string,
     subtitle: string,
+    provider: ProviderTile,
     mono: string,
     healthy: bool,
 }

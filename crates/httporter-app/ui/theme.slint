@@ -2,6 +2,7 @@
 // Alpha values are the CSS rgba() alphas rounded to the nearest 1/255.
 
 import { Palette } from "std-widgets.slint";
+import { ProviderTile } from "types.slint";
 
 export global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
@@ -32,17 +33,16 @@ export global Theme {
     out property <color> provider-do: #1d4ed8;
     out property <color> provider-minio: #b91c1c;
     out property <color> provider-other: #5c5c62;
-    // The tile colour for the letters a site list item carries (`SiteItem.mono`); the accent for
-    // a provider this build does not know.
-    pure public function provider-tint(mono: string) -> color {
-        return mono == "B" ? provider-bunny
-            : mono == "S3" ? provider-s3
-            : mono == "R2" ? provider-r2
-            : mono == "B2" ? provider-b2
-            : mono == "W" ? provider-wasabi
-            : mono == "DO" ? provider-do
-            : mono == "M" ? provider-minio
-            : accent;
+    // The tile colour for a site's provider (`SiteItem.provider`).
+    pure public function provider-tint(provider: ProviderTile) -> color {
+        return provider == ProviderTile.bunny ? provider-bunny
+            : provider == ProviderTile.s3 ? provider-s3
+            : provider == ProviderTile.r2 ? provider-r2
+            : provider == ProviderTile.b2 ? provider-b2
+            : provider == ProviderTile.wasabi ? provider-wasabi
+            : provider == ProviderTile.digital-ocean ? provider-do
+            : provider == ProviderTile.minio ? provider-minio
+            : provider-other;
     }
 
     // Text.

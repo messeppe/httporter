@@ -182,6 +182,7 @@ mod tests {
             id: "a".into(),
             name: "example-shop.com".into(),
             subtitle: "Bunny, Singapore".into(),
+            provider: ProviderTile::Bunny,
             mono: "B".into(),
             healthy: true,
         };
@@ -193,6 +194,25 @@ mod tests {
             folder: true,
         };
         assert!(site.healthy && row.folder);
+        for provider in [
+            ProviderTile::Bunny,
+            ProviderTile::S3,
+            ProviderTile::R2,
+            ProviderTile::B2,
+            ProviderTile::Wasabi,
+            ProviderTile::DigitalOcean,
+            ProviderTile::Minio,
+            ProviderTile::Other,
+        ] {
+            assert_eq!(
+                SiteItem {
+                    provider,
+                    ..SiteItem::default()
+                }
+                .provider,
+                provider
+            );
+        }
         for kind in [
             FileKind::Folder,
             FileKind::Code,

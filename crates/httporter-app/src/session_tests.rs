@@ -167,6 +167,45 @@ fn rejected() -> ProviderError {
 
 // ---- The brief's tests ----
 
+/// Ledger 129: a site's tile comes from its provider, whatever the site is called.
+#[test]
+fn a_sites_tile_comes_from_its_provider_not_its_name() {
+    let bunny = SiteRecord {
+        id: SiteId::new(),
+        name: "R2 mirror".into(),
+        provider: ProviderKind::Bunny,
+        container: "mirror".into(),
+        region: "sg".into(),
+        host: "sg.storage.bunnycdn.com".into(),
+        s3: None,
+        created_at: Utc::now(),
+    };
+    assert_eq!(SiteProvider::of(&bunny), SiteProvider::Bunny);
+    assert_eq!(SiteProvider::of(&bunny).mono(), "B");
+
+    let wasabi = SiteRecord {
+        name: "B".into(),
+        provider: ProviderKind::S3,
+        s3: Some(httporter_core::S3Site {
+            preset: S3Preset::Wasabi,
+            endpoint: "https://s3.wasabisys.com".into(),
+            path_style: false,
+        }),
+        ..bunny.clone()
+    };
+    assert_eq!(
+        SiteProvider::of(&wasabi),
+        SiteProvider::S3(S3Preset::Wasabi)
+    );
+    assert_eq!(SiteProvider::of(&wasabi).mono(), "W");
+
+    let no_details = SiteRecord { s3: None, ..wasabi };
+    assert_eq!(
+        SiteProvider::of(&no_details),
+        SiteProvider::S3(S3Preset::Other)
+    );
+}
+
 #[tokio::test]
 async fn save_site_keeps_password_out_of_the_database() {
     let (s, creds) = session_with_mock(MockProvider::new(Default::default()));
@@ -175,7 +214,7 @@ async fn save_site_keeps_password_out_of_the_database() {
         creds.get(&CredentialKey::site(&rec.id)).unwrap().as_deref(),
         Some("pw")
     );
-    assert_eq!(s.sites()[0].zone, "testzone");
+    assert_eq!(s.sites()[0].container, "testzone");
     assert_eq!(s.sites()[0].host, "sg.storage.bunnycdn.com");
 }
 
@@ -229,6 +268,7 @@ async fn failed_site_turns_unhealthy() {
     let item = &s.site_items()[0];
     assert!(!item.healthy);
     assert_eq!(item.subtitle, "Bunny · Singapore");
+    assert_eq!(item.provider, SiteProvider::Bunny);
     assert_eq!(item.mono, "B");
     assert_eq!(item.name, "testzone");
     assert_eq!(item.id, s.sites()[0].id.0);

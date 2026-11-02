@@ -1,8 +1,10 @@
 //! Local SQLite database of saved sites.
 //!
-//! Holds connection details only (name, provider, zone, region, host). Passwords and API
+//! Holds connection details only (name, provider, container, region, host). Passwords and API
 //! keys never enter this database: they live in the credential store (see `creds`), keyed
 //! by site id.
+//!
+//! The v1 schema's `zone` column holds [`SiteRecord::container`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,6 +43,9 @@ pub enum StoreError {
     /// A stored row holds a value this build cannot interpret.
     #[error("stored site data is invalid: {0}")]
     Corrupt(String),
+    /// The site is an S3 site, which this schema has no columns for. Task 4 adds the S3 columns.
+    #[error("S3 sites can't be saved yet")]
+    S3NotSupported,
 }
 
 /// `%APPDATA%\HTTPorter\httporter.db` (the per-user roaming config folder).
@@ -79,16 +84,22 @@ impl Store {
         Ok(Self { conn })
     }
 
-    /// Inserts a site. Fails if a site with the same id already exists.
+    /// Inserts a site. Fails if a site with the same id already exists, and with
+    /// [`StoreError::S3NotSupported`] for an S3 site rather than drop its S3 details.
     pub fn add_site(&self, site: &SiteRecord) -> Result<(), StoreError> {
+        let provider = match (site.provider, &site.s3) {
+            (ProviderKind::Bunny, None) => "bunny",
+            // Task 4 adds the S3 columns.
+            _ => return Err(StoreError::S3NotSupported),
+        };
         self.conn.execute(
             "INSERT INTO sites (id, name, provider, zone, region, host, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 site.id.0,
                 site.name,
-                provider_to_text(site.provider),
-                site.zone,
+                provider,
+                site.container,
                 site.region,
                 site.host,
                 site.created_at.to_rfc3339_opts(SecondsFormat::AutoSi, true),
@@ -109,7 +120,7 @@ impl Store {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     provider: row.get(2)?,
-                    zone: row.get(3)?,
+                    container: row.get(3)?,
                     region: row.get(4)?,
                     host: row.get(5)?,
                     created_at: row.get(6)?,
@@ -143,7 +154,8 @@ struct RawSite {
     id: String,
     name: String,
     provider: String,
-    zone: String,
+    /// The `zone` column.
+    container: String,
     region: String,
     host: String,
     created_at: String,
@@ -160,17 +172,12 @@ impl RawSite {
             id: SiteId(self.id),
             name: self.name,
             provider,
-            zone: self.zone,
+            container: self.container,
             region: self.region,
             host: self.host,
+            s3: None,
             created_at,
         })
-    }
-}
-
-fn provider_to_text(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Bunny => "bunny",
     }
 }
 
@@ -205,7 +212,7 @@ fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
-    use httporter_core::{ProviderKind, SiteId, SiteRecord};
+    use httporter_core::{ProviderKind, S3Preset, S3Site, SiteId, SiteRecord};
 
     use super::*;
 
@@ -214,9 +221,10 @@ mod tests {
             id: SiteId::new(),
             name: name.to_owned(),
             provider: ProviderKind::Bunny,
-            zone: "my-zone".to_owned(),
+            container: "my-zone".to_owned(),
             region: "de".to_owned(),
             host: "storage.bunnycdn.com".to_owned(),
+            s3: None,
             created_at: Utc.with_ymd_and_hms(2026, 10, 29, 12, 30, 45).unwrap(),
         }
     }
@@ -281,6 +289,25 @@ mod tests {
         record.created_at = DateTime::from_timestamp(1_790_000_000, 123_456_789).unwrap();
         st.add_site(&record).unwrap();
         assert_eq!(st.list_sites().unwrap(), [record]);
+    }
+
+    /// Until the schema has S3 columns, an S3 site is refused rather than saved without its
+    /// endpoint and preset.
+    #[test]
+    fn an_s3_site_is_refused_not_saved_half() {
+        let st = Store::open_in_memory().unwrap();
+        let mut bucket = site("media-archive");
+        bucket.provider = ProviderKind::S3;
+        bucket.s3 = Some(S3Site {
+            preset: S3Preset::CloudflareR2,
+            endpoint: "https://acc.r2.cloudflarestorage.com".to_owned(),
+            path_style: true,
+        });
+        assert!(matches!(
+            st.add_site(&bucket),
+            Err(StoreError::S3NotSupported)
+        ));
+        assert!(names(&st).is_empty());
     }
 
     #[test]

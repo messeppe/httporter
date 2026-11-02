@@ -31,8 +31,8 @@ use std::time::Duration;
 use chrono::{NaiveDateTime, Utc};
 use httporter_bunny::{BunnyConfig, BunnyStorage, REGIONS, storage_host};
 use httporter_core::{
-    Entry, Listing, ProviderError, ProviderKind, RemotePath, RequestInfo, RetryPolicy, SiteId,
-    SiteRecord, StorageProvider,
+    Entry, Listing, ProviderError, ProviderKind, RemotePath, RequestInfo, RetryPolicy, S3Preset,
+    SiteId, SiteRecord, StorageProvider,
 };
 use httporter_platform::{CredentialKey, CredentialStore, Store};
 
@@ -130,12 +130,41 @@ pub struct TestResult {
     pub text: String,
 }
 
+/// The service a site is on, down to the S3 preset. A site's tile takes its colour and letters
+/// from this, never from the site's name (ledger 129).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteProvider {
+    Bunny,
+    S3(S3Preset),
+}
+
+impl SiteProvider {
+    pub fn of(site: &SiteRecord) -> Self {
+        match site.provider {
+            ProviderKind::Bunny => Self::Bunny,
+            // An S3 site always carries its details; `Other` stands in should one not.
+            ProviderKind::S3 => Self::S3(site.s3.as_ref().map_or(S3Preset::Other, |s3| s3.preset)),
+        }
+    }
+
+    /// The letters on the tile: "B" for Bunny, the preset's for S3 ("R2", "W", …).
+    pub fn mono(self) -> &'static str {
+        match self {
+            Self::Bunny => "B",
+            Self::S3(preset) => preset.mono(),
+        }
+    }
+}
+
 /// One row of the sidebar's site list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteItemData {
     pub id: String,
     pub name: String,
     pub subtitle: String,
+    /// Picks the tile's colour.
+    pub provider: SiteProvider,
+    /// The tile's letters, from `provider`.
     pub mono: String,
     /// The last request to the site succeeded (a site no request has gone to yet counts as
     /// healthy).
@@ -523,14 +552,17 @@ impl Session {
         book.sites
             .iter()
             .map(|site| {
-                let (service, mono) = match site.provider {
-                    ProviderKind::Bunny => ("Bunny", "B"),
+                let provider = SiteProvider::of(site);
+                let subtitle = match provider {
+                    SiteProvider::Bunny => format!("Bunny · {}", region_city(&site.region)),
+                    SiteProvider::S3(preset) => format!("{} · {}", preset.label(), site.region),
                 };
                 SiteItemData {
                     id: site.id.0.clone(),
                     name: site.name.clone(),
-                    subtitle: format!("{service} · {}", region_city(&site.region)),
-                    mono: mono.to_owned(),
+                    subtitle,
+                    provider,
+                    mono: provider.mono().to_owned(),
                     healthy: book.healthy.get(&site.id).copied().unwrap_or(true),
                 }
             })
@@ -747,9 +779,10 @@ impl Session {
             id: SiteId::new(),
             name: v.name.clone(),
             provider: ProviderKind::Bunny,
-            zone: v.zone.clone(),
+            container: v.zone.clone(),
             region: v.region_code.clone(),
             host,
+            s3: None,
             created_at: Utc::now(),
         };
         let key = CredentialKey::site(&record.id);
@@ -895,10 +928,14 @@ impl Session {
         };
         let client = match site.provider {
             ProviderKind::Bunny => self.factory.bunny(interactive(BunnyConfig::new(
-                &site.zone, &site.host, password,
+                &site.container,
+                &site.host,
+                password,
             ))),
+            // Nothing saves an S3 site before S3 browsing arrives.
+            ProviderKind::S3 => return Err("Opening S3 sites arrives later in this build.".into()),
         };
-        client.map_err(|e| describe(&e, &site.zone, &site.host, Attempt::Setup))
+        client.map_err(|e| describe(&e, &site.container, &site.host, Attempt::Setup))
     }
 
     /// Lists the folder `pick` chooses in the open site (if it chooses one) and goes there by
@@ -965,7 +1002,7 @@ impl Session {
                 Err(ProviderError::NotFound) => {
                     remote.error = Some(describe(
                         &ProviderError::NotFound,
-                        &remote.site.zone,
+                        &remote.site.container,
                         &remote.site.host,
                         Attempt::List(&dir),
                     ));
@@ -974,7 +1011,7 @@ impl Session {
                     remote.info = None;
                     remote.error = Some(describe(
                         &error,
-                        &remote.site.zone,
+                        &remote.site.container,
                         &remote.site.host,
                         Attempt::List(&dir),
                     ));
@@ -1001,8 +1038,9 @@ impl Session {
         };
         let (key, ascending) = pane.sort;
         let site = &remote.site;
-        let service = match site.provider {
-            ProviderKind::Bunny => "Bunny Storage",
+        let service = match SiteProvider::of(site) {
+            SiteProvider::Bunny => "Bunny Storage",
+            SiteProvider::S3(preset) => preset.label(),
         };
         let (connection, status_right) = match (&remote.info, &remote.error) {
             (Some(info), _) => (
@@ -1015,10 +1053,10 @@ impl Session {
         RemoteView {
             version: pane.version,
             rows: rows_from_remote_sorted(&remote.entries, (self.now)(), key, ascending),
-            crumbs: remote_crumbs(&site.zone, &remote.dir),
+            crumbs: remote_crumbs(&site.container, &remote.dir),
             connection,
             connection_ok: remote.info.is_some() || remote.error.is_none(),
-            endpoint: format!("{service} · {}", site.zone),
+            endpoint: format!("{service} · {}", site.container),
             chip: format!("https://{}", site.host),
             status_right,
             can_back: !pane.history.back.is_empty(),

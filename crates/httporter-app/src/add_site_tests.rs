@@ -2,9 +2,9 @@
 //! what the sheet reports, how it behaves as a modal sheet (focus, Escape, Return, the window
 //! behind) and how it presents itself to assistive technology.
 
-use crate::AppWindow;
 use crate::add_site::{FieldError, show_field_error};
 use crate::keyboard_tests::{center, click, row_starting, site, tab, tap};
+use crate::{AppWindow, ProviderTile};
 use i_slint_backend_testing as testing;
 use i_slint_backend_testing::{AccessibleLiveness, AccessibleRole, ElementHandle, ElementQuery};
 use slint::platform::{Key, WindowEvent};
@@ -38,8 +38,8 @@ fn bed() -> Bed {
     }
     let w = AppWindow::new().unwrap();
     w.set_sites(ModelRc::new(VecModel::from(vec![
-        site("example-shop.com", "B"),
-        site("media-archive", "R2"),
+        site("example-shop.com", ProviderTile::Bunny, "B"),
+        site("media-archive", ProviderTile::R2, "R2"),
     ])));
     let regions: Vec<SharedString> = ["Frankfurt", "Singapore", "London"]
         .into_iter()
@@ -1172,7 +1172,11 @@ fn an_empty_site_list_says_so() {
     w.show().unwrap();
     let says = |w: &AppWindow| ElementHandle::find_by_accessible_label(w, "No sites yet").count();
     assert_eq!(says(&w), 1);
-    w.set_sites(ModelRc::new(VecModel::from(vec![site("example-shop.com", "B")])));
+    w.set_sites(ModelRc::new(VecModel::from(vec![site(
+        "example-shop.com",
+        ProviderTile::Bunny,
+        "B",
+    )])));
     assert_eq!(says(&w), 0);
 }
 
@@ -1180,10 +1184,10 @@ fn an_empty_site_list_says_so() {
 fn a_site_whose_last_request_failed_is_described_as_such() {
     testing::init_no_event_loop();
     let w = AppWindow::new().unwrap();
-    let mut sick = site("media-archive", "R2");
+    let mut sick = site("media-archive", ProviderTile::R2, "R2");
     sick.healthy = false;
     w.set_sites(ModelRc::new(VecModel::from(vec![
-        site("example-shop.com", "B"),
+        site("example-shop.com", ProviderTile::Bunny, "B"),
         sick,
     ])));
     w.show().unwrap();

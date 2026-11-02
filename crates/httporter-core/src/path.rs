@@ -109,6 +109,21 @@ impl RemotePath {
     }
 }
 
+/// Stored as its text.
+impl serde::Serialize for RemotePath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+/// Read back through [`RemotePath::parse`], so stored text that is not a valid path is refused.
+impl<'de> serde::Deserialize<'de> for RemotePath {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Percent-encodes one path segment, keeping only RFC 3986 unreserved
 /// characters (`A-Z a-z 0-9 - . _ ~`) and encoding every other byte of its
 /// UTF-8 form in uppercase hex.

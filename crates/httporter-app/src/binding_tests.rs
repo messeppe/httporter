@@ -97,7 +97,7 @@ fn the_sheet_reports_its_fields_to_the_session_in_order() {
     assert_eq!(
         (
             saved.name.as_str(),
-            saved.zone.as_str(),
+            saved.container.as_str(),
             saved.region.as_str()
         ),
         ("My site", "testzone", "sg")
@@ -412,6 +412,7 @@ fn site_rows_are_updated_in_place() {
         id: name.into(),
         name: name.into(),
         subtitle: "Bunny · Singapore".into(),
+        provider: SiteProvider::Bunny,
         mono: "B".into(),
         healthy,
     };
@@ -428,6 +429,77 @@ fn site_rows_are_updated_in_place() {
     // A new site replaces the list.
     sync_sites(&ui, &[item("a", false), item("b", true), item("c", true)]);
     assert_eq!(ui.get_sites().row_count(), 3);
+}
+
+/// Ledger 129: the row's tile is the provider's, whatever the site is called.
+#[test]
+fn site_rows_carry_the_provider_tile() {
+    testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let item = |name: &str, provider: SiteProvider| SiteItemData {
+        id: name.into(),
+        name: name.into(),
+        subtitle: String::new(),
+        provider,
+        mono: provider.mono().into(),
+        healthy: true,
+    };
+    sync_sites(
+        &ui,
+        &[
+            item("R2 backup", SiteProvider::Bunny),
+            item("example-shop.com", SiteProvider::S3(S3Preset::CloudflareR2)),
+            item("archive", SiteProvider::S3(S3Preset::Other)),
+        ],
+    );
+    let rows: Vec<(ProviderTile, String)> = ui
+        .get_sites()
+        .iter()
+        .map(|row| (row.provider, row.mono.to_string()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (ProviderTile::Bunny, "B".to_owned()),
+            (ProviderTile::R2, "R2".to_owned()),
+            (ProviderTile::Other, "…".to_owned()),
+        ]
+    );
+}
+
+/// Every provider tile has its own colour from the theme (mockup `providers`).
+#[test]
+fn each_provider_tile_has_its_theme_colour() {
+    use crate::Theme;
+    testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let theme = ui.global::<Theme>();
+    let presets = [
+        S3Preset::AwsS3,
+        S3Preset::CloudflareR2,
+        S3Preset::BackblazeB2,
+        S3Preset::Wasabi,
+        S3Preset::DigitalOceanSpaces,
+        S3Preset::Minio,
+        S3Preset::Other,
+    ];
+    let expected = [
+        theme.get_provider_s3(),
+        theme.get_provider_r2(),
+        theme.get_provider_b2(),
+        theme.get_provider_wasabi(),
+        theme.get_provider_do(),
+        theme.get_provider_minio(),
+        theme.get_provider_other(),
+    ];
+    assert_eq!(
+        theme.invoke_provider_tint(slint_tile(SiteProvider::Bunny)),
+        theme.get_provider_bunny()
+    );
+    for (preset, colour) in presets.into_iter().zip(expected) {
+        let tile = slint_tile(SiteProvider::S3(preset));
+        assert_eq!(theme.invoke_provider_tint(tile), colour, "{preset:?}");
+    }
 }
 
 /// Ruling P22: Back and Forward go to the pane last used: a click in This PC sends them there,
