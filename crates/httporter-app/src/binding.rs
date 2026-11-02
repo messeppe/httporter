@@ -315,30 +315,37 @@ impl Ctx {
     }
 
     /// Add Site (also Return in a field of the sheet): tests the connection, and saves the site
-    /// only if that works ([`Session::add_site`]). The sheet stays busy meanwhile, and Cancel
-    /// gives the whole run up.
+    /// only if that works. The sheet stays busy meanwhile. Cancel gives the test up; once the
+    /// test has passed, the save is a task of its own that Cancel does not reach, so a site whose
+    /// password is being written is always saved, listed and shown (see [`show_added`]).
     fn save_site(&self, form: AddSiteForm) {
         let Some(ui) = self.ui.upgrade() else { return };
         let Some(site) = validated(&ui, &form) else {
             return;
         };
         let run = self.begin_sheet_run(&ui);
-        let (session, runs, weak) = (
+        let (session, runs, weak, rt) = (
             self.session.clone(),
             self.sheet_run.clone(),
             self.ui.clone(),
+            self.rt.clone(),
         );
         let task = self.rt.spawn(async move {
-            let added = session.add_site(&site).await;
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                let latest = runs.load(Ordering::SeqCst) == run;
-                show_added(&ui, &session, latest, added);
+            let tested = session.test_connection(&site).await;
+            if !tested.ok {
+                post_added(&weak, &runs, run, &session, Err(tested.text));
+                return;
+            }
+            rt.spawn(async move {
+                let added = session.save_site(&site).await;
+                post_added(&weak, &runs, run, &session, added);
             });
         });
         self.sheet.replace(task);
     }
 
-    /// The sheet was cancelled: give up its test or save and let it be used again.
+    /// The sheet was cancelled: give up its test (a save that has begun is not given up) and let it
+    /// be used again.
     fn cancel_sheet(&self) {
         self.sheet_run.fetch_add(1, Ordering::SeqCst);
         self.sheet.abort();
@@ -346,6 +353,22 @@ impl Ctx {
             ui.set_add_site_busy(false);
         }
     }
+}
+
+/// Hands what became of Add Site to the window (from a task). Whether the run is still the
+/// latest is decided when the window gets to it.
+fn post_added(
+    ui: &Weak<AppWindow>,
+    runs: &Arc<AtomicU64>,
+    run: u64,
+    session: &Arc<Session>,
+    added: Result<SiteRecord, String>,
+) {
+    let (runs, session) = (runs.clone(), session.clone());
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let latest = runs.load(Ordering::SeqCst) == run;
+        show_added(&ui, &session, latest, added);
+    });
 }
 
 /// Shows what became of Add Site. `latest` is false when the sheet has been cancelled or

@@ -451,6 +451,62 @@ async fn credentials_the_database_and_clients_stay_off_the_runtime_thread() {
     }
 }
 
+// ---- A save that has started is finished ----
+
+/// Task 16 review: Cancel gives up the task that is saving a site, but not the write. Once the
+/// password is on its way to the credential store the site is written, so it is also listed, once.
+/// (Before the task was split the save had no await in it, so nothing could stop it half done.)
+#[tokio::test]
+async fn a_save_that_has_started_lists_the_site_even_if_it_is_given_up() {
+    let creds = Arc::new(SpyStore::default());
+    let factory = FakeFactory::new(site_mock());
+    let s = Arc::new(Session::new(
+        Store::open_in_memory().unwrap(),
+        creds.clone(),
+        factory,
+        fixed_now,
+    ));
+    let hold = creds.hold_set();
+    let saving = tokio::spawn({
+        let s = s.clone();
+        async move { s.save_site(&valid("testzone", "sg", "pw")).await }
+    });
+    // The password is being written, on a blocking thread, and the write is slow.
+    hold.entered().await;
+    assert!(
+        s.sites().is_empty(),
+        "nothing is listed before the write is done"
+    );
+
+    // Cancel: the task that waits for the save is dropped at its await.
+    saving.abort();
+    assert!(saving.await.unwrap_err().is_cancelled());
+    hold.release();
+
+    timeout(PROMPTLY, async {
+        while s.sites().is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the site was written but never listed");
+    let sites = s.sites();
+    assert_eq!(sites.len(), 1, "listed once");
+    assert_eq!(s.site_items().len(), 1, "and so in the sidebar's rows");
+    assert_eq!(
+        lock(&s.store).list_sites().unwrap(),
+        sites,
+        "as in the database"
+    );
+    assert_eq!(
+        creds
+            .get(&CredentialKey::site(&sites[0].id))
+            .unwrap()
+            .as_deref(),
+        Some("pw")
+    );
+}
+
 // ---- Adding a site (final fix wave) ----
 
 /// Important #1: Add Site lists the zone first (as Test Connection does) and saves nothing when

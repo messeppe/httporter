@@ -1,9 +1,10 @@
 //! Tests of the binding: the window's callbacks reach the session, and views reach the window.
 
 use super::*;
-use crate::session::fakes::{FakeFactory, Gated, session_with};
+use crate::session::fakes::{FakeFactory, Gated, SpyStore, fixed_now, session_with};
 use crate::viewmodel::{FileKindData, RowData};
 use httporter_core::{AuthHint, MockOp, MockProvider, ProviderError, StorageProvider};
+use httporter_platform::Store;
 use i_slint_backend_testing as testing;
 use slint::Model;
 use std::time::{Duration, Instant};
@@ -646,6 +647,39 @@ fn a_site_that_passes_its_test_is_saved_once_and_opened() {
     wait_for("the new site to open", || {
         (b.factory.configs().len() == 2).then_some(())
     });
+}
+
+/// Task 16 review: Cancel gives up a test that is running, but a site whose password is already
+/// being written is saved all the same (the sheet is gone, the site exists), and listed once.
+#[test]
+fn cancel_does_not_stop_a_site_that_is_being_saved() {
+    testing::init_no_event_loop();
+    let rt = Runtime::new().unwrap();
+    let creds = Arc::new(SpyStore::default());
+    let hold = creds.hold_set();
+    let session = Session::new(
+        Store::open_in_memory().unwrap(),
+        creds.clone(),
+        FakeFactory::new(empty()),
+        fixed_now,
+    );
+    let ui = AppWindow::new().unwrap();
+    let session = install(&ui, rt.handle().clone(), session);
+
+    // The test passes (the zone lists), and the password is on its way to the credential store.
+    ui.invoke_add_site_save("".into(), "testzone".into(), 4, "pw".into());
+    hold.wait_entered();
+    assert!(ui.get_add_site_busy());
+    ui.invoke_add_site_cancel();
+    assert!(!ui.get_add_site_busy());
+    assert!(session.sites().is_empty(), "the write has not finished");
+
+    hold.release();
+    wait_for("the site to be listed", || {
+        (!session.sites().is_empty()).then_some(())
+    });
+    assert_eq!(session.sites().len(), 1, "listed once");
+    assert_eq!(session.site_items().len(), 1);
 }
 
 /// Minor 2: a loading view marks the pane and leaves its rows and selection alone; the answer

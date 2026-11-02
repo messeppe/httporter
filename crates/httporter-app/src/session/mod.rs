@@ -169,7 +169,8 @@ pub struct Session {
     /// The site database. Its own lock, so that a slow disk write holds up only other writes.
     /// Shared, so that a write can run on a blocking thread.
     store: Arc<Mutex<Store>>,
-    book: Mutex<Book>,
+    /// Shared, so that a save can update it from the blocking thread that writes the site.
+    book: Arc<Mutex<Book>>,
     remote: Mutex<RemotePane>,
     local: Mutex<LocalPane>,
     /// The last ticket given out for each pane.
@@ -191,7 +192,7 @@ impl Session {
             creds,
             factory,
             now,
-            book: Mutex::new(Book::read(&store)),
+            book: Arc::new(Mutex::new(Book::read(&store))),
             store: Arc::new(Mutex::new(store)),
             remote: Mutex::new(RemotePane::new(sort)),
             local: Mutex::new(LocalPane::new(sort)),

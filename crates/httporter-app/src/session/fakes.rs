@@ -34,7 +34,8 @@ struct Held {
 }
 
 /// Holds the next client made for one zone inside `bunny()` (where the real factory reads
-/// no password but builds HTTP clients, which takes a while), until released.
+/// no password but builds HTTP clients, which takes a while), or the next `set` of a
+/// [`SpyStore`], until released.
 pub(crate) struct Hold {
     entered: mpsc::Receiver<()>,
     release: mpsc::Sender<()>,
@@ -50,13 +51,20 @@ impl Hold {
                 Err(mpsc::TryRecvError::Empty) if std::time::Instant::now() < deadline => {
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
-                Err(e) => panic!("the client was never made: {e:?}"),
+                Err(e) => panic!("the held call was never made: {e:?}"),
             }
         }
     }
 
+    /// As [`Self::entered`], for a test that is not async: blocks its thread until then.
+    pub(crate) fn wait_entered(&self) {
+        self.entered
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the held call was never made");
+    }
+
     pub(crate) fn release(&self) {
-        self.release.send(()).expect("the factory is still waiting");
+        self.release.send(()).expect("the call is still waiting");
     }
 }
 
@@ -222,17 +230,34 @@ impl StorageProvider for Gated {
     }
 }
 
-/// A credential store in memory that notes the thread every call was made on.
+/// A credential store in memory that notes the thread every call was made on, and can hold the
+/// next `set` (a slow Windows Credential Manager) until released.
 #[derive(Default)]
 pub(crate) struct SpyStore {
     inner: MemoryStore,
     threads: Mutex<Vec<ThreadId>>,
+    held: Mutex<Option<Held>>,
 }
 
 impl SpyStore {
     /// The thread every call so far was made on.
     pub(crate) fn threads(&self) -> Vec<ThreadId> {
         lock(&self.threads).clone()
+    }
+
+    /// Holds the next `set` until the returned [`Hold`] releases it. The hold blocks the thread
+    /// the call is made on, and gives up after ten seconds if nobody releases it.
+    pub(crate) fn hold_set(&self) -> Hold {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *lock(&self.held) = Some(Held {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        Hold {
+            entered: entered_rx,
+            release: release_tx,
+        }
     }
 
     fn note(&self) {
@@ -243,6 +268,13 @@ impl SpyStore {
 impl CredentialStore for SpyStore {
     fn set(&self, key: &CredentialKey, secret: &str) -> Result<(), CredError> {
         self.note();
+        let held = lock(&self.held).take();
+        if let Some(held) = held {
+            let _ = held.entered.send(());
+            let _ = held
+                .release
+                .recv_timeout(std::time::Duration::from_secs(10));
+        }
         self.inner.set(key, secret)
     }
 

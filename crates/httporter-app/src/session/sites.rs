@@ -199,6 +199,11 @@ impl Session {
     /// Adds the site the sheet describes if it works: lists the zone's root first, exactly as
     /// [`Self::test_connection`] does, and saves the site only when that succeeds. Otherwise
     /// nothing is saved and the error is the test's ("Couldn't sign in to …").
+    ///
+    /// The window does the same in two tasks, so that Cancel can give up the test without
+    /// reaching a save that has begun (`Ctx::save_site` in `binding.rs`); this does both in one
+    /// call, for the tests of the session.
+    #[cfg(test)]
     pub async fn add_site(&self, v: &ValidSite) -> Result<SiteRecord, String> {
         let tested = self.test_connection(v).await;
         if !tested.ok {
@@ -208,7 +213,12 @@ impl Session {
     }
 
     /// Saves a new site as it is, without testing it: its password in the credential store,
-    /// everything else in the database. The sheet goes through [`Self::add_site`].
+    /// everything else in the database, and the site in the list. The sheet tests the zone first.
+    ///
+    /// Once this has begun to write, the site is saved and listed, whatever becomes of the caller:
+    /// the writes and the update of the list are one blocking task, and dropping the future that
+    /// waits for it (Cancel on the sheet) does not stop it. Nothing is left half done: either the
+    /// password and the site are both stored and the site is listed, or neither is stored.
     pub async fn save_site(&self, v: &ValidSite) -> Result<SiteRecord, String> {
         let host = storage_host(&v.region_code).ok_or_else(|| copy::CHOOSE_REGION.to_owned())?;
         let record = SiteRecord {
@@ -221,15 +231,9 @@ impl Session {
             s3: None,
             created_at: Utc::now(),
         };
-        let (creds, store) = (self.creds.clone(), self.store.clone());
-        let (saving, password) = (record.clone(), v.password.clone());
-        let listed = blocking(move || save_to_stores(&*creds, &store, &saving, &password)).await?;
-        let mut book = lock(&self.book);
-        book.take(listed);
-        if !book.sites.iter().any(|site| site.id == record.id) {
-            book.sites.push(record.clone());
-        }
-        Ok(record)
+        let (creds, store, book) = (self.creds.clone(), self.store.clone(), self.book.clone());
+        let password = v.password.clone();
+        blocking(move || save_to_stores(&*creds, &store, &book, record, &password)).await
     }
 
     /// A storage client for `site`, with its password read from the credential store.
@@ -252,26 +256,36 @@ async fn build_client(
 }
 
 /// Puts the new site's password in the credential store and the site in the database, then reads
-/// the list of sites back (which is returned as it came, for the caller to make sense of).
-/// Whichever fails, the other leaves nothing behind: no password stays for a site that was not
-/// saved.
+/// the list of sites back and lists the new site. Whichever write fails, the other leaves nothing
+/// behind: no password stays for a site that was not saved. It is one blocking task from the first
+/// write to the last change of the list, and takes its inputs by value, so that nobody waiting for
+/// it can leave it half done.
 fn save_to_stores(
     creds: &dyn CredentialStore,
     store: &Mutex<Store>,
-    record: &SiteRecord,
+    book: &Mutex<Book>,
+    record: SiteRecord,
     password: &str,
-) -> Result<Result<Vec<SiteRecord>, StoreError>, String> {
+) -> Result<SiteRecord, String> {
     let key = CredentialKey::site(&record.id);
     creds
         .set(&key, password)
         .map_err(copy::password_not_saved)?;
-    let store = lock(store);
-    if let Err(e) = store.add_site(record) {
-        drop(store);
-        let _ = creds.delete(&key);
-        return Err(copy::site_not_saved(e));
+    let listed = {
+        let store = lock(store);
+        if let Err(e) = store.add_site(&record) {
+            drop(store);
+            let _ = creds.delete(&key);
+            return Err(copy::site_not_saved(e));
+        }
+        store.list_sites()
+    };
+    let mut book = lock(book);
+    book.take(listed);
+    if !book.sites.iter().any(|site| site.id == record.id) {
+        book.sites.push(record.clone());
     }
-    Ok(store.list_sites())
+    Ok(record)
 }
 
 /// The storage client for `site`, with its password read from the credential store.
