@@ -5,8 +5,12 @@
 //! The state is in four parts, each behind its own lock: the site database, the site list (with
 //! each site's health), the cloud pane and the This PC pane. No lock is held across an `await` or
 //! while another is taken, so a listing that takes long (or never ends) holds up nothing else:
-//! the other pane, saving a site and testing one go ahead. A listing is matched to the request
-//! that started it; if the user has gone elsewhere since, its result is dropped.
+//! the other pane, saving a site and testing one go ahead.
+//!
+//! Requests to move a pane are put in order by [`Ticket`]s, taken on the UI thread when the user
+//! asks. A request takes effect only if no later one already has, and a listing's answer is used
+//! only if its request is still the latest to have taken effect; anything else is from a place
+//! the user has left, and is dropped.
 //!
 //! A site's password is read from the credential store only when the site is selected, and goes
 //! straight into the storage client's configuration. It is never kept here, written to the site
@@ -15,6 +19,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{NaiveDateTime, Utc};
@@ -47,23 +52,35 @@ impl ProviderFactory for RealFactory {
     }
 }
 
+/// A place in line for moving one pane, taken on the UI thread at the moment the user asks
+/// ([`Session::remote_ticket`], [`Session::local_ticket`]). Requests are thus ordered as the user
+/// made them, not as their tasks happen to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Ticket(u64);
+
 /// What the cloud pane and the window chrome around it show.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteView {
     /// Goes up with every change to what the pane shows. Views are made side by side and can
-    /// reach the window out of order; one older than the view on screen is dropped.
+    /// reach the window out of order; one older than the view on screen is dropped. A click on
+    /// a row or a crumb names the version it saw, and is ignored if the pane has changed since.
     pub version: u64,
     pub rows: Vec<RowData>,
     pub crumbs: Vec<String>,
-    /// The toolbar's connection pill: "HTTPS · 21 ms", "Not connected" after a failure, or empty
-    /// while a site's first listing is on its way.
+    /// The toolbar's connection pill: "HTTPS · 21 ms", "Connecting…" while a site opens, "Not
+    /// connected" after a failed connection, or empty with no site.
     pub connection: String,
+    /// The pill is green (connected or connecting) rather than orange.
+    pub connection_ok: bool,
     /// The toolbar subtitle: "Bunny Storage · {zone}".
     pub endpoint: String,
     /// The cloud pane's header chip: the storage endpoint, "https://{host}".
     pub chip: String,
-    /// The right side of the status bar: "{http_version} · {host}".
+    /// The right side of the status bar: "{http_version} · {host}", or the host while connecting.
     pub status_right: String,
+    /// There is a folder to go back to, or forward to.
+    pub can_back: bool,
+    pub can_forward: bool,
     pub error: Option<String>,
 }
 
@@ -76,6 +93,8 @@ pub struct LocalView {
     pub crumbs: Vec<String>,
     /// For the status bar: "{n} items", plus how many could not be read.
     pub status: String,
+    pub can_back: bool,
+    pub can_forward: bool,
     pub error: Option<String>,
 }
 
@@ -156,6 +175,59 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// How a navigation moves through a pane's history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// To a new place: it goes on the back list, and the forward list is cleared.
+    Go,
+    Back,
+    Forward,
+}
+
+/// The places a pane can go back and forward to, Finder-style. The last entry is the nearest.
+#[derive(Debug)]
+struct History<T> {
+    back: Vec<T>,
+    forward: Vec<T>,
+}
+
+impl<T> Default for History<T> {
+    fn default() -> Self {
+        Self {
+            back: Vec::new(),
+            forward: Vec::new(),
+        }
+    }
+}
+
+impl<T: Clone> History<T> {
+    fn back_to(&self) -> Option<T> {
+        self.back.last().cloned()
+    }
+
+    fn forward_to(&self) -> Option<T> {
+        self.forward.last().cloned()
+    }
+
+    /// The pane moved away from `left` by `step`.
+    fn record(&mut self, step: Step, left: T) {
+        match step {
+            Step::Go => {
+                self.back.push(left);
+                self.forward.clear();
+            }
+            Step::Back => {
+                self.back.pop();
+                self.forward.push(left);
+            }
+            Step::Forward => {
+                self.forward.pop();
+                self.back.push(left);
+            }
+        }
+    }
+}
+
 /// The saved sites, as the sidebar shows them.
 struct Book {
     /// As the database lists them: by name.
@@ -168,34 +240,36 @@ struct Book {
 
 /// The cloud pane.
 struct RemotePane {
-    /// Numbers the requests that send the pane somewhere (a site, a folder). A listing that comes
-    /// back for an older number is from a place the user has left since, and is dropped.
-    request: u64,
+    /// The latest request that took effect. An older request is too late (the user has moved
+    /// on); the answer to a listing is used only while its request is still this one.
+    latest: Ticket,
     /// See [`RemoteView::version`].
     version: u64,
     sort: (SortKey, bool),
+    /// Folders within the open site.
+    history: History<RemotePath>,
     open: Option<Remote>,
 }
 
 /// The open cloud site and the folder shown from it.
 struct Remote {
     site: SiteRecord,
-    /// `None` when no client could be made (no password saved, for one).
+    /// `None` while the site opens, and when no client could be made (no password saved, say).
     provider: Option<Arc<dyn StorageProvider>>,
     dir: RemotePath,
     /// In the order the rows show them, so a row index is an index into this list.
     entries: Vec<Entry>,
-    /// How the last successful listing travelled; `None` after a failure, and while the site's
-    /// first listing is on its way.
+    /// How the last successful listing travelled; `None` while the site opens and after a
+    /// failed connection.
     info: Option<RequestInfo>,
     error: Option<String>,
 }
 
 impl Remote {
-    fn new(site: SiteRecord, provider: Option<Arc<dyn StorageProvider>>) -> Self {
+    fn new(site: SiteRecord) -> Self {
         Self {
             site,
-            provider,
+            provider: None,
             dir: RemotePath::root(),
             entries: Vec::new(),
             info: None,
@@ -206,11 +280,13 @@ impl Remote {
 
 /// The This PC pane.
 struct LocalPane {
-    /// As [`RemotePane::request`].
-    request: u64,
+    /// As [`RemotePane::latest`].
+    latest: Ticket,
     /// See [`LocalView::version`].
     version: u64,
     sort: (SortKey, bool),
+    /// Places: `None` is the list of drives.
+    history: History<Option<PathBuf>>,
     /// `None` for the list of drives.
     dir: Option<PathBuf>,
     /// In the order the rows show them, so a row index is an index into this list.
@@ -266,6 +342,9 @@ pub struct Session {
     book: Mutex<Book>,
     remote: Mutex<RemotePane>,
     local: Mutex<LocalPane>,
+    /// The last ticket given out for each pane.
+    remote_tickets: AtomicU64,
+    local_tickets: AtomicU64,
 }
 
 impl Session {
@@ -296,21 +375,36 @@ impl Session {
             store: Mutex::new(store),
             book: Mutex::new(book),
             remote: Mutex::new(RemotePane {
-                request: 0,
+                latest: Ticket(0),
                 version: 0,
                 sort,
+                history: History::default(),
                 open: None,
             }),
             local: Mutex::new(LocalPane {
-                request: 0,
+                latest: Ticket(0),
                 version: 0,
                 sort,
+                history: History::default(),
                 dir: None,
                 entries: drives,
                 skipped: 0,
                 error: None,
             }),
+            remote_tickets: AtomicU64::new(0),
+            local_tickets: AtomicU64::new(0),
         }
+    }
+
+    /// A place in line for moving the cloud pane. Take it when the user asks, before handing the
+    /// request to a task.
+    pub fn remote_ticket(&self) -> Ticket {
+        Ticket(self.remote_tickets.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// As [`Self::remote_ticket`], for the This PC pane.
+    pub fn local_ticket(&self) -> Ticket {
+        Ticket(self.local_tickets.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
     /// Shows `text` in the banner for the rest of the run (used when the site database could not
@@ -349,47 +443,69 @@ impl Session {
             .collect()
     }
 
-    /// Opens the site at `index` in [`Self::sites`] and lists its root. The pane switches to the
-    /// site at once (empty until the listing is back), so anything still on its way from the
-    /// site shown before is dropped when it arrives.
-    pub async fn select_site(&self, index: usize) -> RemoteView {
+    /// Opens the site at `index` in [`Self::sites`] and lists its root.
+    ///
+    /// The pane switches to the site at once: empty, "Connecting…", with the site's endpoint and
+    /// a fresh history. `switched` gets that view, so the window can show it before the password
+    /// is read, the client is set up and the listing comes back, all of which can take a while.
+    /// Anything still on its way from the site shown before is dropped when it arrives.
+    pub async fn select_site(
+        &self,
+        ticket: Ticket,
+        index: usize,
+        switched: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
         let site = lock(&self.book).sites.get(index).cloned();
-        // Reading the password and making the client touch no lock.
-        let opened = site.map(|site| {
-            let client = self.connect(&site);
-            (site, client)
-        });
-        let (request, provider) = {
+        let switch = {
             let mut pane = lock(&self.remote);
-            pane.request += 1;
+            if ticket < pane.latest {
+                return self.remote_view_of(&pane);
+            }
+            pane.latest = ticket;
             pane.version += 1;
-            match opened {
-                None => {
-                    pane.open = None;
-                    return self.remote_view_of(&pane);
+            pane.history = History::default();
+            pane.open = site.clone().map(Remote::new);
+            self.remote_view_of(&pane)
+        };
+        let Some(site) = site else {
+            return switch;
+        };
+        switched(switch);
+        // No lock is held while the password is read and the client is made.
+        let connected = self.connect(&site);
+        let provider = {
+            let mut pane = lock(&self.remote);
+            let current = pane.latest == ticket;
+            let Some(remote) = pane.open.as_mut().filter(|_| current) else {
+                return self.remote_view_of(&pane);
+            };
+            match connected {
+                Ok(provider) => {
+                    remote.provider = Some(provider.clone());
+                    provider
                 }
-                Some((site, Err(message))) => {
-                    pane.open = Some(Remote {
-                        error: Some(message),
-                        ..Remote::new(site, None)
-                    });
+                Err(message) => {
+                    remote.error = Some(message);
+                    pane.version += 1;
                     return self.remote_view_of(&pane);
-                }
-                Some((site, Ok(provider))) => {
-                    pane.open = Some(Remote::new(site, Some(provider.clone())));
-                    (pane.request, provider)
                 }
             }
         };
         let root = RemotePath::root();
         let result = provider.list(&root).await;
-        self.finish_listing(request, root, result)
+        self.finish_listing(ticket, Step::Go, root, result)
     }
 
-    /// Opens row `row` of the cloud pane if it is a folder.
-    pub async fn open_remote(&self, row: usize) -> RemoteView {
-        self.navigate_remote(|remote| {
-            remote
+    /// Opens row `row` of the cloud pane if it is a folder. `seen` is the version of the view
+    /// the row was on: if the pane has changed since, the row may be another one, and nothing
+    /// happens.
+    pub async fn open_remote(&self, ticket: Ticket, row: usize, seen: u64) -> RemoteView {
+        self.navigate_remote(ticket, Step::Go, |pane| {
+            if pane.version != seen {
+                return None;
+            }
+            pane.open
+                .as_ref()?
                 .entries
                 .get(row)
                 .filter(|entry| entry.is_folder)
@@ -398,13 +514,30 @@ impl Session {
         .await
     }
 
-    pub async fn remote_up(&self) -> RemoteView {
-        self.navigate_remote(|remote| remote.dir.parent()).await
+    pub async fn remote_up(&self, ticket: Ticket) -> RemoteView {
+        self.navigate_remote(ticket, Step::Go, |pane| pane.open.as_ref()?.dir.parent())
+            .await
     }
 
-    /// Goes to the folder of cloud breadcrumb `index` (0 is the zone's root).
-    pub async fn remote_crumb(&self, index: usize) -> RemoteView {
-        self.navigate_remote(|remote| remote_ancestor(&remote.dir, index))
+    /// Goes to the folder of cloud breadcrumb `index` (0 is the zone's root), if the crumbs are
+    /// still those of view version `seen`.
+    pub async fn remote_crumb(&self, ticket: Ticket, index: usize, seen: u64) -> RemoteView {
+        self.navigate_remote(ticket, Step::Go, |pane| {
+            if pane.version != seen {
+                return None;
+            }
+            remote_ancestor(&pane.open.as_ref()?.dir, index)
+        })
+        .await
+    }
+
+    pub async fn remote_back(&self, ticket: Ticket) -> RemoteView {
+        self.navigate_remote(ticket, Step::Back, |pane| pane.history.back_to())
+            .await
+    }
+
+    pub async fn remote_forward(&self, ticket: Ticket) -> RemoteView {
+        self.navigate_remote(ticket, Step::Forward, |pane| pane.history.forward_to())
             .await
     }
 
@@ -494,25 +627,25 @@ impl Session {
         self.local_view_of(&lock(&self.local))
     }
 
-    /// Opens row `row` of the This PC pane if it is a folder (or a drive).
-    pub async fn open_local(&self, row: usize) -> LocalView {
-        self.navigate_local(|pane| {
-            pane.entries
-                .get(row)
-                .filter(|entry| entry.is_folder)
-                .map(|entry| {
-                    Some(match &pane.dir {
-                        Some(dir) => dir.join(&entry.name),
-                        None => PathBuf::from(format!("{}\\", entry.name)),
-                    })
-                })
+    /// Opens row `row` of the This PC pane if it is a folder (or a drive), and if the pane is
+    /// still at view version `seen` (as for [`Self::open_remote`]).
+    pub async fn open_local(&self, ticket: Ticket, row: usize, seen: u64) -> LocalView {
+        self.navigate_local(ticket, Step::Go, |pane| {
+            if pane.version != seen {
+                return None;
+            }
+            let entry = pane.entries.get(row).filter(|entry| entry.is_folder)?;
+            Some(Some(match &pane.dir {
+                Some(dir) => dir.join(&entry.name),
+                None => PathBuf::from(format!("{}\\", entry.name)),
+            }))
         })
         .await
     }
 
     /// Goes to the parent folder; from a drive's root, to the list of drives.
-    pub async fn local_up(&self) -> LocalView {
-        self.navigate_local(|pane| {
+    pub async fn local_up(&self, ticket: Ticket) -> LocalView {
+        self.navigate_local(ticket, Step::Go, |pane| {
             pane.dir
                 .as_deref()
                 .map(|dir| dir.parent().map(Path::to_path_buf))
@@ -520,15 +653,29 @@ impl Session {
         .await
     }
 
-    /// Goes to the folder of This PC breadcrumb `index` (0 is the drive).
-    pub async fn local_crumb(&self, index: usize) -> LocalView {
-        self.navigate_local(|pane| {
+    /// Goes to the folder of This PC breadcrumb `index` (0 is the drive), if the crumbs are
+    /// still those of view version `seen`.
+    pub async fn local_crumb(&self, ticket: Ticket, index: usize, seen: u64) -> LocalView {
+        self.navigate_local(ticket, Step::Go, |pane| {
+            if pane.version != seen {
+                return None;
+            }
             pane.dir
                 .as_deref()
                 .and_then(|dir| local_ancestor(dir, index))
                 .map(Some)
         })
         .await
+    }
+
+    pub async fn local_back(&self, ticket: Ticket) -> LocalView {
+        self.navigate_local(ticket, Step::Back, |pane| pane.history.back_to())
+            .await
+    }
+
+    pub async fn local_forward(&self, ticket: Ticket) -> LocalView {
+        self.navigate_local(ticket, Step::Forward, |pane| pane.history.forward_to())
+            .await
     }
 
     /// Reorders the This PC pane (and every later listing in it).
@@ -565,51 +712,69 @@ impl Session {
         client.map_err(|e| describe(&e, &site.zone, &site.host, &RemotePath::root()))
     }
 
-    /// Lists the folder `pick` chooses in the open site (if it chooses one) and goes there.
+    /// Lists the folder `pick` chooses in the open site (if it chooses one) and goes there by
+    /// `step`. A request older than one that has taken effect is dropped; a request that goes
+    /// nowhere takes no effect.
     async fn navigate_remote(
         &self,
-        pick: impl FnOnce(&Remote) -> Option<RemotePath>,
+        ticket: Ticket,
+        step: Step,
+        pick: impl FnOnce(&RemotePane) -> Option<RemotePath>,
     ) -> RemoteView {
-        let (request, provider, dir) = {
+        let (provider, dir) = {
             let mut pane = lock(&self.remote);
-            let target = pane
-                .open
-                .as_ref()
-                .and_then(|remote| Some((remote.provider.clone()?, pick(remote)?)));
-            let Some((provider, dir)) = target else {
+            if ticket < pane.latest {
+                return self.remote_view_of(&pane);
+            }
+            let provider = pane.open.as_ref().and_then(|r| r.provider.clone());
+            let Some((provider, dir)) = provider.zip(pick(&pane)) else {
                 return self.remote_view_of(&pane);
             };
-            pane.request += 1;
-            (pane.request, provider, dir)
+            pane.latest = ticket;
+            (provider, dir)
         };
         let result = provider.list(&dir).await;
-        self.finish_listing(request, dir, result)
+        self.finish_listing(ticket, step, dir, result)
     }
 
-    /// Takes in the answer to request `request`, a listing of `dir`. If the user has gone
-    /// elsewhere since, the answer is dropped and the pane stays as it is. Otherwise, on success
-    /// the pane moves to `dir`; on failure it stays where it was and says why.
+    /// Takes in the answer to the listing of `dir` that request `ticket` asked for. If a later
+    /// request has taken effect since, the answer is dropped and the pane stays as it is.
+    /// Otherwise, on success the pane moves to `dir`. A folder that is not there leaves the pane
+    /// where it was, connected; any other failure leaves it there, not connected.
     fn finish_listing(
         &self,
-        request: u64,
+        ticket: Ticket,
+        step: Step,
         dir: RemotePath,
         result: Result<Listing, ProviderError>,
     ) -> RemoteView {
-        let worked = result.is_ok();
+        // A missing folder is an answer from the server: the site itself is fine.
+        let healthy = !matches!(&result, Err(e) if *e != ProviderError::NotFound);
         let (view, site) = {
             let mut pane = lock(&self.remote);
             let (key, ascending) = pane.sort;
-            let current = pane.request == request;
+            let current = pane.latest == ticket;
             let Some(remote) = pane.open.as_mut().filter(|_| current) else {
                 return self.remote_view_of(&pane);
             };
+            let mut left = None;
             match result {
                 Ok(listing) => {
-                    remote.dir = dir;
+                    if remote.dir != dir {
+                        left = Some(std::mem::replace(&mut remote.dir, dir));
+                    }
                     remote.entries = listing.entries;
                     sort_remote_entries(&mut remote.entries, key, ascending);
                     remote.info = Some(listing.info);
                     remote.error = None;
+                }
+                Err(ProviderError::NotFound) => {
+                    remote.error = Some(describe(
+                        &ProviderError::NotFound,
+                        &remote.site.zone,
+                        &remote.site.host,
+                        &dir,
+                    ));
                 }
                 Err(error) => {
                     remote.info = None;
@@ -618,10 +783,13 @@ impl Session {
                 }
             }
             let site = remote.site.id.clone();
+            if let Some(left) = left {
+                pane.history.record(step, left);
+            }
             pane.version += 1;
             (self.remote_view_of(&pane), site)
         };
-        lock(&self.book).healthy.insert(site, worked);
+        lock(&self.book).healthy.insert(site, healthy);
         view
     }
 
@@ -637,38 +805,49 @@ impl Session {
         let service = match site.provider {
             ProviderKind::Bunny => "Bunny Storage",
         };
+        let (connection, status_right) = match (&remote.info, &remote.error) {
+            (Some(info), _) => (
+                format!("HTTPS · {} ms", info.latency.as_millis()),
+                format!("{} · {}", info.http_version, site.host),
+            ),
+            (None, Some(_)) => ("Not connected".to_owned(), String::new()),
+            (None, None) => ("Connecting…".to_owned(), site.host.clone()),
+        };
         RemoteView {
             version: pane.version,
             rows: rows_from_remote_sorted(&remote.entries, (self.now)(), key, ascending),
             crumbs: remote_crumbs(&site.zone, &remote.dir),
-            connection: match (&remote.info, &remote.error) {
-                (Some(info), _) => format!("HTTPS · {} ms", info.latency.as_millis()),
-                (None, Some(_)) => "Not connected".to_owned(),
-                (None, None) => String::new(),
-            },
+            connection,
+            connection_ok: remote.info.is_some() || remote.error.is_none(),
             endpoint: format!("{service} · {}", site.zone),
             chip: format!("https://{}", site.host),
-            status_right: remote.info.as_ref().map_or_else(String::new, |info| {
-                format!("{} · {}", info.http_version, site.host)
-            }),
+            status_right,
+            can_back: !pane.history.back.is_empty(),
+            can_forward: !pane.history.forward.is_empty(),
             error: remote.error.clone(),
         }
     }
 
     /// Lists the place `pick` chooses (if it chooses one; `None` inside is the list of drives) on
-    /// tokio's blocking threads and goes there. As for the cloud pane, the answer is dropped if
-    /// the user has gone elsewhere since, and a failure leaves the pane where it was.
+    /// tokio's blocking threads and goes there by `step`. As for the cloud pane, a request older
+    /// than one that has taken effect is dropped, an answer is used only while its request is
+    /// the latest, and a failure leaves the pane where it was.
     async fn navigate_local(
         &self,
+        ticket: Ticket,
+        step: Step,
         pick: impl FnOnce(&LocalPane) -> Option<Option<PathBuf>>,
     ) -> LocalView {
-        let (request, target) = {
+        let target = {
             let mut pane = lock(&self.local);
+            if ticket < pane.latest {
+                return self.local_view_of(&pane);
+            }
             let Some(target) = pick(&pane) else {
                 return self.local_view_of(&pane);
             };
-            pane.request += 1;
-            (pane.request, target)
+            pane.latest = ticket;
+            target
         };
         let listed = match &target {
             None => Ok(LocalListing {
@@ -683,13 +862,16 @@ impl Session {
             }
         };
         let mut pane = lock(&self.local);
-        if pane.request != request {
+        if pane.latest != ticket {
             return self.local_view_of(&pane);
         }
         match listed {
             Ok(listing) => {
                 let (key, ascending) = pane.sort;
-                pane.dir = target;
+                if pane.dir != target {
+                    let left = std::mem::replace(&mut pane.dir, target);
+                    pane.history.record(step, left);
+                }
                 pane.entries = listing.entries;
                 sort_rows(&mut pane.entries, key, ascending);
                 pane.skipped = listing.skipped;
@@ -713,6 +895,8 @@ impl Session {
             rows: rows_from_local_sorted(&pane.entries, (self.now)(), key, ascending),
             crumbs: pane.dir.as_deref().map(local_crumbs).unwrap_or_default(),
             status: items_status(pane.entries.len(), pane.skipped),
+            can_back: !pane.history.back.is_empty(),
+            can_forward: !pane.history.forward.is_empty(),
             error: pane.error.clone(),
         }
     }
@@ -724,14 +908,49 @@ pub(crate) mod fakes {
     use chrono::NaiveDate;
     use httporter_core::{ByteStream, Capabilities, MockProvider, UploadOptions, UploadSource};
     use httporter_platform::MemoryStore;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
 
     /// Hands out storages by zone (a default one for every other zone) and remembers the
     /// configurations it was given.
     pub(crate) struct FakeFactory {
         provider: Arc<dyn StorageProvider>,
         by_zone: Mutex<HashMap<String, Arc<dyn StorageProvider>>>,
+        held: Mutex<HashMap<String, Held>>,
         configs: Mutex<Vec<BunnyConfig>>,
+    }
+
+    /// The factory's side of a [`Hold`].
+    struct Held {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    /// Holds the next client made for one zone inside `bunny()` (where the real factory reads
+    /// no password but builds HTTP clients, which takes a while), until released.
+    pub(crate) struct Hold {
+        entered: mpsc::Receiver<()>,
+        release: mpsc::Sender<()>,
+    }
+
+    impl Hold {
+        /// Waits (off the async threads) until the client is being made.
+        pub(crate) async fn entered(&self) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match self.entered.try_recv() {
+                    Ok(()) => return,
+                    Err(mpsc::TryRecvError::Empty) if std::time::Instant::now() < deadline => {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                    Err(e) => panic!("the client was never made: {e:?}"),
+                }
+            }
+        }
+
+        pub(crate) fn release(&self) {
+            self.release.send(()).expect("the factory is still waiting");
+        }
     }
 
     impl FakeFactory {
@@ -739,6 +958,7 @@ pub(crate) mod fakes {
             Arc::new(Self {
                 provider,
                 by_zone: Mutex::new(HashMap::new()),
+                held: Mutex::new(HashMap::new()),
                 configs: Mutex::new(Vec::new()),
             })
         }
@@ -746,6 +966,24 @@ pub(crate) mod fakes {
         /// Hands out `provider` for `zone` from now on.
         pub(crate) fn serve(&self, zone: &str, provider: Arc<dyn StorageProvider>) {
             lock(&self.by_zone).insert(zone.to_owned(), provider);
+        }
+
+        /// Holds the next client made for `zone` until the returned [`Hold`] releases it. The
+        /// hold blocks the thread it happens on, so tests using it run on several threads.
+        pub(crate) fn hold(&self, zone: &str) -> Hold {
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            lock(&self.held).insert(
+                zone.to_owned(),
+                Held {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            );
+            Hold {
+                entered: entered_rx,
+                release: release_tx,
+            }
         }
 
         /// (zone, host, password) of every configuration handed in so far.
@@ -759,6 +997,11 @@ pub(crate) mod fakes {
 
     impl ProviderFactory for FakeFactory {
         fn bunny(&self, cfg: BunnyConfig) -> Result<Arc<dyn StorageProvider>, ProviderError> {
+            let held = lock(&self.held).remove(&cfg.zone);
+            if let Some(held) = held {
+                let _ = held.entered.send(());
+                let _ = held.release.recv();
+            }
             let provider = lock(&self.by_zone)
                 .get(&cfg.zone)
                 .cloned()

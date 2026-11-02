@@ -105,29 +105,56 @@ fn space_on_a_site_row_selects_it() {
 }
 
 #[test]
-fn add_site_and_settings_work_from_the_keyboard() {
+fn add_site_works_from_the_keyboard() {
     let w = window_with_two_sites();
     let added = Rc::new(Cell::new(0));
-    let settings = Rc::new(Cell::new(0));
     w.on_add_site({
         let added = added.clone();
         move || added.set(added.get() + 1)
     });
-    w.on_open_settings({
-        let settings = settings.clone();
-        move || settings.set(settings.get() + 1)
-    });
     tab(&w, 4);
     tap(w.window(), Key::Return);
-    assert_eq!((added.get(), settings.get()), (1, 0));
+    assert_eq!(added.get(), 1);
     // Add Site opens a modal sheet; closing it puts the focus back on the button.
     assert!(w.get_add_site_open());
     tap(w.window(), Key::Escape);
     assert!(!w.get_add_site_open());
     slint::platform::update_timers_and_animations();
-    tab(&w, 1);
     tap(w.window(), Key::Space);
-    assert_eq!((added.get(), settings.get()), (1, 1));
+    assert_eq!(added.get(), 2);
+}
+
+/// Ruling P22: there is no Settings window yet, so the gear is shown turned off and says why,
+/// instead of doing nothing when pressed.
+#[test]
+fn settings_is_turned_off_until_it_exists_and_says_so() {
+    let w = window_with_two_sites();
+    let opened = Rc::new(Cell::new(0));
+    w.on_open_settings({
+        let opened = opened.clone();
+        move || opened.set(opened.get() + 1)
+    });
+    let gear = ElementHandle::find_by_accessible_label(&w, "Settings")
+        .next()
+        .expect("the Settings button is shown");
+    assert_eq!(gear.accessible_role(), Some(AccessibleRole::Button));
+    assert_eq!(gear.accessible_enabled(), Some(false));
+    assert_eq!(
+        gear.accessible_description().as_deref(),
+        Some("Settings arrive in a later version")
+    );
+    // Not a Tab stop: after Add Site comes the This PC list.
+    assert!(!w.get_local_pane_active());
+    tab(&w, 5);
+    assert!(
+        w.get_local_pane_active(),
+        "the focus is in the This PC list"
+    );
+    // Neither the keyboard, the mouse nor assistive technology can press it.
+    tap(w.window(), Key::Return);
+    click(w.window(), center(&gear), 1);
+    gear.invoke_accessible_default_action();
+    assert_eq!(opened.get(), 0);
 }
 
 #[test]
@@ -256,11 +283,11 @@ fn window_with_panes(local: usize, remote: usize) -> AppWindow {
     w
 }
 
-// Tab order with no sites: sidebar toggle, Add Site, Settings (Back, Forward and Publish are
-// disabled), then each pane: its list, then its Name, Size and Modified headers.
-const LOCAL_LIST: usize = 4;
-const LOCAL_NAME_HEADER: usize = 5;
-const REMOTE_LIST: usize = 8;
+// Tab order with no sites: sidebar toggle, Add Site (Back, Forward, Publish and Settings are
+// turned off), then each pane: its list, then its Name, Size and Modified headers.
+const LOCAL_LIST: usize = 3;
+const LOCAL_NAME_HEADER: usize = 4;
+const REMOTE_LIST: usize = 7;
 
 fn list_items(w: &impl ComponentHandle) -> Vec<ElementHandle> {
     ElementQuery::from_root(w)
@@ -958,6 +985,97 @@ fn a_clicked_breadcrumb_hands_the_focus_to_the_list() {
     assert_eq!(w.get_local_selected(), -1);
     tap(w.window(), Key::DownArrow);
     assert_eq!(w.get_local_selected(), 0);
+}
+
+fn toolbar_button(w: &AppWindow, label: &str) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(w, label)
+        .find(|e| e.accessible_role() == Some(AccessibleRole::Button))
+        .unwrap_or_else(|| panic!("no {label} button"))
+}
+
+/// Ruling P22: Back and Forward follow the pane last used or focused, the cloud pane at first.
+#[test]
+fn back_and_forward_are_enabled_for_the_pane_last_used() {
+    let w = window_with_panes(3, 3);
+    w.set_remote_can_go_back(true);
+    w.set_local_can_go_forward(true);
+    let enabled = |label| toolbar_button(&w, label).accessible_enabled();
+    assert_eq!(
+        (enabled("Back"), enabled("Forward")),
+        (Some(true), Some(false))
+    );
+
+    // A click in This PC makes it the pane they act on.
+    click(w.window(), center(&row_starting(&w, "local-00001")), 1);
+    assert!(w.get_local_pane_active());
+    assert_eq!(
+        (enabled("Back"), enabled("Forward")),
+        (Some(false), Some(true))
+    );
+
+    // So does the keyboard: Tab into the cloud pane's list.
+    tab(&w, 4);
+    assert!(!w.get_local_pane_active());
+    assert_eq!(
+        (enabled("Back"), enabled("Forward")),
+        (Some(true), Some(false))
+    );
+
+    let went = Rc::new(std::cell::RefCell::new(Vec::new()));
+    for (name, back) in [("back", true), ("forward", false)] {
+        let went = went.clone();
+        let record = move || went.borrow_mut().push(name);
+        if back {
+            w.on_go_back(record);
+        } else {
+            w.on_go_forward(record);
+        }
+    }
+    click(w.window(), center(&toolbar_button(&w, "Back")), 1);
+    click(w.window(), center(&toolbar_button(&w, "Forward")), 1);
+    assert_eq!(*went.borrow(), ["back"]);
+}
+
+/// Alt+Left and Alt+Right press Back and Forward, the Windows way, while they can be pressed.
+#[test]
+fn alt_left_and_alt_right_go_back_and_forward() {
+    let w = window_with_panes(3, 3);
+    let went = Rc::new(std::cell::RefCell::new(Vec::new()));
+    w.on_go_back({
+        let went = went.clone();
+        move || went.borrow_mut().push("back")
+    });
+    w.on_go_forward({
+        let went = went.clone();
+        move || went.borrow_mut().push("forward")
+    });
+    let with_alt = |key: Key| {
+        w.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Alt.into(),
+        });
+        tap(w.window(), key);
+        w.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Alt.into(),
+        });
+    };
+    tab(&w, LOCAL_LIST);
+    with_alt(Key::LeftArrow);
+    assert!(went.borrow().is_empty(), "nowhere to go back to");
+
+    w.set_local_can_go_back(true);
+    w.set_local_can_go_forward(true);
+    with_alt(Key::LeftArrow);
+    with_alt(Key::RightArrow);
+    assert_eq!(*went.borrow(), ["back", "forward"]);
+    // Without Alt, the arrows still move the selection and go nowhere.
+    tap(w.window(), Key::LeftArrow);
+    assert_eq!(went.borrow().len(), 2);
+
+    // Not behind the Add Site sheet.
+    w.set_add_site_open(true);
+    slint::platform::update_timers_and_animations();
+    with_alt(Key::LeftArrow);
+    assert_eq!(went.borrow().len(), 2);
 }
 
 /// Every user-facing string in the .slint sources must go through @tr() so it can be

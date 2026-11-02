@@ -103,6 +103,17 @@ export component AppWindow inherits Window {
     // Bumped by `show_field_error` each time it shows an error; the sheet then focuses that field.
     in property <int> add-site-error-serial;
 
+    // Back and Forward in the toolbar (and Alt+Left / Alt+Right) move through the folders of the
+    // pane last used or focused, Finder-style: the This PC pane when `local-pane-active`, else the
+    // cloud pane (the one they act on at first). The app says where each pane can go.
+    in-out property <bool> local-pane-active: false;
+    in property <bool> local-can-go-back;
+    in property <bool> local-can-go-forward;
+    in property <bool> remote-can-go-back;
+    in property <bool> remote-can-go-forward;
+    callback go-back();
+    callback go-forward();
+
     callback site-selected(int);
     callback add-site();
     callback open-settings();
@@ -142,96 +153,136 @@ export component AppWindow inherits Window {
     // Absolute y of the cloud pane's top edge.
     out property <length> remote-pane-y: remote-pane.absolute-position.y;
     property <bool> has-selection: root.selected-site >= 0 && root.selected-site < root.sites.length;
+    property <bool> can-go-back: root.local-pane-active ? root.local-can-go-back : root.remote-can-go-back;
+    property <bool> can-go-forward: root.local-pane-active ? root.local-can-go-forward : root.remote-can-go-forward;
 
-    VerticalLayout {
-        Toolbar {
-            title: root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter");
-            subtitle: root.endpoint-text;
-            connection-text: root.connection-text;
-            connection-ok: root.connection-ok;
-            toggle-sidebar => { root.sidebar-visible = !root.sidebar-visible; }
-        }
-
-        HorizontalLayout {
-            // The main area already pads itself by 8 px, so only the sidebar needs the left margin.
-            padding-left: root.sidebar-visible ? 8px : 0px;
-            padding-top: 8px;
-            padding-bottom: 8px;
-
-            if root.sidebar-visible: Sidebar {
-                width: 220px;
-                sites: root.sites;
-                selected-site: root.selected-site;
-                sheet-open: root.add-site-open;
-                site-selected(index) => {
-                    root.selected-site = index;
-                    root.site-selected(index);
-                }
-                add-site => {
-                    root.add-site-open = true;
-                    root.add-site();
-                }
-                open-settings => { root.open-settings(); }
-            }
-
-            // Main area: the two file panes.
-            VerticalLayout {
-                padding: 8px;
-                spacing: 8px;
-
-                if root.error-text != "": ErrorBanner { text: root.error-text; }
-
-                // Side by side when each pane can have the mockup's 420 px, stacked otherwise
-                // (mockup `.panes`: a wrapping row). The panes are placed by hand rather than in a
-                // layout so that they keep their state when the window crosses that width.
-                panes := Rectangle {
-                    property <bool> side-by-side: self.width >= 2 * 420px + 8px;
-
-                    vertical-stretch: 1;
-
-                    Pane {
-                        x: 0px;
-                        y: 0px;
-                        width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
-                        height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
-                        title: @tr("This PC");
-                        icon: Icons.pc;
-                        crumbs: root.local-crumbs;
-                        rows: root.local-rows;
-                        selected <=> root.local-selected;
-                        sort-column <=> root.local-sort-column;
-                        sort-ascending <=> root.local-sort-ascending;
-                        open(index) => { root.open-local(index); }
-                        up => { root.local-up(); }
-                        crumb-clicked(index) => { root.local-crumb-clicked(index); }
-                        sort(column) => { root.sort-local(column); }
+    // Alt+Left and Alt+Right anywhere in the window (but not on the Add Site sheet, which sits
+    // outside this scope): the Windows keys for Back and Forward. Not a Tab stop itself.
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            if (event.modifiers.alt && !event.modifiers.control && !event.modifiers.meta) {
+                if (event.text == Key.LeftArrow) {
+                    if (!event.repeat && root.can-go-back) {
+                        root.go-back();
                     }
-                    remote-pane := Pane {
-                        x: panes.side-by-side ? (panes.width + 8px) / 2 : 0px;
-                        y: panes.side-by-side ? 0px : (panes.height + 8px) / 2;
-                        width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
-                        height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
-                        title: root.has-selection ? root.sites[root.selected-site].name : @tr("No site selected");
-                        icon: Icons.cloud;
-                        crumbs: root.remote-crumbs;
-                        rows: root.remote-rows;
-                        header-chip: root.remote-chip;
-                        drop-hover: root.drop-hover-remote;
-                        selected <=> root.remote-selected;
-                        sort-column <=> root.remote-sort-column;
-                        sort-ascending <=> root.remote-sort-ascending;
-                        open(index) => { root.open-remote(index); }
-                        up => { root.remote-up(); }
-                        crumb-clicked(index) => { root.remote-crumb-clicked(index); }
-                        sort(column) => { root.sort-remote(column); }
+                    return accept;
+                }
+                if (event.text == Key.RightArrow) {
+                    if (!event.repeat && root.can-go-forward) {
+                        root.go-forward();
                     }
+                    return accept;
                 }
             }
+            return reject;
         }
 
-        StatusBar {
-            left-text: root.status-left;
-            right-text: root.status-right;
+        VerticalLayout {
+            Toolbar {
+                title: root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter");
+                subtitle: root.endpoint-text;
+                connection-text: root.connection-text;
+                connection-ok: root.connection-ok;
+                can-go-back: root.can-go-back;
+                can-go-forward: root.can-go-forward;
+                toggle-sidebar => { root.sidebar-visible = !root.sidebar-visible; }
+                go-back => { root.go-back(); }
+                go-forward => { root.go-forward(); }
+            }
+
+            HorizontalLayout {
+                // The main area already pads itself by 8 px, so only the sidebar needs the left margin.
+                padding-left: root.sidebar-visible ? 8px : 0px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+
+                if root.sidebar-visible: Sidebar {
+                    width: 220px;
+                    sites: root.sites;
+                    selected-site: root.selected-site;
+                    sheet-open: root.add-site-open;
+                    site-selected(index) => {
+                        root.selected-site = index;
+                        root.site-selected(index);
+                    }
+                    add-site => {
+                        root.add-site-open = true;
+                        root.add-site();
+                    }
+                    open-settings => { root.open-settings(); }
+                }
+
+                // Main area: the two file panes.
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+
+                    if root.error-text != "": ErrorBanner { text: root.error-text; }
+
+                    // Side by side when each pane can have the mockup's 420 px, stacked otherwise
+                    // (mockup `.panes`: a wrapping row). The panes are placed by hand rather than in a
+                    // layout so that they keep their state when the window crosses that width.
+                    panes := Rectangle {
+                        property <bool> side-by-side: self.width >= 2 * 420px + 8px;
+
+                        vertical-stretch: 1;
+
+                        Pane {
+                            x: 0px;
+                            y: 0px;
+                            width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
+                            height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
+                            title: @tr("This PC");
+                            changed has-focus => {
+                                if (self.has-focus) {
+                                    root.local-pane-active = true;
+                                }
+                            }
+                            icon: Icons.pc;
+                            crumbs: root.local-crumbs;
+                            rows: root.local-rows;
+                            selected <=> root.local-selected;
+                            sort-column <=> root.local-sort-column;
+                            sort-ascending <=> root.local-sort-ascending;
+                            open(index) => { root.open-local(index); }
+                            up => { root.local-up(); }
+                            crumb-clicked(index) => { root.local-crumb-clicked(index); }
+                            sort(column) => { root.sort-local(column); }
+                        }
+                        remote-pane := Pane {
+                            x: panes.side-by-side ? (panes.width + 8px) / 2 : 0px;
+                            y: panes.side-by-side ? 0px : (panes.height + 8px) / 2;
+                            width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
+                            height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
+                            title: root.has-selection ? root.sites[root.selected-site].name : @tr("No site selected");
+                            changed has-focus => {
+                                if (self.has-focus) {
+                                    root.local-pane-active = false;
+                                }
+                            }
+                            icon: Icons.cloud;
+                            crumbs: root.remote-crumbs;
+                            rows: root.remote-rows;
+                            header-chip: root.remote-chip;
+                            drop-hover: root.drop-hover-remote;
+                            selected <=> root.remote-selected;
+                            sort-column <=> root.remote-sort-column;
+                            sort-ascending <=> root.remote-sort-ascending;
+                            open(index) => { root.open-remote(index); }
+                            up => { root.remote-up(); }
+                            crumb-clicked(index) => { root.remote-crumb-clicked(index); }
+                            sort(column) => { root.sort-remote(column); }
+                        }
+                    }
+                }
+            }
+
+            StatusBar {
+                left-text: root.status-left;
+                right-text: root.status-right;
+            }
         }
     }
 

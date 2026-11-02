@@ -100,6 +100,9 @@ export component Sidebar inherits Rectangle {
     // True while the Add Site sheet is open over the window. When it closes, the keyboard focus
     // goes back to the Add Site button, which is where the user started.
     in property <bool> sheet-open;
+    // There is no Settings window yet: until there is, the button is shown turned off and says
+    // why, rather than doing nothing when pressed.
+    in property <bool> settings-available: false;
     callback site-selected(int);
     callback add-site();
     callback open-settings();
@@ -164,6 +167,8 @@ export component Sidebar inherits Rectangle {
                 ToolButton {
                     icon: Icons.gear;
                     label: @tr("Settings");
+                    description: root.settings-available ? "" : @tr("Settings arrive in a later version");
+                    enabled: root.settings-available;
                     clicked => { root.open-settings(); }
                 }
             }

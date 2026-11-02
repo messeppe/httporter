@@ -21,7 +21,9 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 use crate::add_site::{AddSiteForm, ValidSite, show_field_error};
-use crate::session::{LocalView, RemoteView, Session, SiteItemData, endpoint_preview, items};
+use crate::session::{
+    LocalView, RemoteView, Session, SiteItemData, Ticket, endpoint_preview, items,
+};
 use crate::sort::SortKey;
 use crate::viewmodel::{RowData, sort_key_for_column, to_slint_rows};
 use crate::{AppWindow, FileRow, SiteItem};
@@ -33,27 +35,20 @@ enum Change {
     Sorted,
 }
 
-/// Something the cloud pane was asked to do.
+/// Something the cloud pane was asked to do. Clicks on a row or a crumb carry the version of the
+/// view they were on (see [`RemoteView::version`]).
 #[derive(Clone, Copy, Debug)]
 enum RemoteOp {
     Select(usize),
-    Open(usize),
+    Open(usize, u64),
     Up,
-    Crumb(usize),
+    Crumb(usize, u64),
+    Back,
+    Forward,
     Sort(SortKey, bool),
 }
 
 impl RemoteOp {
-    async fn run(self, session: &Session) -> RemoteView {
-        match self {
-            Self::Select(index) => session.select_site(index).await,
-            Self::Open(row) => session.open_remote(row).await,
-            Self::Up => session.remote_up().await,
-            Self::Crumb(index) => session.remote_crumb(index).await,
-            Self::Sort(key, ascending) => session.sort_remote(key, ascending),
-        }
-    }
-
     fn change(self) -> Change {
         match self {
             Self::Sort(..) => Change::Sorted,
@@ -62,21 +57,25 @@ impl RemoteOp {
     }
 }
 
-/// Something the This PC pane was asked to do.
+/// Something the This PC pane was asked to do (as [`RemoteOp`]).
 #[derive(Clone, Copy, Debug)]
 enum LocalOp {
-    Open(usize),
+    Open(usize, u64),
     Up,
-    Crumb(usize),
+    Crumb(usize, u64),
+    Back,
+    Forward,
     Sort(SortKey, bool),
 }
 
 impl LocalOp {
-    async fn run(self, session: &Session) -> LocalView {
+    async fn run(self, session: &Session, ticket: Ticket) -> LocalView {
         match self {
-            Self::Open(row) => session.open_local(row).await,
-            Self::Up => session.local_up().await,
-            Self::Crumb(index) => session.local_crumb(index).await,
+            Self::Open(row, seen) => session.open_local(ticket, row, seen).await,
+            Self::Up => session.local_up(ticket).await,
+            Self::Crumb(index, seen) => session.local_crumb(ticket, index, seen).await,
+            Self::Back => session.local_back(ticket).await,
+            Self::Forward => session.local_forward(ticket).await,
             Self::Sort(key, ascending) => session.sort_local(key, ascending),
         }
     }
@@ -166,13 +165,29 @@ impl Ctx {
         if moves && self.opening.is_running() {
             return;
         }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_local_pane_active(false);
+        }
+        // Taken here, at the click, so that requests count in the order the user made them.
+        let ticket = self.session.remote_ticket();
         let (session, shown, ui) = (self.session.clone(), self.shown.clone(), self.ui.clone());
         let task = self.rt.spawn(async move {
-            let view = op.run(&session).await;
-            // An error means the window is gone (or, in tests, that there is no event loop).
-            let _ = ui.upgrade_in_event_loop(move |ui| {
-                show_remote(&ui, &shown, &session, &view, op.change());
-            });
+            let view = match op {
+                RemoteOp::Select(index) => {
+                    let switched = {
+                        let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
+                        move |view| post_remote(&ui, &shown, &session, view, Change::Listed)
+                    };
+                    session.select_site(ticket, index, switched).await
+                }
+                RemoteOp::Open(row, seen) => session.open_remote(ticket, row, seen).await,
+                RemoteOp::Up => session.remote_up(ticket).await,
+                RemoteOp::Crumb(index, seen) => session.remote_crumb(ticket, index, seen).await,
+                RemoteOp::Back => session.remote_back(ticket).await,
+                RemoteOp::Forward => session.remote_forward(ticket).await,
+                RemoteOp::Sort(key, ascending) => session.sort_remote(key, ascending),
+            };
+            post_remote(&ui, &shown, &session, view, op.change());
         });
         if matches!(op, RemoteOp::Select(_)) {
             // A site picked before this one is of no interest any more. (Older listings within a
@@ -182,13 +197,44 @@ impl Ctx {
     }
 
     fn local(&self, op: LocalOp) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_local_pane_active(true);
+        }
+        let ticket = self.session.local_ticket();
         let (session, shown, ui) = (self.session.clone(), self.shown.clone(), self.ui.clone());
         self.rt.spawn(async move {
-            let view = op.run(&session).await;
+            let view = op.run(&session, ticket).await;
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 show_local(&ui, &shown, &session, &view, op.change());
             });
         });
+    }
+
+    /// Back or Forward, from the toolbar or the keyboard, for the pane last used or focused.
+    fn travel(&self, back: bool) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        if ui.get_local_pane_active() {
+            self.local(if back {
+                LocalOp::Back
+            } else {
+                LocalOp::Forward
+            });
+        } else {
+            self.remote(if back {
+                RemoteOp::Back
+            } else {
+                RemoteOp::Forward
+            });
+        }
+    }
+
+    /// The version of the view on screen in the cloud pane, for a click on its rows or crumbs.
+    fn remote_seen(&self) -> u64 {
+        lock(&self.shown).remote
+    }
+
+    fn local_seen(&self) -> u64 {
+        lock(&self.shown).local
     }
 
     /// Starts a run of the sheet: marks it busy at once (the sheet turns its buttons off on that,
@@ -337,7 +383,7 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         let ctx = ctx.clone();
         move |index| {
             if let Some(index) = row(index) {
-                ctx.remote(RemoteOp::Open(index));
+                ctx.remote(RemoteOp::Open(index, ctx.remote_seen()));
             }
         }
     });
@@ -349,7 +395,7 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         let ctx = ctx.clone();
         move |index| {
             if let Some(index) = row(index) {
-                ctx.remote(RemoteOp::Crumb(index));
+                ctx.remote(RemoteOp::Crumb(index, ctx.remote_seen()));
             }
         }
     });
@@ -367,7 +413,7 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         let ctx = ctx.clone();
         move |index| {
             if let Some(index) = row(index) {
-                ctx.local(LocalOp::Open(index));
+                ctx.local(LocalOp::Open(index, ctx.local_seen()));
             }
         }
     });
@@ -379,7 +425,7 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         let ctx = ctx.clone();
         move |index| {
             if let Some(index) = row(index) {
-                ctx.local(LocalOp::Crumb(index));
+                ctx.local(LocalOp::Crumb(index, ctx.local_seen()));
             }
         }
     });
@@ -391,6 +437,15 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
                 ctx.local(LocalOp::Sort(sort_key_for_column(column), ascending));
             }
         }
+    });
+
+    ui.on_go_back({
+        let ctx = ctx.clone();
+        move || ctx.travel(true)
+    });
+    ui.on_go_forward({
+        let ctx = ctx.clone();
+        move || ctx.travel(false)
     });
 
     ui.on_add_site_changed({
@@ -423,6 +478,19 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         ctx.remote(RemoteOp::Select(0));
     }
     session
+}
+
+/// Hands a cloud view to the window (from a task).
+fn post_remote(
+    ui: &Weak<AppWindow>,
+    shown: &Arc<Mutex<Shown>>,
+    session: &Arc<Session>,
+    view: RemoteView,
+    change: Change,
+) {
+    let (shown, session) = (shown.clone(), session.clone());
+    // An error means the window is gone (or, in tests, that there is no event loop).
+    let _ = ui.upgrade_in_event_loop(move |ui| show_remote(&ui, &shown, &session, &view, change));
 }
 
 /// Puts a cloud view on screen, unless the window already shows a newer one; then brings the
@@ -520,10 +588,12 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     ui.set_remote_crumbs(strings(&view.crumbs));
     ui.set_remote_selected(selected);
     ui.set_connection_text(view.connection.as_str().into());
-    ui.set_connection_ok(!failed);
+    ui.set_connection_ok(view.connection_ok);
     ui.set_endpoint_text(view.endpoint.as_str().into());
     ui.set_remote_chip(view.chip.as_str().into());
     ui.set_status_right(view.status_right.as_str().into());
+    ui.set_remote_can_go_back(view.can_back);
+    ui.set_remote_can_go_forward(view.can_forward);
     if change == Change::Listed && !failed {
         ui.set_status_left(items(view.rows.len()).into());
     }
@@ -542,6 +612,8 @@ fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
     ui.set_local_rows(to_slint_rows(&view.rows));
     ui.set_local_crumbs(strings(&view.crumbs));
     ui.set_local_selected(selected);
+    ui.set_local_can_go_back(view.can_back);
+    ui.set_local_can_go_forward(view.can_forward);
     if change == Change::Listed && !failed {
         ui.set_status_left(view.status.as_str().into());
     }

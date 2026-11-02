@@ -12,7 +12,7 @@ use tokio::runtime::Runtime;
 struct Bound {
     ui: AppWindow,
     /// Runs the tasks the window starts; they stop when it is dropped.
-    _rt: Runtime,
+    rt: Runtime,
     session: Arc<Session>,
     factory: Arc<FakeFactory>,
 }
@@ -25,7 +25,7 @@ fn bound(provider: Arc<dyn StorageProvider>) -> Bound {
     let session = install(&ui, rt.handle().clone(), session);
     Bound {
         ui,
-        _rt: rt,
+        rt,
         session,
         factory,
     }
@@ -321,9 +321,12 @@ fn a_remote_view_is_applied_to_the_window() {
         rows: vec![row("wp-content", true), row("index.html", false)],
         crumbs: vec!["testzone".into(), "wp-content".into()],
         connection: "HTTPS · 21 ms".into(),
+        connection_ok: true,
         endpoint: "Bunny Storage · testzone".into(),
         chip: "https://sg.storage.bunnycdn.com".into(),
         status_right: "HTTP/2 · sg.storage.bunnycdn.com".into(),
+        can_back: true,
+        can_forward: false,
         error: None,
     };
     ui.set_remote_selected(1);
@@ -337,10 +340,12 @@ fn a_remote_view_is_applied_to_the_window() {
     assert_eq!(ui.get_status_right(), "HTTP/2 · sg.storage.bunnycdn.com");
     assert_eq!(ui.get_status_left(), "2 items");
     assert_eq!(ui.get_remote_selected(), -1);
+    assert!(ui.get_remote_can_go_back() && !ui.get_remote_can_go_forward());
 
-    // A failure turns the pill orange; the item count is left alone.
+    // A failed connection turns the pill orange; the item count is left alone.
     let failed = RemoteView {
         connection: "Not connected".into(),
+        connection_ok: false,
         status_right: String::new(),
         error: Some("Couldn't reach x: y".into()),
         rows: vec![row("a", false)],
@@ -361,10 +366,13 @@ fn a_local_view_is_applied_to_the_window() {
         rows: vec![row("sub", true), row("a.txt", false)],
         crumbs: vec!["D:".into(), "site".into()],
         status: "2 items · 1 couldn't be read".into(),
+        can_back: false,
+        can_forward: true,
         error: None,
     };
     ui.set_local_selected(0);
     apply_local(&ui, &view, Change::Listed);
+    assert!(!ui.get_local_can_go_back() && ui.get_local_can_go_forward());
     assert_eq!(ui.get_local_rows().row_count(), 2);
     assert_eq!(strings(ui.get_local_crumbs()), ["D:", "site"]);
     assert_eq!(ui.get_status_left(), "2 items · 1 couldn't be read");
@@ -417,4 +425,41 @@ fn site_rows_are_updated_in_place() {
     // A new site replaces the list.
     sync_sites(&ui, &[item("a", false), item("b", true), item("c", true)]);
     assert_eq!(ui.get_sites().row_count(), 3);
+}
+
+/// Ruling P22: Back and Forward go to the pane last used: a click in This PC sends them there,
+/// a click in the cloud pane (or nothing yet) to the cloud pane.
+#[test]
+fn back_and_forward_act_on_the_pane_last_used() {
+    let b = bound(empty());
+    // This PC goes into drive C: (through the session, as a click would).
+    let drives = b.session.local_view();
+    let c = drives.rows.iter().position(|r| r.name == "C:").unwrap();
+    let ticket = b.session.local_ticket();
+    let inside =
+        b.rt.block_on(b.session.open_local(ticket, c, drives.version));
+    assert_eq!(inside.crumbs, ["C:"]);
+    assert!(inside.can_back);
+
+    // The cloud pane is the one at first: Back there has nowhere to go and This PC stays put.
+    assert!(!b.ui.get_local_pane_active());
+    b.ui.invoke_go_back();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(b.session.local_view().crumbs, ["C:"]);
+
+    // After using This PC, Back takes it back to the drives.
+    b.ui.invoke_sort_local(0);
+    assert!(b.ui.get_local_pane_active());
+    b.ui.invoke_go_back();
+    wait_for("This PC to go back", || {
+        b.session.local_view().crumbs.is_empty().then_some(())
+    });
+    b.ui.invoke_go_forward();
+    wait_for("This PC to go forward", || {
+        (b.session.local_view().crumbs == ["C:"]).then_some(())
+    });
+
+    // Using the cloud pane makes it the one again.
+    b.ui.invoke_remote_up();
+    assert!(!b.ui.get_local_pane_active());
 }

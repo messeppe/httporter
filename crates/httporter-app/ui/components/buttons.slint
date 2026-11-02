@@ -30,6 +30,8 @@ export global Activation {
 export component ToolButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
+    // Read out after the label: what it does, or why it is turned off.
+    in property <string> description;
     in property <bool> enabled: true;
     in property <bool> active: false;
     out property <bool> has-focus: key-focus.has-focus;
@@ -43,6 +45,7 @@ export component ToolButton inherits Rectangle {
     forward-focus: key-focus;
     accessible-role: button;
     accessible-label: root.label;
+    accessible-description: root.description;
     accessible-enabled: root.enabled;
     accessible-action-default => {
         if (root.enabled) {
