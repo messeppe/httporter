@@ -1,5 +1,6 @@
 //! The Bunny Storage client: its configuration, its HTTP clients, URLs, deletes, and how
-//! answers map to errors. Listings live in `list.rs`, uploads and downloads in `transfer.rs`.
+//! answers map to errors. Listings live in `list.rs`, uploads and downloads in `transfer.rs`;
+//! the account API (`account.rs`) builds its client and maps its answers with the same pieces.
 //!
 //! A zone gets two HTTP clients. Listings, deletes and the reachability probe are short
 //! requests and share one with a total timeout, [`BunnyConfig::request_timeout`]; a listing has
@@ -37,8 +38,8 @@ const SITE_LIST_TIMEOUT: Duration = Duration::from_secs(20);
 /// idle timeout would cut off every transfer before it began.
 const MIN_TIMEOUT: Duration = Duration::from_secs(5);
 const USER_AGENT: &str = "HTTPorter/0.1";
-/// The header the zone password travels in.
-const ACCESS_KEY: HeaderName = HeaderName::from_static("accesskey");
+/// The header the zone password travels in (and the account API key, see `account.rs`).
+pub(crate) const ACCESS_KEY: HeaderName = HeaderName::from_static("accesskey");
 /// How much of an answer is read when only its status matters, or to quote it.
 pub(crate) const ERROR_BODY_MAX: usize = 4 * 1024;
 /// How much of it can end up in an error message.
@@ -382,13 +383,15 @@ impl StorageProvider for BunnyStorage {
     }
 }
 
-/// The kind of request a response answers, which decides what a 400 means.
+/// The kind of request a response answers, which decides what a 400 means. `Account` is any
+/// call to the account API (`api.bunny.net`), where a 400 is a plain rejected request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
     List,
     Download,
     Upload { with_checksum: bool },
     Delete,
+    Account,
 }
 
 /// Turns a non-success HTTP status into the error the engine acts on.
@@ -410,7 +413,7 @@ pub(crate) fn map_status(
             Op::Upload {
                 with_checksum: true,
             } => ProviderError::ChecksumMismatch,
-            Op::Upload { .. } | Op::Download => {
+            Op::Upload { .. } | Op::Download | Op::Account => {
                 ProviderError::Permanent(format!("request rejected by server ({status})"))
             }
         },
@@ -455,7 +458,7 @@ pub(crate) fn map_upload_400(body: &[u8], with_checksum: bool) -> ProviderError 
 /// Server text fit for an error message: control characters and bidi overrides (which could
 /// garble or disguise what the UI shows) become spaces, runs of whitespace one space, and only
 /// the first [`ERROR_SNIPPET_MAX`] characters are kept (then "..."). `None` when nothing is left.
-fn snippet(text: &str) -> Option<String> {
+pub(crate) fn snippet(text: &str) -> Option<String> {
     let cleaned: String = text
         .chars()
         .map(|c| if is_unsafe_in_text(c) { ' ' } else { c })
@@ -536,17 +539,17 @@ pub(crate) fn network_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
-/// What the HTTP clients of one zone have in common.
+/// What the HTTP clients of one zone (or of the account API client) have in common.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Connections {
-    http1_only: bool,
-    keep_alive: bool,
-    proxy: ProxyMode,
+pub(crate) struct Connections {
+    pub(crate) http1_only: bool,
+    pub(crate) keep_alive: bool,
+    pub(crate) proxy: ProxyMode,
 }
 
 /// The proxy setting a client follows. Ruling P15: a `base_url` override (tests, local
 /// servers) is never routed through the Windows proxy; a proxy chosen by hand still applies.
-fn effective_proxy(proxy: &ProxyMode, base_url: Option<&str>) -> ProxyMode {
+pub(crate) fn effective_proxy(proxy: &ProxyMode, base_url: Option<&str>) -> ProxyMode {
     match proxy {
         ProxyMode::System if base_url.is_some() => ProxyMode::None,
         other => other.clone(),
@@ -588,7 +591,7 @@ fn client_builder(
     Ok(builder)
 }
 
-fn build_client(
+pub(crate) fn build_client(
     connections: &Connections,
     pool_size: usize,
     total_timeout: Option<Duration>,
@@ -619,7 +622,7 @@ mod tests {
         let auth = ProviderError::Auth {
             hint: AuthHint::Unknown,
         };
-        for op in [Op::List, Op::Download, Op::Delete] {
+        for op in [Op::List, Op::Download, Op::Delete, Op::Account] {
             assert_eq!(map_status(status(401), None, op), auth);
             assert_eq!(map_status(status(403), None, op), auth);
             assert_eq!(map_status(status(404), None, op), ProviderError::NotFound);
@@ -655,6 +658,7 @@ mod tests {
         );
         for op in [
             Op::Download,
+            Op::Account,
             Op::Upload {
                 with_checksum: false,
             },
