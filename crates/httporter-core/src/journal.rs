@@ -17,7 +17,8 @@ pub enum JobState {
 /// One journalled job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobRecord {
-    /// Assigned by [`Journal::insert`]: at least 1. The engine uses it as the job's `JobId`.
+    /// Assigned by [`Journal::insert`]: at least 1, and never reused (see [`Journal`]). The
+    /// engine uses it as the job's `JobId`.
     pub id: i64,
     /// The batch the job was submitted in.
     pub batch: String,
@@ -35,10 +36,17 @@ pub struct JobRecord {
 #[error("journal: {0}")]
 pub struct JournalError(pub String);
 
-/// Durable storage for the transfer engine's jobs. Updates to an id the journal does not hold
-/// (a record already cleared away) are ignored.
+/// Durable storage for the transfer engine's jobs.
+///
+/// Ids are unique for the journal's whole lifetime and never reused, even after their records
+/// are cleared or discarded. Updates to an id the journal no longer holds are therefore ignored,
+/// and can never land on a newer job. An SQLite journal needs `INTEGER PRIMARY KEY
+/// AUTOINCREMENT` for this: without `AUTOINCREMENT`, SQLite hands out the highest ids again once
+/// their rows are deleted.
 pub trait Journal: Send + Sync {
-    /// Writes `records` all at once (one transaction) and sets each one's `id`, in order.
+    /// Writes `records` all at once (one transaction) and sets each one's `id`, in order. Each
+    /// new id is greater than every id handed out before, including those of records since
+    /// cleared or discarded.
     fn insert(&self, records: &mut [JobRecord]) -> Result<(), JournalError>;
     /// Moves a job to `state`, with the reason when it failed (`None` clears an earlier one).
     fn set_state(&self, id: i64, state: JobState, error: Option<&str>) -> Result<(), JournalError>;
@@ -52,7 +60,7 @@ pub trait Journal: Send + Sync {
     fn discard_unfinished(&self) -> Result<(), JournalError>;
 }
 
-/// A [`Journal`] in memory, for tests. Ids start at 1.
+/// A [`Journal`] in memory, for tests. Ids start at 1 and only go up.
 #[derive(Debug, Default)]
 pub struct MemoryJournal {
     inner: Mutex<Records>,
@@ -216,6 +224,24 @@ mod tests {
         assert_eq!(journal.unfinished().unwrap()[0].multipart, Some(progress));
         journal.set_multipart(1, None).unwrap();
         assert_eq!(journal.unfinished().unwrap()[0].multipart, None);
+    }
+
+    /// Review finding: a cleared id never comes back, or a late update to the old job would
+    /// land on a new one and two drawer rows could share a `JobId`.
+    #[test]
+    fn ids_are_never_reused_after_clear_or_discard() {
+        let journal = MemoryJournal::new();
+        let mut first = [upload("a"), upload("b"), upload("c")];
+        journal.insert(&mut first).unwrap();
+        journal.set_state(3, JobState::Done, None).unwrap();
+        journal.clear_finished().unwrap();
+        journal.discard_unfinished().unwrap();
+        assert!(journal.records().is_empty());
+
+        let mut second = [upload("d"), upload("e")];
+        journal.insert(&mut second).unwrap();
+        let earlier = first.iter().map(|r| r.id).max().unwrap();
+        assert!(second.iter().all(|r| r.id > earlier), "{:?}", ids(&second));
     }
 
     /// The engine may report on a job after its record was cleared away.

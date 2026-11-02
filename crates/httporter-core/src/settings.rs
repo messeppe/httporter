@@ -1,13 +1,19 @@
-//! The Transfers settings (Settings window, Transfers tab), stored as JSON.
+//! The Transfers settings (Settings window, Transfers tab), stored as JSON. Every stored enum
+//! is written in snake_case, so renaming a Rust variant can't break settings already saved.
 
 use std::fmt;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::RetryPolicy;
 
+/// The shortest request timeout used, whatever is stored.
+const MIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Which HTTP versions a client may use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HttpProtocol {
     /// HTTP/2 where the server offers it, otherwise HTTP/1.1.
     Http2WhenAvailable,
@@ -16,6 +22,7 @@ pub enum HttpProtocol {
 
 /// How requests reach the internet.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
     /// Through the proxy set in Windows, if any.
     System,
@@ -25,34 +32,24 @@ pub enum ProxyMode {
     Custom(String),
 }
 
-/// Shows a custom proxy's URL without the user name and password it may carry.
+/// A custom proxy's URL is shown only when it holds no `@`. One that does may carry a user
+/// name and password (perhaps with an unencoded `/`, `?` or `#` in it), so it is left out whole.
 impl fmt::Debug for ProxyMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::System => f.write_str("System"),
             Self::None => f.write_str("None"),
-            Self::Custom(url) => f
-                .debug_tuple("Custom")
-                .field(&without_userinfo(url))
-                .finish(),
+            Self::Custom(url) if url.contains('@') => {
+                f.debug_tuple("Custom").field(&"<redacted>").finish()
+            }
+            Self::Custom(url) => f.debug_tuple("Custom").field(url).finish(),
         }
-    }
-}
-
-/// `url` with any `user:password@` before its host replaced by `***@`.
-fn without_userinfo(url: &str) -> String {
-    let start = url.find("://").map_or(0, |i| i + 3);
-    let authority_end = url[start..]
-        .find(['/', '?', '#'])
-        .map_or(url.len(), |i| start + i);
-    match url[start..authority_end].rfind('@') {
-        Some(at) => format!("{}***{}", &url[..start], &url[start + at..]),
-        None => url.to_owned(),
     }
 }
 
 /// What happens to a file that already exists where a transfer would put it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConflictPolicy {
     /// Ask once per batch, in the conflict sheet.
     Ask,
@@ -75,12 +72,13 @@ pub struct TransferSettings {
     pub adaptive: bool,
     /// Retries of a failed transfer: 5, 3 or 0.
     pub retries: u8,
-    /// Bytes per second across all transfers together; `None` is no limit.
+    /// Bytes per second across all transfers together. `None` and `Some(0)` both mean no limit
+    /// ([`Self::bandwidth_limit_bytes`]).
     pub bandwidth_limit: Option<u64>,
     pub protocol: HttpProtocol,
     /// Keep connections open between files.
     pub keep_alive: bool,
-    /// 120, 60 or 300.
+    /// 120, 60 or 300. Anything below 5 is treated as 5 ([`Self::request_timeout`]).
     pub request_timeout_secs: u32,
     pub proxy: ProxyMode,
     /// Send a checksum with every upload, so the server rejects a damaged copy.
@@ -120,12 +118,21 @@ impl TransferSettings {
         let wanted = usize::try_from(self.simultaneous).unwrap_or(usize::MAX);
         wanted.clamp(1, cap.max(1))
     }
+
+    /// The bandwidth limit in bytes per second, or `None` for no limit (stored as `None` or
+    /// `Some(0)`).
+    pub fn bandwidth_limit_bytes(&self) -> Option<u64> {
+        self.bandwidth_limit.filter(|&limit| limit > 0)
+    }
+
+    /// How long one request may take: `request_timeout_secs`, but at least 5 s.
+    pub fn request_timeout(&self) -> Duration {
+        Duration::from_secs(u64::from(self.request_timeout_secs)).max(MIN_REQUEST_TIMEOUT)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     /// Settings.dc.html, Transfers tab, as it first opens.
@@ -228,22 +235,93 @@ mod tests {
         );
     }
 
+    fn json<T: Serialize>(value: &T) -> String {
+        serde_json::to_string(value).unwrap()
+    }
+
+    /// Ruling Q20: the stored names are pinned, so renaming a Rust variant can't break
+    /// settings already saved.
+    #[test]
+    fn stored_names_are_snake_case() {
+        assert_eq!(
+            json(&TransferSettings::default()),
+            concat!(
+                r#"{"simultaneous":32,"adaptive":true,"retries":5,"bandwidth_limit":null,"#,
+                r#""protocol":"http2_when_available","keep_alive":true,"#,
+                r#""request_timeout_secs":120,"proxy":"system","verify_checksums":true,"#,
+                r#""upload_conflicts":"ask","download_conflicts":"ask"}"#
+            )
+        );
+        assert_eq!(json(&HttpProtocol::Http1Only), r#""http1_only""#);
+        assert_eq!(json(&ProxyMode::None), r#""none""#);
+        assert_eq!(
+            json(&ProxyMode::Custom("http://proxy:8080".into())),
+            r#"{"custom":"http://proxy:8080"}"#
+        );
+        assert_eq!(json(&ConflictPolicy::Replace), r#""replace""#);
+        assert_eq!(
+            json(&ConflictPolicy::ReplaceIfDifferent),
+            r#""replace_if_different""#
+        );
+        assert_eq!(json(&ConflictPolicy::Skip), r#""skip""#);
+        assert_eq!(json(&ConflictPolicy::KeepBoth), r#""keep_both""#);
+    }
+
+    #[test]
+    fn a_bandwidth_limit_of_zero_is_no_limit() {
+        let with = |bandwidth_limit| TransferSettings {
+            bandwidth_limit,
+            ..TransferSettings::default()
+        };
+        assert_eq!(with(None).bandwidth_limit_bytes(), None);
+        assert_eq!(with(Some(0)).bandwidth_limit_bytes(), None);
+        assert_eq!(with(Some(1)).bandwidth_limit_bytes(), Some(1));
+        assert_eq!(
+            with(Some(5_000_000)).bandwidth_limit_bytes(),
+            Some(5_000_000)
+        );
+    }
+
+    #[test]
+    fn the_request_timeout_is_at_least_five_seconds() {
+        let with = |request_timeout_secs| TransferSettings {
+            request_timeout_secs,
+            ..TransferSettings::default()
+        };
+        assert_eq!(
+            TransferSettings::default().request_timeout(),
+            Duration::from_secs(120)
+        );
+        assert_eq!(with(300).request_timeout(), Duration::from_secs(300));
+        assert_eq!(with(5).request_timeout(), Duration::from_secs(5));
+        assert_eq!(with(4).request_timeout(), Duration::from_secs(5));
+        assert_eq!(with(0).request_timeout(), Duration::from_secs(5));
+    }
+
+    /// A proxy URL with an `@` anywhere may carry a password, perhaps one with an unencoded
+    /// `/`, `?` or `#`: the whole URL is left out.
     #[test]
     fn proxy_debug_hides_a_password_in_the_url() {
-        let proxy = ProxyMode::Custom("http://proxyuser42:s3cret-pw@proxy.example:8080/x".into());
-        let text = format!(
-            "{:?}",
-            TransferSettings {
-                proxy,
-                ..TransferSettings::default()
-            }
-        );
-        assert!(!text.contains("s3cret-pw"), "{text}");
-        assert!(!text.contains("proxyuser42"), "{text}");
-        assert!(text.contains("proxy.example:8080"), "{text}");
+        for url in [
+            "http://proxyuser42:s3cret-pw@proxy.example:8080/x",
+            "http://proxyuser42:s3c/ret?p#w@proxy.example:8080",
+            "proxyuser42:s3cret-pw@proxy.example:8080",
+        ] {
+            let text = format!(
+                "{:?}",
+                TransferSettings {
+                    proxy: ProxyMode::Custom(url.into()),
+                    ..TransferSettings::default()
+                }
+            );
+            assert!(text.contains(r#"proxy: Custom("<redacted>")"#), "{text}");
+            assert!(!text.contains("proxyuser42"), "{text}");
+            assert!(!text.contains("s3c"), "{text}");
+        }
 
         let plain = format!("{:?}", ProxyMode::Custom("http://proxy:8080".into()));
         assert_eq!(plain, r#"Custom("http://proxy:8080")"#);
         assert_eq!(format!("{:?}", ProxyMode::System), "System");
+        assert_eq!(format!("{:?}", ProxyMode::None), "None");
     }
 }

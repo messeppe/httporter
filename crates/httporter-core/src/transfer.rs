@@ -1,6 +1,7 @@
 //! What the transfer engine works on and what it tells the UI: jobs, the engine's state and
 //! progress, conflicts and delete summaries. Plain data, so the UI can be tested without an
-//! engine.
+//! engine. Every stored enum is written in snake_case, so renaming a Rust variant can't break a
+//! journal already written.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +18,7 @@ pub struct JobId(pub u64);
 
 /// One thing to do on one site.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Job {
     Upload {
         local: PathBuf,
@@ -51,6 +53,7 @@ impl Job {
 
 /// Which kind of [`Job`] a job is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JobKind {
     Upload,
     Download,
@@ -60,6 +63,7 @@ pub enum JobKind {
 
 /// Which way the jobs running (or last run) go.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Direction {
     /// Also what an engine that has run nothing yet says.
     #[default]
@@ -259,8 +263,64 @@ mod tests {
 
     #[test]
     fn a_stored_job_with_a_bad_remote_path_is_refused() {
-        let json = r#"{"CreateFolder":{"remote":"a/../b"}}"#;
-        assert!(serde_json::from_str::<Job>(json).is_err());
+        let good = r#"{"create_folder":{"remote":"a/b"}}"#;
+        assert!(serde_json::from_str::<Job>(good).is_ok());
+        let bad = r#"{"create_folder":{"remote":"a/../b"}}"#;
+        assert!(serde_json::from_str::<Job>(bad).is_err());
+    }
+
+    /// Ruling Q20: the stored names are pinned, so renaming a Rust variant can't break a
+    /// journal already written.
+    #[test]
+    fn stored_names_are_snake_case() {
+        let json = |job: Job| serde_json::to_string(&job).unwrap();
+        assert_eq!(
+            json(Job::Upload {
+                local: PathBuf::from(r"C:\site\index.html"),
+                remote: remote("index.html"),
+                size: 10,
+            }),
+            r#"{"upload":{"local":"C:\\site\\index.html","remote":"index.html","size":10}}"#
+        );
+        assert_eq!(
+            json(Job::Download {
+                remote: remote("a/b.txt"),
+                local: PathBuf::from("b.txt"),
+                size: 3,
+            }),
+            r#"{"download":{"remote":"a/b.txt","local":"b.txt","size":3}}"#
+        );
+        assert_eq!(
+            json(Job::Delete {
+                remote: remote("old"),
+                folder: true,
+            }),
+            r#"{"delete":{"remote":"old","folder":true}}"#
+        );
+        assert_eq!(
+            json(Job::CreateFolder {
+                remote: remote("new"),
+            }),
+            r#"{"create_folder":{"remote":"new"}}"#
+        );
+        let kinds = [
+            (JobKind::Upload, r#""upload""#),
+            (JobKind::Download, r#""download""#),
+            (JobKind::Delete, r#""delete""#),
+            (JobKind::CreateFolder, r#""create_folder""#),
+        ];
+        for (kind, text) in kinds {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), text);
+        }
+        let directions = [
+            (Direction::Upload, r#""upload""#),
+            (Direction::Download, r#""download""#),
+            (Direction::Delete, r#""delete""#),
+            (Direction::Mixed, r#""mixed""#),
+        ];
+        for (direction, text) in directions {
+            assert_eq!(serde_json::to_string(&direction).unwrap(), text);
+        }
     }
 
     #[test]
