@@ -9,10 +9,22 @@ chrono.workspace = true
 dirs = "7.0.0"
 httporter-core = { version = "0.1.0", path = "../httporter-core" }
 keyring = { workspace = true, features = ["windows-native"] }
+rfd.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+windows = { workspace = true, features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,0 +1,31 @@
+//! Native file and folder pickers (the standard Windows dialogs).
+//!
+//! Each call blocks the calling thread until the dialog is closed. COM is set up by the
+//! dialog library itself, per call.
+
+use std::path::PathBuf;
+
+use rfd::FileDialog;
+
+/// Asks for one or more files. Empty if the user cancelled.
+pub fn pick_files(title: &str) -> Vec<PathBuf> {
+    FileDialog::new()
+        .set_title(title)
+        .pick_files()
+        .unwrap_or_default()
+}
+
+/// Asks for a folder. `None` if the user cancelled.
+pub fn pick_folder(title: &str) -> Option<PathBuf> {
+    FileDialog::new().set_title(title).pick_folder()
+}
+
+/// Asks for one file. `filters` are `(name, extensions)` pairs without dots, for example
+/// `("Images", &["png", "jpg"])`; none means every file. `None` if the user cancelled.
+pub fn pick_file(title: &str, filters: &[(&str, &[&str])]) -> Option<PathBuf> {
+    let mut dialog = FileDialog::new().set_title(title);
+    for &(name, extensions) in filters {
+        dialog = dialog.add_filter(name, extensions);
+    }
+    dialog.pick_file()
+}
