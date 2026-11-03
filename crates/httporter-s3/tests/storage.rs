@@ -930,6 +930,38 @@ async fn delete_batch_maps_per_key_errors() {
     );
 }
 
+/// Cloudflare R2's answers to a quiet `DeleteObjects`, as the live probe (Task 11) saw them:
+/// R2 leaves out the keys it deleted but still echoes each key that was not there as
+/// `<Deleted>`, and a batch where every key existed is an empty `<DeleteResult>` with a closing
+/// tag, never an empty body. A `<Deleted>` key is a success either way, missing or not (the
+/// provider treats a missing key as deleted, ruling Q33).
+#[tokio::test]
+async fn delete_batch_reads_r2_quiet_answers() {
+    const R2_NS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
+    for body in [
+        // Two present keys and one missing: only the missing one is named.
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><DeleteResult xmlns=\"{R2_NS}\">\
+             <Deleted><Key>dir/missing.txt</Key></Deleted></DeleteResult>"
+        ),
+        // Every key present: nothing is named.
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><DeleteResult xmlns=\"{R2_NS}\">\
+             </DeleteResult>"
+        ),
+    ] {
+        let server = MockServer::start().await;
+        delete_mock()
+            .respond_with(xml(body.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let paths = [p("dir/a.txt"), p("dir/missing.txt"), p("dir/b.txt")];
+        let results = provider(&server).delete_batch(&paths).await;
+        assert_eq!(results, [Ok(()), Ok(()), Ok(())], "{body}");
+    }
+}
+
 #[tokio::test]
 async fn delete_batch_failing_as_a_whole_fails_every_key_of_that_request_only() {
     let server = MockServer::start().await;

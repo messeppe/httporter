@@ -100,3 +100,25 @@ Fixed in `endpoint()`: only "Other S3" reads the path-style toggle. `bucket_url`
 - Task 10 (multipart): equal-size parts (R2), resend a failed part rather than trust the earlier copy (R2), check the 8100 KiB question on Spaces.
 - Task 11 (live R2): confirm ETag format, `DeleteObjects` limit, `If-None-Match` behaviour and path-style addressing against the real account.
 - Task 21 (UI): show the preview from `bucket_url(&endpoint(...), bucket)`; the error strings from `endpoint()` are written for the form fields.
+
+## Live: Cloudflare R2 (Task 11)
+
+Probed on 2026-11-03 against the test bucket `httporter-test` (preset Cloudflare R2, region `auto`, path style) with `crates/httporter-s3/tests/live.rs`:
+
+```text
+cargo test --locked -p httporter-s3 --test live -- --ignored --nocapture
+```
+
+Every probe works under its own `probe-<time>-<name>/` prefix and at the end aborts any unfinished multipart upload under it, deletes it, and checks with a listing without a delimiter that no key is left; the bucket root had 0 entries before and after every run. These facts are **[live]**.
+
+- **Addressing and signing.** Path style on `https://<account>.r2.cloudflarestorage.com/<bucket>/…`, signed for region `auto`, works for every call used: `ListObjectsV2`, `PutObject`, `GetObject`, `HeadObject`, `DeleteObjects`, `CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload`, `ListMultipartUploads`, `AbortMultipartUpload`. Answers come over HTTP/1.1.
+- **ETag.** A single `PutObject` gets the hex MD5 of the body (the listing's checksum matched the MD5 we sent). A multipart upload gets `<hex>-<parts>`: 65 MiB in 16 MiB parts gave `-5`. `checksum_from_etag` reads both correctly.
+- **`Content-MD5`.** A wrong one is refused as `BadDigest`; the provider says `ChecksumMismatch`.
+- **`x-amz-meta-httporter-sha256`** comes back on `HEAD` unchanged, for single and multipart uploads.
+- **Multipart.** 65 MiB went up in 8.8 s from the test PC; no unfinished upload was left; the object downloads byte for byte.
+- **`If-None-Match: *`** on a key that exists: `412 PreconditionFailed`, and the object is unchanged. Usable for "upload only if absent" later.
+- **Content types are served as uploaded:** `index.html` `text/html`, `style.css` `text/css`, `app.js` `text/javascript`, `img.webp` `image/webp`. An object put without a `Content-Type` is served with **no** `Content-Type` header at all (not `binary/octet-stream`), so the provider's habit of always sending one matters.
+- **Folder markers.** `create_folder` writes `name/` (zero bytes); writing it again is fine; a marker-only folder lists as empty (not `NotFound`); a marker inside a folder with files is a key like any other. After `delete_folder` the folder lists as `NotFound` and no key is left.
+- **`DeleteObjects` in quiet mode does not follow AWS.** R2 leaves out the keys it deleted, as AWS does, but **echoes every key that was not there as `<Deleted>`**. A batch where every key existed answers `200` with an empty `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>` (with a closing tag, `content-type: application/xml`, a `content-length`); never an empty body. Not quiet, both kinds are `<Deleted>`. The provider reads only `<Error>` elements, so both shapes count every key as deleted, which is right (a missing key counts as deleted, ruling Q33); `delete_batch_reads_r2_quiet_answers` pins both shapes. A quiet answer for 1,000 missing keys is about 79 KB, far inside the 32 MiB the provider reads.
+- **`DeleteObjects` takes at most 1,000 keys:** 1,001 is refused with `400 MalformedXML`. `DELETE_MAX` = 1,000 is right.
+- **`ListBuckets` is refused** (`403 AccessDenied`) for an R2 API token limited to one bucket; the provider says `Auth { hint: Unknown }`. The Add Site sheet must read that as "type the bucket name", not as wrong credentials: the same key works for everything inside its bucket.
