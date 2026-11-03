@@ -566,6 +566,7 @@ pub fn drawer_title(state: &EngineState, direction: Direction, site: &str) -> St
         EngineState::Paused => format!("Paused · {title}"),
         EngineState::Offline { .. } => format!("Waiting for the connection · {title}"),
         EngineState::AuthStopped { site } => format!("Sign-in failed · {site}"),
+        EngineState::ClockSkew { site } => format!("PC clock is off · {site}"),
         EngineState::DiskFull { drive, .. } => format!("Not enough space on {drive} · {title}"),
     }
 }

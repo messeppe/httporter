@@ -555,6 +555,7 @@ mod tests {
             upload_id: "u-1/é".into(),
             part_size: 16 << 20,
             parts: vec![(1, "\"e1\"".into()), (2, "\"e2\"".into())],
+            file: None,
         };
         journal.set_multipart(1, Some(&progress)).unwrap();
 

@@ -1327,6 +1327,7 @@ fn delete_sent() -> MultipartProgress {
         upload_id: DELETE_SENT.to_owned(),
         part_size: 0,
         parts: Vec::new(),
+        file: None,
     }
 }
 

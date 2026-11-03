@@ -1175,9 +1175,9 @@ fn taskbar_state(s: &EngineSnapshot) -> TaskbarState {
         EngineState::Idle => TaskbarState::None,
         EngineState::Running => TaskbarState::Normal { done, total },
         EngineState::Paused | EngineState::Offline { .. } => TaskbarState::Paused { done, total },
-        EngineState::AuthStopped { .. } | EngineState::DiskFull { .. } => {
-            TaskbarState::Error { done, total }
-        }
+        EngineState::AuthStopped { .. }
+        | EngineState::ClockSkew { .. }
+        | EngineState::DiskFull { .. } => TaskbarState::Error { done, total },
     }
 }
 

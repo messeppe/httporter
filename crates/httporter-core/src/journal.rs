@@ -36,6 +36,22 @@ pub struct JobRecord {
 #[error("journal: {0}")]
 pub struct JournalError(pub String);
 
+/// One change to a journalled job, for [`Journal::apply`]: what [`Journal::set_state`] or
+/// [`Journal::set_multipart`] would write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JournalUpdate {
+    State {
+        id: i64,
+        state: JobState,
+        /// Why the job failed; `None` clears an earlier reason.
+        error: Option<String>,
+    },
+    Multipart {
+        id: i64,
+        progress: Option<MultipartProgress>,
+    },
+}
+
 /// Durable storage for the transfer engine's jobs.
 ///
 /// Ids are unique for the journal's whole lifetime and never reused, even after their records
@@ -52,6 +68,23 @@ pub trait Journal: Send + Sync {
     fn set_state(&self, id: i64, state: JobState, error: Option<&str>) -> Result<(), JournalError>;
     /// Records how far a multipart upload got; `None` forgets it.
     fn set_multipart(&self, id: i64, mp: Option<&MultipartProgress>) -> Result<(), JournalError>;
+    /// Writes `updates`, in order. A journal that can should write them together, at the cost of
+    /// one write (one transaction, one disk sync): cancelling 10,000 jobs must not take 10,000
+    /// syncs. The default writes them one at a time and stops at the first that fails. On an
+    /// error, any of them may be unwritten.
+    fn apply(&self, updates: &[JournalUpdate]) -> Result<(), JournalError> {
+        for update in updates {
+            match update {
+                JournalUpdate::State { id, state, error } => {
+                    self.set_state(*id, *state, error.as_deref())?;
+                }
+                JournalUpdate::Multipart { id, progress } => {
+                    self.set_multipart(*id, progress.as_ref())?;
+                }
+            }
+        }
+        Ok(())
+    }
     /// The Queued and Failed jobs, in id order.
     fn unfinished(&self) -> Result<Vec<JobRecord>, JournalError>;
     /// Drops the Done and Cancelled jobs.
@@ -219,6 +252,7 @@ mod tests {
             upload_id: "u-1".into(),
             part_size: 16 << 20,
             parts: vec![(1, "\"e1\"".into())],
+            file: None,
         };
         journal.set_multipart(1, Some(&progress)).unwrap();
         assert_eq!(journal.unfinished().unwrap()[0].multipart, Some(progress));
@@ -251,6 +285,52 @@ mod tests {
         journal.set_state(7, JobState::Done, None).unwrap();
         journal.set_multipart(7, None).unwrap();
         assert!(journal.records().is_empty());
+    }
+
+    /// Review C1: the default `apply` writes each update in order, as the single calls would.
+    #[test]
+    fn apply_writes_every_update_in_order() {
+        let journal = MemoryJournal::new();
+        journal
+            .insert(&mut [upload("a"), upload("b"), upload("c")])
+            .unwrap();
+        let progress = MultipartProgress {
+            upload_id: "u-1".into(),
+            part_size: 5 << 20,
+            parts: Vec::new(),
+            file: None,
+        };
+        journal
+            .apply(&[
+                JournalUpdate::State {
+                    id: 1,
+                    state: JobState::Failed,
+                    error: Some("first".into()),
+                },
+                JournalUpdate::State {
+                    id: 1,
+                    state: JobState::Cancelled,
+                    error: None,
+                },
+                JournalUpdate::Multipart {
+                    id: 2,
+                    progress: Some(progress.clone()),
+                },
+                JournalUpdate::State {
+                    id: 3,
+                    state: JobState::Done,
+                    error: None,
+                },
+            ])
+            .unwrap();
+        let records = journal.records();
+        assert_eq!(
+            (records[0].state, records[0].error.clone()),
+            (JobState::Cancelled, None)
+        );
+        assert_eq!(records[1].multipart, Some(progress));
+        assert_eq!(records[2].state, JobState::Done);
+        assert_eq!(ids(&journal.unfinished().unwrap()), [2]);
     }
 
     #[test]

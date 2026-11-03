@@ -193,6 +193,7 @@ impl RecordingJournal {
             upload_id,
             part_size,
             parts,
+            file: None,
         })
     }
 }
@@ -234,6 +235,7 @@ fn progress(upload_id: &str, part_size: u64, recorded: &[u32]) -> MultipartProgr
             .iter()
             .map(|&number| (number, recorded_etag(number)))
             .collect(),
+        file: None,
     }
 }
 

@@ -41,6 +41,29 @@ pub struct MultipartProgress {
     pub part_size: u64,
     /// The parts stored so far: their 1-based number and ETag.
     pub parts: Vec<(u32, String)>,
+    /// The local file as it was when the upload began. The stored parts are reused only while
+    /// the file still matches it. `None` in progress written before it was kept, which is never
+    /// reused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<FileStamp>,
+}
+
+/// A local file's size and last change, to tell whether it changed since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct FileStamp {
+    pub len: u64,
+    /// When the file last changed, in nanoseconds since the Unix epoch, where the system keeps
+    /// it.
+    pub modified_ns: Option<u64>,
+}
+
+impl FileStamp {
+    pub fn new(len: u64, modified: Option<std::time::SystemTime>) -> Self {
+        let modified_ns = modified
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|since| u64::try_from(since.as_nanos()).ok());
+        Self { len, modified_ns }
+    }
 }
 
 /// Where a provider keeps a multipart upload's progress, so an interrupted
@@ -202,6 +225,21 @@ pub trait StorageProvider: Send + Sync {
     async fn reachable(&self) -> Result<(), ProviderError> {
         self.list(&RemotePath::root()).await.map(|_| ())
     }
+
+    /// Gives up the unfinished multipart upload `upload_id` of the file at
+    /// `path`, so the service frees the parts it stored (S3
+    /// `AbortMultipartUpload`). For an upload a [`PartJournal`] kept for a
+    /// resume that will never come: the user cancelled or discarded it.
+    /// Providers without multipart uploads have nothing to give up: the
+    /// default does nothing.
+    async fn abort_multipart(
+        &self,
+        path: &RemotePath,
+        upload_id: &str,
+    ) -> Result<(), ProviderError> {
+        let _ = (path, upload_id);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -347,6 +385,40 @@ mod tests {
                 .unwrap()
                 .entries
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_multipart_defaults_to_nothing_to_give_up() {
+        let m = Minimal(MockProvider::new(Capabilities::default()));
+        assert_eq!(m.abort_multipart(&p("big.bin"), "u-1").await, Ok(()));
+    }
+
+    #[test]
+    fn a_file_stamp_keeps_the_size_and_the_exact_time() {
+        // Windows keeps file times in steps of 100 ns.
+        let time = std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 300);
+        let stamp = FileStamp::new(42, Some(time));
+        assert_eq!(stamp.len, 42);
+        assert_eq!(stamp.modified_ns, Some(1_700_000_000_000_000_300));
+        assert_eq!(FileStamp::new(42, None).modified_ns, None);
+        assert_ne!(
+            FileStamp::new(42, Some(time + Duration::new(0, 100))),
+            stamp
+        );
+
+        // Progress written before stamps were kept still reads, with none.
+        let old = r#"{"upload_id":"u","part_size":5,"parts":[[1,"e"]]}"#;
+        let read: MultipartProgress = serde_json::from_str(old).unwrap();
+        assert_eq!(read.file, None);
+        let with = MultipartProgress {
+            file: Some(stamp),
+            ..read
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert_eq!(
+            serde_json::from_str::<MultipartProgress>(&json).unwrap(),
+            with
         );
     }
 

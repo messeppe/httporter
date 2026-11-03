@@ -93,6 +93,11 @@ pub enum EngineState {
     AuthStopped {
         site: String,
     },
+    /// `site` found the PC's clock too far off to accept its requests: its transfers wait until
+    /// the user, having set the clock, resumes them.
+    ClockSkew {
+        site: String,
+    },
     /// `drive` is full: downloads need `needed` more bytes on it.
     DiskFull {
         drive: String,
