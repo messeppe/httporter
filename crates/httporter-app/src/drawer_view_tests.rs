@@ -3,8 +3,7 @@
 
 use httporter_core::{JobId, JobKind, JobView};
 
-/// The one place a `JobView` is built in tests (Ruling Q40). When the core gives `JobView` a
-/// `paused` field, this is the only line that has to learn it.
+/// The one place a `JobView` is built in tests (Ruling Q40).
 #[allow(dead_code)] // The tests are written in the testing phase.
 pub(super) fn job_view(id: u64, kind: JobKind, path: &str, size: u64, done_bytes: u64) -> JobView {
     JobView {
@@ -14,5 +13,6 @@ pub(super) fn job_view(id: u64, kind: JobKind, path: &str, size: u64, done_bytes
         size,
         done_bytes,
         error: None,
+        paused: false,
     }
 }

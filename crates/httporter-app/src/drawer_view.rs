@@ -73,17 +73,14 @@ enum List {
     Done,
 }
 
-/// Whether a job is paused on its own. Ruling Q40: `JobView` has no such flag on this branch, so
-/// this says no; the controller returns `view.paused` here once the core has the field. It is the
-/// only place a row reads it.
-fn row_paused(_view: &JobView) -> bool {
-    false
+/// Whether a job is paused on its own. The only place a row reads it.
+fn row_paused(view: &JobView) -> bool {
+    view.paused
 }
 
-/// How many jobs run now. Ruling Q40: the snapshot's `active_count` replaces this once the core has
-/// the field, because `active` may then hold only a window onto them.
+/// How many jobs run now: the engine's count, since `active` may hold only a window onto them.
 fn active_count(s: &EngineSnapshot) -> u64 {
-    s.active.len() as u64
+    s.active_count
 }
 
 /// How many jobs have failed: the engine's count, or the rows it sent if there are more of them.
