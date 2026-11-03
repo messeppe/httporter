@@ -1,15 +1,22 @@
+mod support;
+
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use futures_util::future::join_all;
 use httporter_bunny::{BunnyConfig, BunnyStorage};
 use httporter_core::{
-    AuthHint, ByteStream, ProviderError, RemotePath, RetryPolicy, StorageProvider, UploadOptions,
-    UploadSource,
+    AuthHint, BodyMeter, ByteStream, EmptyFolders, ProviderError, RemotePath, RetryPolicy,
+    StorageProvider, TransferSettings, UploadOptions, UploadSource,
 };
 use sha2::{Digest, Sha256};
+use support::{Conn, ScriptedServer, answer, chunked_answer, hold_clock, received, settle};
+use tokio::net::TcpListener;
+use tokio::sync::{mpsc, oneshot};
 use wiremock::matchers::{body_bytes, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -18,6 +25,143 @@ fn config(server: &MockServer) -> BunnyConfig {
     cfg.retry = RetryPolicy::immediate(5);
     cfg.base_url = Some(server.uri());
     cfg
+}
+
+/// `len` bytes that are not all one value, so a truncated or shuffled body can't pass.
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+/// Remembers the size of every body piece it is told about.
+#[derive(Default)]
+struct RecordingMeter(Mutex<Vec<usize>>);
+
+#[async_trait]
+impl BodyMeter for RecordingMeter {
+    async fn chunk(&self, len: usize) {
+        self.0.lock().unwrap().push(len);
+    }
+}
+
+#[tokio::test]
+async fn meter_sees_every_upload_byte() {
+    let len = 300 * 1024 + 7;
+    let (_dir, file_source, content) = write_file(len);
+    for source in [
+        file_source,
+        UploadSource::Bytes(Bytes::from(content.clone())),
+    ] {
+        let s = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(body_bytes(content.clone()))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let meter = Arc::new(RecordingMeter::default());
+        let opts = UploadOptions {
+            meter: Some(meter.clone()),
+            ..text_plain()
+        };
+        storage(&s)
+            .upload(&rp("metered.bin"), source, &opts)
+            .await
+            .unwrap();
+        let pieces = meter.0.lock().unwrap().clone();
+        assert_eq!(pieces.iter().sum::<usize>(), len, "{pieces:?}");
+        assert!(
+            pieces.iter().all(|&n| n > 0 && n <= 64 * 1024),
+            "{pieces:?}"
+        );
+    }
+}
+
+/// Ledger 180. Once the connection has taken the last piece of a body, what it buffered still
+/// has to cross the link, and nothing shows that happening. Here the server takes in the last
+/// 8 KiB at 1 KiB/s with a 5 s idle timeout: the upload must not be cut off.
+#[tokio::test(start_paused = true)]
+async fn slow_tail_is_not_cut_off() {
+    const TAIL: usize = 8 * 1024;
+    let _clock = hold_clock();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (fast_part_in, fast_part_read) = oneshot::channel();
+    let (tick, mut ticks) = mpsc::unbounded_channel::<()>();
+    let server = tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let mut conn = Conn::new(sock);
+        let head = conn.head().await.unwrap();
+        let mut body = conn.bytes(head.content_length() - TAIL).await.unwrap();
+        fast_part_in.send(()).unwrap();
+        // One KiB a second.
+        for _ in 0..TAIL / 1024 {
+            ticks.recv().await.unwrap();
+            body.extend(conn.bytes(1024).await.unwrap());
+        }
+        conn.send(&answer("201 Created", "")).await;
+        body
+    });
+
+    let mut cfg = BunnyConfig::new("testzone", "storage.bunnycdn.com", "secret");
+    cfg.base_url = Some(format!("http://{addr}"));
+    cfg.retry = RetryPolicy::immediate(0);
+    cfg.transfer_idle_timeout = Duration::from_secs(5);
+    cfg.request_timeout = Duration::from_secs(5);
+    let storage = Arc::new(BunnyStorage::new(cfg).unwrap());
+    let data = pattern(16 * 1024);
+    let upload = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        let data = Bytes::from(data.clone());
+        async move {
+            storage
+                .upload(&rp("tail.bin"), UploadSource::Bytes(data), &text_plain())
+                .await
+        }
+    });
+
+    fast_part_read.await.unwrap();
+    let started = tokio::time::Instant::now();
+    for _ in 0..TAIL / 1024 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert!(!upload.is_finished(), "cut off at {:?}", started.elapsed());
+        tick.send(()).unwrap();
+    }
+    upload.await.unwrap().unwrap();
+    assert_eq!(server.await.unwrap(), data);
+    assert_eq!(started.elapsed(), Duration::from_secs(8));
+}
+
+/// Ledger 181: a zero idle timeout would cut off every transfer before it began.
+#[tokio::test(start_paused = true)]
+async fn idle_timeout_is_clamped_to_five_seconds_minimum() {
+    let _clock = hold_clock();
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(3600)))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let mut cfg = config(&s);
+    cfg.transfer_idle_timeout = Duration::ZERO;
+    cfg.retry = RetryPolicy::immediate(0);
+    let storage = Arc::new(BunnyStorage::new(cfg).unwrap());
+    let download = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        async move { storage.download(&rp("a.txt")).await.map(|_| ()) }
+    });
+    settle().await;
+    assert!(!download.is_finished(), "gave up at once");
+    received(&s, 1).await;
+
+    tokio::time::advance(Duration::from_millis(4990)).await;
+    settle().await;
+    assert!(!download.is_finished(), "gave up before 5 s");
+    tokio::time::advance(Duration::from_millis(20)).await;
+    match download.await.unwrap() {
+        Err(ProviderError::Network(m)) => assert!(m.contains("download stalled"), "{m}"),
+        other => panic!("expected a stall, got {other:?}"),
+    }
 }
 
 fn storage(server: &MockServer) -> BunnyStorage {
@@ -347,9 +491,11 @@ async fn the_root_is_not_a_file_for_any_operation() {
 
 /// Until the live probe (Task 7) shows how Bunny keeps empty folders, none is made.
 #[tokio::test]
-async fn create_folder_is_refused_without_a_request() {
+async fn create_folder_refused_while_unknown() {
     let s = MockServer::start().await;
-    let err = storage(&s).create_folder(&rp("new")).await.unwrap_err();
+    let storage = storage(&s);
+    assert_eq!(storage.capabilities().empty_folders, EmptyFolders::Unknown);
+    let err = storage.create_folder(&rp("new")).await.unwrap_err();
     assert_eq!(
         err,
         ProviderError::Refused("Bunny Storage creates a folder with its first file.".into())
@@ -454,71 +600,97 @@ async fn an_open_download_keeps_its_transfer_slot_until_dropped() {
         .await;
     let mut cfg = config(&s);
     cfg.transfer_concurrency = 1;
-    let storage = BunnyStorage::new(cfg).unwrap();
-    let file = rp("a.txt");
+    let storage = Arc::new(BunnyStorage::new(cfg).unwrap());
 
-    let first = storage.download(&file).await.unwrap();
-    let second = tokio::time::timeout(Duration::from_millis(300), storage.download(&file)).await;
-    assert!(second.is_err(), "the only slot is still held");
+    let first = storage.download(&rp("a.txt")).await.unwrap();
+    let second = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        async move { collect(storage.download(&rp("a.txt")).await.unwrap()).await }
+    });
+    settle().await;
+    assert!(!second.is_finished(), "the only slot is still held");
+    assert_eq!(s.received_requests().await.unwrap().len(), 1);
 
     drop(first);
-    let second = storage.download(&file).await.unwrap();
-    assert_eq!(collect(second).await, b"hello");
+    assert_eq!(second.await.unwrap(), b"hello");
 }
 
-#[tokio::test]
-async fn an_upload_that_gets_no_answer_for_the_idle_timeout_is_abandoned() {
+/// Nothing comes back once the body is sent: the upload gives up after the idle timeout (for
+/// the body still draining from the connection's buffers) plus the request timeout (for the
+/// server to answer).
+#[tokio::test(start_paused = true)]
+async fn an_upload_that_gets_no_answer_is_abandoned() {
+    let _clock = hold_clock();
     let s = MockServer::start().await;
     Mock::given(method("PUT"))
-        .respond_with(ResponseTemplate::new(201).set_delay(Duration::from_millis(1500)))
+        .respond_with(ResponseTemplate::new(201).set_delay(Duration::from_secs(3600)))
         .expect(1)
         .mount(&s)
         .await;
     let mut cfg = config(&s);
-    cfg.transfer_idle_timeout = Duration::from_millis(250);
+    cfg.transfer_idle_timeout = Duration::from_secs(5);
+    cfg.request_timeout = Duration::from_secs(10);
     cfg.retry = RetryPolicy::immediate(0);
-    let started = Instant::now();
-    let err = BunnyStorage::new(cfg)
-        .unwrap()
-        .upload(
-            &rp("a.txt"),
-            UploadSource::Bytes("hello".into()),
-            &text_plain(),
-        )
-        .await
-        .unwrap_err();
-    match err {
-        ProviderError::Network(m) => assert!(m.contains("upload stalled"), "{m}"),
-        other => panic!("expected Network, got {other:?}"),
+    let storage = Arc::new(BunnyStorage::new(cfg).unwrap());
+    let upload = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .upload(
+                    &rp("a.txt"),
+                    UploadSource::Bytes("hello".into()),
+                    &text_plain(),
+                )
+                .await
+        }
+    });
+    received(&s, 1).await;
+
+    tokio::time::advance(Duration::from_millis(14_990)).await;
+    settle().await;
+    assert!(!upload.is_finished(), "gave up before 5 s + 10 s");
+    tokio::time::advance(Duration::from_millis(20)).await;
+    match upload.await.unwrap() {
+        Err(ProviderError::Network(m)) => assert!(m.contains("upload stalled"), "{m}"),
+        other => panic!("expected a stall, got {other:?}"),
     }
-    assert!(started.elapsed() < Duration::from_millis(1200));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_download_that_gets_no_answer_for_the_idle_timeout_is_abandoned() {
+    let _clock = hold_clock();
     let s = MockServer::start().await;
     Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(1500)))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(3600)))
         .expect(1)
         .mount(&s)
         .await;
     let mut cfg = config(&s);
-    cfg.transfer_idle_timeout = Duration::from_millis(250);
+    cfg.transfer_idle_timeout = Duration::from_secs(5);
     cfg.retry = RetryPolicy::immediate(0);
-    let started = Instant::now();
-    let result = BunnyStorage::new(cfg).unwrap().download(&rp("a.txt")).await;
-    match result {
+    let storage = Arc::new(BunnyStorage::new(cfg).unwrap());
+    let download = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        async move { storage.download(&rp("a.txt")).await.map(|_| ()) }
+    });
+    received(&s, 1).await;
+
+    tokio::time::advance(Duration::from_millis(4990)).await;
+    settle().await;
+    assert!(!download.is_finished(), "gave up before 5 s");
+    tokio::time::advance(Duration::from_millis(20)).await;
+    match download.await.unwrap() {
         Err(ProviderError::Network(m)) => assert!(m.contains("download stalled"), "{m}"),
-        other => panic!("expected Network, got {:?}", other.map(|_| "a stream")),
+        other => panic!("expected a stall, got {other:?}"),
     }
-    assert!(started.elapsed() < Duration::from_millis(1200));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stalled_upload_is_retried() {
+    let _clock = hold_clock();
     let s = MockServer::start().await;
     Mock::given(method("PUT"))
-        .respond_with(ResponseTemplate::new(201).set_delay(Duration::from_millis(1500)))
+        .respond_with(ResponseTemplate::new(201).set_delay(Duration::from_secs(3600)))
         .up_to_n_times(1)
         .expect(1)
         .mount(&s)
@@ -529,16 +701,93 @@ async fn a_stalled_upload_is_retried() {
         .mount(&s)
         .await;
     let mut cfg = config(&s);
-    cfg.transfer_idle_timeout = Duration::from_millis(250);
-    BunnyStorage::new(cfg)
-        .unwrap()
-        .upload(
-            &rp("a.txt"),
-            UploadSource::Bytes("hello".into()),
-            &text_plain(),
+    cfg.transfer_idle_timeout = Duration::from_secs(5);
+    cfg.request_timeout = Duration::from_secs(5);
+    cfg.retry = RetryPolicy::immediate(1);
+    let storage = Arc::new(BunnyStorage::new(cfg).unwrap());
+    let upload = tokio::spawn({
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .upload(
+                    &rp("a.txt"),
+                    UploadSource::Bytes("hello".into()),
+                    &text_plain(),
+                )
+                .await
+        }
+    });
+    received(&s, 1).await;
+    tokio::time::advance(Duration::from_secs(11)).await;
+    upload.await.unwrap().unwrap();
+    let requests = s.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|r| r.body == b"hello"));
+}
+
+/// Ledger 143, for transfers and deletes: their answers are read too (success or not), so one
+/// connection carries file after file.
+#[tokio::test]
+async fn answers_to_uploads_and_deletes_are_read_so_the_connection_is_reused() {
+    let created = || {
+        chunked_answer(
+            "201 Created",
+            &["{\"HttpCode\":201,", "\"Message\":", "\"ok\"}"],
         )
+    };
+    let busy = || chunked_answer("503 Service Unavailable", &["Service ", "busy, ", "retry"]);
+    let deleted = || chunked_answer("200 OK", &["{\"HttpCode\":200,", "\"Message\":", "\"ok\"}"]);
+    let server = ScriptedServer::start(vec![
+        created(),
+        busy(),
+        created(),
+        deleted(),
+        busy(),
+        deleted(),
+    ])
+    .await;
+    let mut cfg = BunnyConfig::for_site(
+        "testzone",
+        "storage.bunnycdn.com",
+        "secret",
+        &TransferSettings::default(),
+    );
+    cfg.base_url = Some(server.uri());
+    let storage = BunnyStorage::new(cfg).unwrap();
+    let up = || UploadSource::Bytes("hello".into());
+
+    storage
+        .upload(&rp("1.txt"), up(), &text_plain())
         .await
         .unwrap();
+    settle().await;
+    let busy_upload = storage.upload(&rp("2.txt"), up(), &text_plain()).await;
+    assert!(
+        matches!(busy_upload, Err(ProviderError::Server { status: 503, .. })),
+        "{busy_upload:?}"
+    );
+    settle().await;
+    storage
+        .upload(&rp("2.txt"), up(), &text_plain())
+        .await
+        .unwrap();
+    settle().await;
+    let uploads_on = server.connections();
+
+    storage.delete_file(&rp("1.txt")).await.unwrap();
+    settle().await;
+    let busy_delete = storage.delete_file(&rp("2.txt")).await;
+    assert!(
+        matches!(busy_delete, Err(ProviderError::Server { status: 503, .. })),
+        "{busy_delete:?}"
+    );
+    settle().await;
+    storage.delete_file(&rp("2.txt")).await.unwrap();
+
+    // Uploads and deletes have a client each, so a connection each.
+    assert_eq!(uploads_on, 1, "{:?}", server.requests());
+    assert_eq!(server.connections(), 2, "{:?}", server.requests());
+    assert_eq!(server.requests().len(), 6);
 }
 
 #[tokio::test]

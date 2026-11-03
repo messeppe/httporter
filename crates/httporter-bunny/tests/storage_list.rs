@@ -1,12 +1,15 @@
+mod support;
+
 use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
 use httporter_bunny::{BunnyConfig, BunnyStorage};
 use httporter_core::{
-    AuthHint, Capabilities, ChecksumKind, EmptyFolders, ProviderError, RemotePath, RetryPolicy,
-    StorageProvider,
+    AuthHint, Capabilities, ChecksumKind, EmptyFolders, HttpProtocol, ProviderError, ProxyMode,
+    RemotePath, RetryPolicy, StorageProvider, TransferSettings, UploadOptions, UploadSource,
 };
-use wiremock::matchers::{header, method, path};
+use support::{ScriptedServer, answer, chunked_answer, settle};
+use wiremock::matchers::{any, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn config(server: &MockServer) -> BunnyConfig {
@@ -18,6 +21,250 @@ fn config(server: &MockServer) -> BunnyConfig {
 
 fn storage(server: &MockServer) -> BunnyStorage {
     BunnyStorage::new(config(server)).unwrap()
+}
+
+/// The client a site uses (`for_site`), pointed at a local server.
+fn site(base_url: &str, settings: &TransferSettings) -> BunnyStorage {
+    let mut cfg = BunnyConfig::for_site("testzone", "storage.bunnycdn.com", "secret", settings);
+    cfg.base_url = Some(base_url.to_owned());
+    BunnyStorage::new(cfg).unwrap()
+}
+
+fn default_site(base_url: &str) -> BunnyStorage {
+    site(base_url, &TransferSettings::default())
+}
+
+fn rp(path: &str) -> RemotePath {
+    RemotePath::parse(path).unwrap()
+}
+
+fn is_server(result: &Result<impl Sized, ProviderError>, code: u16) -> bool {
+    matches!(result, Err(ProviderError::Server { status, .. }) if *status == code)
+}
+
+#[test]
+fn for_site_follows_the_transfer_settings() {
+    let settings = TransferSettings {
+        simultaneous: 200,
+        protocol: HttpProtocol::Http1Only,
+        keep_alive: false,
+        // Below the floor: the accessor makes it 5 s.
+        request_timeout_secs: 2,
+        proxy: ProxyMode::Custom("http://proxy.test:8080".into()),
+        ..TransferSettings::default()
+    };
+    let cfg = BunnyConfig::for_site("testzone", "sg.storage.bunnycdn.com", "secret", &settings);
+    assert_eq!(cfg.zone, "testzone");
+    assert_eq!(cfg.host, "sg.storage.bunnycdn.com");
+    assert_eq!(cfg.password, "secret");
+    // Callers own retries: one attempt per call.
+    assert_eq!(cfg.retry, RetryPolicy::immediate(0));
+    assert_eq!(cfg.list_retry, None);
+    assert_eq!(cfg.list_timeout, Duration::from_secs(20));
+    assert_eq!(cfg.transfer_concurrency, 96, "capped at Bunny's limit");
+    assert_eq!(cfg.request_timeout, Duration::from_secs(5));
+    assert_eq!(cfg.transfer_idle_timeout, Duration::from_secs(5));
+    assert!(cfg.http1_only);
+    assert!(!cfg.keep_alive);
+    assert_eq!(
+        cfg.proxy,
+        ProxyMode::Custom("http://proxy.test:8080".into())
+    );
+    assert_eq!(cfg.base_url, None);
+    assert_eq!(cfg.delete_concurrency, 16);
+
+    let cfg = BunnyConfig::for_site(
+        "testzone",
+        "sg.storage.bunnycdn.com",
+        "secret",
+        &TransferSettings::default(),
+    );
+    assert_eq!(cfg.transfer_concurrency, 32);
+    assert_eq!(cfg.request_timeout, Duration::from_secs(120));
+    assert_eq!(cfg.transfer_idle_timeout, Duration::from_secs(120));
+    assert!(!cfg.http1_only);
+    assert!(cfg.keep_alive);
+    assert_eq!(cfg.proxy, ProxyMode::System);
+}
+
+#[test]
+fn a_site_config_hides_its_secrets_when_printed() {
+    let settings = TransferSettings {
+        proxy: ProxyMode::Custom("http://proxyuser:proxy-pw@proxy.test:8080".into()),
+        ..TransferSettings::default()
+    };
+    let cfg = BunnyConfig::for_site("testzone", "storage.bunnycdn.com", "hunter2", &settings);
+    let text = format!("{cfg:?}");
+    assert!(!text.contains("hunter2"), "{text}");
+    assert!(!text.contains("proxy-pw"), "{text}");
+    assert!(text.contains("keep_alive: true"), "{text}");
+}
+
+/// Callers own retries: the client a site uses tries each request once, whatever the operation.
+#[tokio::test]
+async fn for_site_is_single_attempt() {
+    let s = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(503))
+        .expect(4)
+        .mount(&s)
+        .await;
+    let storage = default_site(&s.uri());
+    assert!(is_server(&storage.list(&RemotePath::root()).await, 503));
+    let upload = storage
+        .upload(
+            &rp("a.txt"),
+            UploadSource::Bytes("hello".into()),
+            &UploadOptions::new("text/plain"),
+        )
+        .await;
+    assert!(is_server(&upload, 503), "{upload:?}");
+    assert!(is_server(&storage.download(&rp("a.txt")).await, 503));
+    assert!(is_server(&storage.delete_file(&rp("a.txt")).await, 503));
+    assert_eq!(s.received_requests().await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn busy_400_maps_to_server_400() {
+    let s = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(400).set_body_string("Unable to process request"))
+        .expect(2)
+        .mount(&s)
+        .await;
+    let storage = default_site(&s.uri());
+    let busy = ProviderError::Server {
+        status: 400,
+        detail: "busy".into(),
+    };
+    assert_eq!(storage.list(&RemotePath::root()).await, Err(busy.clone()));
+    assert_eq!(storage.delete_file(&rp("a.txt")).await, Err(busy.clone()));
+    assert!(busy.is_retryable() && busy.is_slow_down());
+}
+
+/// Ruling Q17: the provider clamps a server's Retry-After before returning it; the caller's
+/// policy decides whether to wait.
+#[tokio::test]
+async fn retry_after_capped_at_300s() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "99999"))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let err = default_site(&s.uri())
+        .list(&RemotePath::root())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        ProviderError::RateLimited {
+            retry_after: Some(Duration::from_secs(300))
+        }
+    );
+}
+
+/// Ledger 143: an error answer left unread can't be followed by another request on the same
+/// connection, so every busy retry paid for a new connection (and, for real, a TLS handshake).
+/// The answers here come in chunks, which a dropped answer leaves behind.
+#[tokio::test]
+async fn error_bodies_are_read_so_the_connection_is_reused() {
+    let busy = || chunked_answer("503 Service Unavailable", &["Service ", "busy, ", "retry"]);
+    let server = ScriptedServer::start(vec![busy(), busy(), busy(), answer("200 OK", "[]")]).await;
+    let storage = default_site(&server.uri());
+    for _ in 0..3 {
+        assert!(is_server(&storage.list(&RemotePath::root()).await, 503));
+        settle().await;
+    }
+    let listing = storage.list(&RemotePath::root()).await.unwrap();
+    assert!(listing.entries.is_empty());
+    assert_eq!(server.requests().len(), 4);
+    assert_eq!(server.connections(), 1, "{:?}", server.requests());
+}
+
+#[tokio::test]
+async fn keep_alive_off_uses_a_fresh_connection_per_request() {
+    for (keep_alive, expected) in [(false, 3), (true, 1)] {
+        let server = ScriptedServer::start(vec![answer("200 OK", "[]"); 3]).await;
+        let storage = site(
+            &server.uri(),
+            &TransferSettings {
+                keep_alive,
+                ..TransferSettings::default()
+            },
+        );
+        for _ in 0..3 {
+            storage.list(&RemotePath::root()).await.unwrap();
+            settle().await;
+        }
+        assert_eq!(server.requests().len(), 3);
+        assert_eq!(
+            server.connections(),
+            expected,
+            "keep_alive {keep_alive}: {:?}",
+            server.requests()
+        );
+    }
+}
+
+/// `reachable` asks only whether the server answers: any status will do, and the probe carries
+/// no password.
+#[tokio::test]
+async fn reachable_ok_on_any_status() {
+    for code in [200, 301, 401, 403, 404, 500, 503] {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(code).insert_header("Location", "/elsewhere"))
+            .expect(1)
+            .mount(&s)
+            .await;
+        assert_eq!(default_site(&s.uri()).reachable().await, Ok(()), "{code}");
+        let requests = s.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "{code}: redirects are not followed");
+        assert!(
+            requests[0].headers.get("accesskey").is_none(),
+            "{code}: the probe sends no AccessKey"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reachable_network_error_offline() {
+    // A port nobody listens on.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let result = default_site(&format!("http://127.0.0.1:{port}"))
+        .reachable()
+        .await;
+    assert!(
+        matches!(result, Err(ProviderError::Network(_))),
+        "{result:?}"
+    );
+}
+
+/// A custom proxy carries every request, even to a local test endpoint.
+#[tokio::test]
+async fn a_custom_proxy_carries_the_requests() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/testzone/"))
+        .and(header("AccessKey", "secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .expect(1)
+        .mount(&proxy)
+        .await;
+    // Nothing answers at this address: only the proxy can.
+    let storage = site(
+        "http://bunny.invalid",
+        &TransferSettings {
+            proxy: ProxyMode::Custom(proxy.uri()),
+            ..TransferSettings::default()
+        },
+    );
+    let listing = storage.list(&RemotePath::root()).await.unwrap();
+    assert!(listing.entries.is_empty());
 }
 
 #[tokio::test]
