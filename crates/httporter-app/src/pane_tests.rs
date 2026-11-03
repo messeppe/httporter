@@ -63,10 +63,11 @@ pub(crate) fn window_with_panes(local: usize, remote: usize) -> AppWindow {
 }
 
 // Tab order with no sites: sidebar toggle, Add Site (Back, Forward, Publish and Settings are
-// turned off), then each pane: its list, then its Name, Size and Modified headers.
+// turned off), then each pane: its list, its crumbs, its Refresh button (the cloud pane's is
+// turned off without a site), then its Name, Size and Modified headers.
 pub(crate) const LOCAL_LIST: usize = 3;
-pub(crate) const LOCAL_NAME_HEADER: usize = 4;
-pub(crate) const REMOTE_LIST: usize = 7;
+pub(crate) const LOCAL_NAME_HEADER: usize = 5;
+pub(crate) const REMOTE_LIST: usize = 8;
 
 fn list_items(w: &impl ComponentHandle) -> Vec<ElementHandle> {
     ElementQuery::from_root(w)
@@ -602,8 +603,9 @@ fn breadcrumbs_work_from_the_keyboard_and_the_last_is_not_a_tab_stop() {
     tap(w.window(), Key::Space);
     assert_eq!(*clicked.borrow(), [0, 1]);
 
-    // After the list and the two crumbs comes the Name column header, not the current folder.
-    tab(&w, 3);
+    // After the list and the two crumbs come the Refresh button and the Name column header, not
+    // the current folder.
+    tab(&w, 4);
     tap(w.window(), Key::Return);
     assert_eq!(*clicked.borrow(), [0, 1]);
     assert_eq!(sorted.get(), 0);

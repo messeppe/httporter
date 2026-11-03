@@ -18,10 +18,11 @@ component FocusRing inherits Rectangle {
     visible: root.has-focus;
 }
 
-// Which key presses activate a focused control: Space or Return, not auto-repeat.
+// Which key presses activate a focused control: Space or Return, not auto-repeat and not with Alt
+// held (Alt+Space belongs to the window's system menu, and Alt+Return presses nothing).
 export global Activation {
-    pure public function triggers(text: string, repeat: bool) -> bool {
-        return !repeat && (text == Key.Space || text == Key.Return);
+    pure public function triggers(event: KeyEvent) -> bool {
+        return !event.repeat && !event.modifiers.alt && (event.text == Key.Space || event.text == Key.Return);
     }
 }
 
@@ -73,7 +74,7 @@ export component ToolButton inherits Rectangle {
         width: 0;
         enabled: root.enabled;
         key-pressed(event) => {
-            if (root.enabled && Activation.triggers(event.text, event.repeat)) {
+            if (root.enabled && Activation.triggers(event)) {
                 root.clicked();
                 return accept;
             }
@@ -152,7 +153,7 @@ export component CapsuleButton inherits Rectangle {
         width: 0;
         enabled: root.enabled;
         key-pressed(event) => {
-            if (root.enabled && Activation.triggers(event.text, event.repeat)) {
+            if (root.enabled && Activation.triggers(event)) {
                 root.clicked();
                 return accept;
             }

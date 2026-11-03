@@ -271,7 +271,7 @@ component CheckRow inherits Rectangle {
         width: 0;
         enabled: root.enabled;
         key-pressed(event) => {
-            if (root.enabled && event.text == Key.Space) {
+            if (root.enabled && event.text == Key.Space && !event.modifiers.alt) {
                 if (!event.repeat) {
                     root.toggle();
                 }

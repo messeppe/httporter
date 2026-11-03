@@ -91,6 +91,10 @@ export component AppWindow inherits Window {
     in property <string> local-status;
     in property <string> remote-status;
     in-out property <string> status-message;
+    // Which pane the message is about (0 This PC, 1 the cloud pane; -1 for neither): a drop on a
+    // pane says so here, and only a listing of that pane (or turning to the other one) takes the
+    // message away. A message about neither goes with a listing of either.
+    in-out property <int> status-message-pane: -1;
     // What is selected in a pane ("index.html selected · 383.4 KB"), empty for nothing. It takes
     // the place of the item count while the pane is the one shown.
     in property <string> local-selection-text;
@@ -464,6 +468,7 @@ export component AppWindow inherits Window {
     // Turning to the other pane puts its count in the status bar, over any message.
     changed local-pane-active => {
         root.status-message = "";
+        root.status-message-pane = -1;
         root.active-pane-changed();
     }
 
@@ -473,6 +478,10 @@ export component AppWindow inherits Window {
     FocusScope {
         focus-on-click: false;
         focus-on-tab-navigation: false;
+        // Holds the focus from the start, so that these keys work before anything has been clicked
+        // or tabbed to; a pane, a button or a sheet takes it for as long as it needs it, and the
+        // keys they do not use reach this scope all the same.
+        init => { self.focus(); }
         key-pressed(event) => {
             if (!event.modifiers.alt && !event.modifiers.meta && ((event.text == Key.F5 && !event.modifiers.control) || (event.modifiers.control && (event.text == "r" || event.text == "R")))) {
                 if (!event.repeat) {
@@ -681,7 +690,12 @@ export component AppWindow inherits Window {
                                     download-to => { root.download-to(); }
                                     new-folder => { root.new-folder(); }
                                     delete => { root.delete(); }
-                                    refresh => { root.refresh(); }
+                                    // The pane's own Refresh (button or menu) lists this pane, whichever was last used.
+                                    refresh => {
+                                        root.local-pane-active = true;
+                                        root.refresh();
+                                    }
+                                    key-inside => { root.local-pane-active = true; }
                                     show-in-explorer(row) => { root.show-in-explorer(row); }
                                     drag-moved(point) => { root.pane-drag-moved(0, point); }
                                     drag-ended(point) => { root.pane-drag-ended(0, point); }
@@ -703,6 +717,7 @@ export component AppWindow inherits Window {
                                     rows: root.remote-rows;
                                     header-chip: root.remote-chip;
                                     loading: root.remote-loading;
+                                    can-refresh: root.has-selection;
                                     drop-hover: (root.drop-hover-remote && root.has-selection) || root.drag-over-remote;
                                     drop-row: root.drag-over-remote ? root.drag-row-remote : (root.drop-hover-remote ? root.drop-hover-row : -1);
                                     cloud: true;
@@ -725,7 +740,11 @@ export component AppWindow inherits Window {
                                     download-to => { root.download-to(); }
                                     new-folder => { root.new-folder(); }
                                     delete => { root.delete(); }
-                                    refresh => { root.refresh(); }
+                                    refresh => {
+                                        root.local-pane-active = false;
+                                        root.refresh();
+                                    }
+                                    key-inside => { root.local-pane-active = false; }
                                     show-in-explorer(row) => { root.show-in-explorer(row); }
                                     paste => { root.paste(); }
                                     drag-moved(point) => { root.pane-drag-moved(1, point); }

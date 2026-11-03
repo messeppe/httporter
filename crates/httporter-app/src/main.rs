@@ -11,6 +11,7 @@ use drop_hook::{DropBatch, PaneGeometry, PaneLayout, PaneSide};
 use httporter_core::Journal;
 use httporter_platform::{KeyringStore, SqliteJournal, Store, default_db_path, win};
 use httporter_transfer::Engine;
+use selection::ActivePane;
 use session::{RealFactory, Session};
 use slint::Model;
 use transfers::Transfers;
@@ -194,7 +195,7 @@ fn install_drop(ui: &AppWindow, transfers: Arc<Transfers>) {
         },
         move || {
             if let Some(ui) = lost_ui.upgrade() {
-                ui.set_status_message(copy::DROP_NOT_LOCATED.into());
+                binding::show_status(&ui, None, copy::DROP_NOT_LOCATED.to_owned());
             }
         },
         move || {
@@ -222,7 +223,12 @@ fn dropped(ui: &AppWindow, transfers: &Arc<Transfers>, batch: DropBatch) {
         (PaneSide::Remote, Some(site)) => copy::drop_not_ready(&site),
         (PaneSide::Local, site) => copy::drop_status(&batch, site.as_deref(), None),
     };
-    ui.set_status_message(status.into());
+    // The message belongs to the pane the files were dropped on: only that pane clears it.
+    let pane = match batch.side {
+        PaneSide::Local => ActivePane::ThisPc,
+        PaneSide::Remote => ActivePane::Cloud,
+    };
+    binding::show_status(ui, Some(pane), status);
 }
 
 /// A pane's place in the window as the hook wants it.

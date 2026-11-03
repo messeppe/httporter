@@ -4,7 +4,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{History, Session, Step, Ticket, lock};
+use super::{Course, Session, Step, Ticket, lock};
 use crate::copy;
 use crate::local_fs::{LocalEntry, LocalListing, list_drives, list_local};
 use crate::sort::{SortKey, sort_rows};
@@ -33,8 +33,8 @@ pub(super) struct LocalPane {
     /// See [`LocalView::version`].
     pub(super) version: u64,
     sort: (SortKey, bool),
-    /// Places: `None` is the list of drives.
-    history: History<Option<PathBuf>>,
+    /// Places: `None` is the list of drives. Also where the request on its way is going.
+    course: Course<Option<PathBuf>>,
     /// `None` for the list of drives.
     dir: Option<PathBuf>,
     /// In the order the rows show them, so a row index is an index into this list.
@@ -54,7 +54,7 @@ impl LocalPane {
             latest: Ticket(0),
             version: 0,
             sort,
-            history: History::default(),
+            course: Course::default(),
             dir: None,
             entries: drives,
             skipped: 0,
@@ -158,7 +158,8 @@ impl Session {
         ticket: Ticket,
         started: impl FnOnce(LocalView) + Send,
     ) -> LocalView {
-        let pick = |pane: &LocalPane| pane.history.back_to();
+        // Counted from where a Back already on its way is going: two quick Backs are two steps.
+        let pick = |pane: &LocalPane| pane.course.ahead().back_to();
         self.navigate_local(ticket, Step::Back, pick, started).await
     }
 
@@ -167,7 +168,7 @@ impl Session {
         ticket: Ticket,
         started: impl FnOnce(LocalView) + Send,
     ) -> LocalView {
-        let pick = |pane: &LocalPane| pane.history.forward_to();
+        let pick = |pane: &LocalPane| pane.course.ahead().forward_to();
         self.navigate_local(ticket, Step::Forward, pick, started)
             .await
     }
@@ -178,8 +179,9 @@ impl Session {
         ticket: Ticket,
         started: impl FnOnce(LocalView) + Send,
     ) -> LocalView {
-        let pick = |pane: &LocalPane| Some(pane.dir.clone());
-        self.navigate_local(ticket, Step::Go, pick, started).await
+        let pick = |pane: &LocalPane| Some(pane.course.refresh_target(&pane.dir));
+        self.navigate_local(ticket, Step::Refresh, pick, started)
+            .await
     }
 
     /// Reorders the This PC pane (and every later listing in it).
@@ -211,6 +213,8 @@ impl Session {
             let Some(target) = pick(&pane) else {
                 return self.local_view_of(&pane);
             };
+            let shown = pane.dir.clone();
+            pane.course.begin(step, &shown, target.clone());
             pane.latest = ticket;
             pane.loading = true;
             pane.version += 1;
@@ -236,10 +240,8 @@ impl Session {
         match listed {
             Ok(listing) => {
                 let (key, ascending) = pane.sort;
-                if pane.dir != target {
-                    let left = std::mem::replace(&mut pane.dir, target);
-                    pane.history.record(step, left);
-                }
+                pane.dir = target;
+                pane.course.arrive();
                 pane.entries = listing.entries;
                 sort_rows(&mut pane.entries, key, ascending);
                 pane.skipped = listing.skipped;
@@ -249,7 +251,12 @@ impl Session {
                 let place = target
                     .as_deref()
                     .map_or_else(|| copy::THIS_PC.to_owned(), |dir| dir.display().to_string());
-                pane.error = Some(copy::local_open_failed(&place, e));
+                pane.course.fail();
+                pane.error = Some(if e.kind() == io::ErrorKind::NotFound {
+                    copy::local_not_found(&place)
+                } else {
+                    copy::local_open_failed(&place, e)
+                });
             }
         }
         pane.loading = false;
@@ -294,8 +301,8 @@ impl Session {
             rows: rows_from_local_sorted(&pane.entries, (self.now)(), key, ascending),
             crumbs: pane.dir.as_deref().map(local_crumbs).unwrap_or_default(),
             status: copy::items_status(pane.entries.len(), pane.skipped),
-            can_back: !pane.history.back.is_empty(),
-            can_forward: !pane.history.forward.is_empty(),
+            can_back: !pane.course.history.back.is_empty(),
+            can_forward: !pane.course.history.forward.is_empty(),
             loading: pane.loading,
             error: pane.error.clone(),
         }

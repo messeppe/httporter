@@ -332,6 +332,7 @@ fn a_remote_view_is_applied_to_the_window() {
         can_forward: false,
         loading: false,
         error: None,
+        ..RemoteView::default()
     };
     ui.set_remote_selected(1);
     apply_remote(&ui, &view, Change::Listed);

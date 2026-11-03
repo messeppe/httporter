@@ -233,6 +233,25 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Puts `text` in the status line, in place of the item count. A message about one pane (what a
+/// drop on it did) belongs to that pane: only a listing of it, or the user turning to the other
+/// pane, takes it away ([`clear_status`]). `None`: a message about neither, which a listing of
+/// either pane ends.
+pub fn show_status(ui: &AppWindow, owner: Option<ActivePane>, text: String) {
+    ui.set_status_message_pane(owner.map_or(-1, ActivePane::index));
+    ui.set_status_message(text.into());
+}
+
+/// A listing of `pane` (or the user using it) ends the status message, unless it belongs to the
+/// other pane.
+fn clear_status(ui: &AppWindow, pane: ActivePane) {
+    let owner = ui.get_status_message_pane();
+    if owner < 0 || owner == pane.index() {
+        ui.set_status_message(SharedString::new());
+        ui.set_status_message_pane(-1);
+    }
+}
+
 struct Ctx {
     ui: Weak<AppWindow>,
     rt: Handle,
@@ -249,6 +268,10 @@ struct Ctx {
     sheet_run: Arc<AtomicU64>,
     /// What the sheets know that the window does not show (see [`SheetState`]).
     sheet_state: Arc<Mutex<SheetState>>,
+    /// A site is being written (an Add Site or Save, or Add n Sites, past the point where Cancel
+    /// can stop it). Cancel clears the sheet's busy flag and the sheet can be opened again meanwhile;
+    /// a second Add Site is ignored until this one has ended, so it can't add the site twice.
+    writing: Arc<AtomicBool>,
     /// The `.env` file picker is open (it has no owner window: a second click is ignored).
     picking_env: Arc<AtomicBool>,
     /// The transfer engine and what it is waiting for; `None` in the window's tests.
@@ -307,7 +330,7 @@ impl Link {
     pub fn status(&self, text: String) {
         let _ = self
             .ui
-            .upgrade_in_event_loop(move |ui| ui.set_status_message(text.into()));
+            .upgrade_in_event_loop(move |ui| show_status(&ui, None, text));
     }
 
     /// Lists the cloud pane's folder again if it shows `dir` of `site`, a folder within it, or the
@@ -432,7 +455,8 @@ impl Ctx {
         let task = spawn_remote(&self.link(), op);
         if matches!(op, RemoteOp::Select(_)) {
             // A site picked before this one is of no interest any more. (Older listings within a
-            // site need no aborting: the session drops their answers.)
+            // site need no aborting here: the session gives them up itself when a newer request
+            // takes effect, which frees their connections, and drops what they answer.)
             self.opening.replace(task);
         }
     }
@@ -488,7 +512,7 @@ impl Ctx {
         let before = selection.rows();
         change(selection, rows.len());
         show_selection(&ui, &shown, pane, &before);
-        ui.set_status_message(SharedString::new());
+        clear_status(&ui, pane);
         refresh_toolbar(&ui, &shown);
     }
 
@@ -592,22 +616,30 @@ impl Ctx {
 
     /// Add Site, or Save on Edit Site (also Return in a field of the sheet): tests the connection,
     /// and saves the site only if that works. The sheet stays busy meanwhile. Cancel gives the
-    /// test up; once the test has passed, the save is a task of its own that Cancel does not
-    /// reach, so a site whose secret is being written is always saved, listed and shown (see
-    /// [`show_added`]). A changed site gets a new client, and its transfers stopped by a failed
-    /// sign-in go on with it.
+    /// test up. Once the test has passed, the save is a task of its own that Cancel does not
+    /// abort, but which asks, at the moment the write would begin, whether the run is still the
+    /// latest: a Cancel before that saves nothing, and one after it leaves the site fully added,
+    /// listed and shown (see [`show_added`]). A changed site gets a new client, and its transfers
+    /// stopped by a failed sign-in go on with it.
+    ///
+    /// While such a write is going on, another press of Add Site (the sheet can be cancelled and
+    /// opened again meanwhile) is ignored, so the site is not added twice.
     fn save_form(&self, form: SiteForm, name: String) {
         let Some(ui) = self.ui.upgrade() else { return };
+        if self.writing.load(Ordering::SeqCst) {
+            return;
+        }
         let (form, editing) = self.complete(form);
         if !self.checked(&ui, &form, editing.is_some()) {
             return;
         }
         let edited = editing.is_some();
         let done = self.sheet_done(&ui, matches!(form, SiteForm::S3 { .. }));
-        let (session, rt, transfers) = (
+        let (session, rt, transfers, writing) = (
             self.session.clone(),
             self.rt.clone(),
             self.transfers.clone(),
+            self.writing.clone(),
         );
         let task = self.rt.spawn(async move {
             let prepared = match session.prepare(form, editing, name).await {
@@ -619,7 +651,24 @@ impl Ctx {
                 return done.post(Err(tested.text));
             }
             rt.spawn(async move {
-                let saved = session.store_prepared(prepared).await;
+                let _writing = ClearOnDrop(writing.clone());
+                let proceed = {
+                    let (runs, run, writing) = (done.runs.clone(), done.run, writing.clone());
+                    move || {
+                        // Marked before the token is looked at, so that whoever sees the run
+                        // go ahead can also see that a write has begun.
+                        writing.store(true, Ordering::SeqCst);
+                        let latest = runs.load(Ordering::SeqCst) == run;
+                        if !latest {
+                            writing.store(false, Ordering::SeqCst);
+                        }
+                        latest
+                    }
+                };
+                // `None`: the sheet was cancelled before the write began, and nothing was saved.
+                let Some(saved) = session.store_prepared_if(prepared, proceed).await else {
+                    return;
+                };
                 if let (true, Ok(record), Some(transfers)) = (edited, &saved, &transfers) {
                     transfers.site_edited(record).await;
                 }
@@ -698,6 +747,9 @@ impl Ctx {
     /// Like a save, it is not given up by Cancel once begun.
     fn add_zones(&self, checked: &ModelRc<bool>, keep: bool) {
         let Some(ui) = self.ui.upgrade() else { return };
+        if self.writing.load(Ordering::SeqCst) {
+            return;
+        }
         let (zones, key) = {
             let state = lock(&self.sheet_state);
             let Some(list) = &state.zones else { return };
@@ -719,8 +771,11 @@ impl Ctx {
             return;
         }
         let done = self.sheet_done(&ui, false);
-        let session = self.session.clone();
+        let (session, writing) = (self.session.clone(), self.writing.clone());
+        writing.store(true, Ordering::SeqCst);
+        let writing = ClearOnDrop(writing);
         self.rt.spawn(async move {
+            let _writing = writing;
             let added = session.add_zones(zones, key).await;
             done.post_many(added);
         });
@@ -759,7 +814,8 @@ impl Ctx {
         }
     }
 
-    /// The sheet was cancelled: give up its test (a save that has begun is not given up), forget
+    /// The sheet was cancelled: give up its test (a save that has begun is not given up, and a
+    /// save that has not begun will find its run is no longer the latest and write nothing), forget
     /// what it knew, and let it be used again.
     fn cancel_sheet(&self) {
         self.sheet_run.fetch_add(1, Ordering::SeqCst);
@@ -952,7 +1008,7 @@ fn duplicate_site(ctx: &Ctx, index: usize) {
                 sync_sites(&ui, &session.site_items());
                 open_site(&ui, &session, &record.id);
             }
-            Err(text) => ui.set_status_message(text.into()),
+            Err(text) => show_status(&ui, None, text),
         });
     });
 }
@@ -1001,7 +1057,7 @@ fn show_removed(
     removed: Result<(), String>,
 ) {
     if let Err(text) = removed {
-        ui.set_status_message(text.into());
+        show_status(ui, None, text);
         return;
     }
     let session = &link.session;
@@ -1071,10 +1127,11 @@ fn import_profile(ctx: &Ctx, index: usize) {
     }
 }
 
-/// Marks the `.env` picker closed when dropped (also if the picker panicked).
-struct PickerOpen(Arc<AtomicBool>);
+/// Clears a flag when dropped, also if the task or thread holding it panicked: the `.env` picker is
+/// closed, the sheet's site is no longer being written.
+struct ClearOnDrop(Arc<AtomicBool>);
 
-impl Drop for PickerOpen {
+impl Drop for ClearOnDrop {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
@@ -1087,7 +1144,7 @@ fn import_env(ctx: &Ctx) {
     if ctx.picking_env.swap(true, Ordering::SeqCst) {
         return;
     }
-    let open = PickerOpen(ctx.picking_env.clone());
+    let open = ClearOnDrop(ctx.picking_env.clone());
     let (weak, state) = (ctx.ui.clone(), ctx.sheet_state.clone());
     ctx.rt.spawn_blocking(move || {
         let filters: [(&str, &[&str]); 2] =
@@ -1180,6 +1237,7 @@ fn install_with(
         buckets: Slot::default(),
         sheet_run: Arc::new(AtomicU64::new(0)),
         sheet_state: Arc::default(),
+        writing: Arc::default(),
         picking_env: Arc::default(),
         transfers: transfers.clone(),
     });
@@ -1516,7 +1574,10 @@ fn show_remote(
     change: Change,
 ) {
     let mut shown = lock(shown);
-    if view.version > shown.remote {
+    // A view of a site the user has left (its listing was on its way when another was chosen) is
+    // not shown under the new site's name.
+    let of_chosen_site = view.site == chosen_site(ui, session);
+    if view.version > shown.remote && of_chosen_site {
         shown.remote = view.version;
         shown.remote_error = view.error.clone();
         apply_remote(ui, view, change);
@@ -1564,6 +1625,12 @@ fn show_local(
     refresh_toolbar(ui, &shown);
 }
 
+/// The id of the site chosen in the sidebar, if any.
+fn chosen_site(ui: &AppWindow, session: &Session) -> Option<SiteId> {
+    let index = usize::try_from(ui.get_selected_site()).ok()?;
+    session.site_id_at(index)
+}
+
 /// Another site was picked in the sidebar. The pane title follows the sidebar at once, so the
 /// cloud pane is emptied (not the old site's files under the new site's name) and the old site's
 /// error leaves the banner. The rest of the window keeps what it shows until the new site's view
@@ -1574,6 +1641,15 @@ fn start_opening_site(ui: &AppWindow, shown: &Mutex<Shown>, notice: Option<Strin
     ui.set_remote_selected(-1);
     ui.set_remote_offer_edit(false);
     ui.set_remote_selection_text(SharedString::new());
+    // Nothing is known of the new site yet: the status bar says it is connecting (not the old
+    // site's count, nor "0 items"), and there is nowhere to go back or forward to until its view
+    // arrives with a history of its own.
+    ui.set_remote_status(copy::CONNECTING.into());
+    ui.set_connection_text(copy::CONNECTING.into());
+    ui.set_connection_ok(true);
+    ui.set_remote_loading(true);
+    ui.set_remote_can_go_back(false);
+    ui.set_remote_can_go_forward(false);
     let mut shown = lock(shown);
     shown.remote_error = None;
     shown.remote_rows.clear();
@@ -1908,9 +1984,15 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     ui.set_status_right(view.status_right.as_str().into());
     ui.set_remote_can_go_back(view.can_back);
     ui.set_remote_can_go_forward(view.can_forward);
-    if change.counts() && !failed {
+    if view.connecting {
+        // Nothing has come back from the site yet: no count, and not a "0 items" that would pass
+        // for one.
+        ui.set_remote_status(copy::CONNECTING.into());
+    } else if (change.counts() && !failed) || (failed && view.rows.is_empty()) {
         ui.set_remote_status(copy::items(view.rows.len()).into());
-        ui.set_status_message(SharedString::new());
+    }
+    if change.counts() && !failed {
+        clear_status(ui, ActivePane::Cloud);
     }
 }
 
@@ -1937,7 +2019,7 @@ fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
     ui.set_local_can_go_forward(view.can_forward);
     if change.counts() && !failed {
         ui.set_local_status(view.status.as_str().into());
-        ui.set_status_message(SharedString::new());
+        clear_status(ui, ActivePane::ThisPc);
     }
 }
 

@@ -117,7 +117,7 @@ component QuietAction inherits Rectangle {
         width: 0;
         enabled: root.enabled;
         key-pressed(event) => {
-            if (root.enabled && Activation.triggers(event.text, event.repeat)) {
+            if (root.enabled && Activation.triggers(event)) {
                 root.clicked();
                 return accept;
             }

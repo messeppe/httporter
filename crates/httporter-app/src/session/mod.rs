@@ -13,6 +13,11 @@
 //! the user has left, and is dropped. From the moment a request takes effect until its answer is
 //! in, the pane says it is loading.
 //!
+//! A request that takes effect also gives up the cloud listing of the one before
+//! ([`until_cancelled`]), which frees the connection it was using. The history moves when a
+//! request takes effect, not when its answer is in ([`Course`]): two quick Backs are two steps,
+//! F5 asks again for the folder on its way, and a listing that fails leaves the history as it was.
+//!
 //! Every site has one storage client, kept by the [`SiteHub`] and shared with the transfer engine.
 //! Each call on it is a single attempt, so every listing someone waits for (a pane, Test
 //! Connection, the test before a site is added) retries a little itself
@@ -38,12 +43,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::Poll;
 
 use chrono::NaiveDateTime;
 use httporter_bunny::{BunnyAccount, BunnyConfig, BunnyStorage, ZoneList};
 use httporter_core::{ProviderError, StorageProvider, TransferSettings};
 use httporter_platform::{CredentialStore, SETTINGS_TRANSFERS, Store};
 use httporter_s3::{S3Config, S3Storage};
+use tokio::sync::oneshot;
 
 use crate::site_hub::SiteHub;
 use crate::sort::SortKey;
@@ -135,10 +142,12 @@ enum Step {
     Go,
     Back,
     Forward,
+    /// To the place already shown, or already on its way: the history stays as it is.
+    Refresh,
 }
 
 /// The places a pane can go back and forward to, Finder-style. The last entry is the nearest.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct History<T> {
     back: Vec<T>,
     forward: Vec<T>,
@@ -177,8 +186,126 @@ impl<T: Clone> History<T> {
                 self.forward.pop();
                 self.back.push(left);
             }
+            Step::Refresh => {}
         }
     }
+}
+
+/// A request that has taken effect and whose listing is on its way.
+#[derive(Clone, Debug)]
+struct Pending<T> {
+    step: Step,
+    /// The place it is going to.
+    at: T,
+    /// The history as it will be once the listing is in, counted from `at`.
+    history: History<T>,
+}
+
+/// A pane's history, and the request on its way, if any.
+///
+/// The history is moved when a request takes effect, not when its listing comes in: a second Back
+/// pressed while the first one is still being listed goes one step further, from where the first
+/// is going, rather than to the same place again. If the listing fails, the history is as it was
+/// (a Back to a folder that is gone can be tried again, or Forward taken).
+#[derive(Clone, Debug)]
+struct Course<T> {
+    /// Counted from the place shown.
+    history: History<T>,
+    pending: Option<Pending<T>>,
+}
+
+impl<T> Default for Course<T> {
+    fn default() -> Self {
+        Self {
+            history: History::default(),
+            pending: None,
+        }
+    }
+}
+
+impl<T: Clone + PartialEq> Course<T> {
+    /// The request on its way, if it is a Back or a Forward, which the next one carries on from.
+    fn travelling(&self) -> Option<&Pending<T>> {
+        self.pending
+            .as_ref()
+            .filter(|p| matches!(p.step, Step::Back | Step::Forward))
+    }
+
+    /// The history a Back or Forward takes its place from: where the Back or Forward on its way
+    /// is going, or else the place shown.
+    fn ahead(&self) -> &History<T> {
+        self.travelling().map_or(&self.history, |p| &p.history)
+    }
+
+    /// Where a Refresh goes: the place on its way, or else `shown`.
+    fn refresh_target(&self, shown: &T) -> T {
+        self.pending
+            .as_ref()
+            .map_or_else(|| shown.clone(), |p| p.at.clone())
+    }
+
+    /// A request to go to `target` by `step` has taken effect, with `shown` on show.
+    fn begin(&mut self, step: Step, shown: &T, target: T) {
+        if step == Step::Refresh {
+            // It asks again for what is on its way, which has moved the history already.
+            match &mut self.pending {
+                Some(pending) => pending.at = target,
+                None => {
+                    self.pending = Some(Pending {
+                        step,
+                        at: target,
+                        history: self.history.clone(),
+                    });
+                }
+            }
+            return;
+        }
+        let along = matches!(step, Step::Back | Step::Forward);
+        let (from, mut history) = match self.travelling() {
+            Some(p) if along => (p.at.clone(), p.history.clone()),
+            _ => (shown.clone(), self.history.clone()),
+        };
+        // A Back or Forward always moves along its list; a new place only if it is another one.
+        if along || target != from {
+            history.record(step, from);
+        }
+        self.pending = Some(Pending {
+            step,
+            at: target,
+            history,
+        });
+    }
+
+    /// The listing of the request on its way is in: the pane is there.
+    fn arrive(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.history = pending.history;
+        }
+    }
+
+    /// The listing failed: the pane stays where it was, with the history it had.
+    fn fail(&mut self) {
+        self.pending = None;
+    }
+}
+
+/// Runs `work` until `cancel` goes off (it is sent to, or its sender is dropped), and returns
+/// what `work` returned, or `None` if `cancel` went off first. Then `work` is dropped, which
+/// gives up the request it was making and frees its connection.
+pub(crate) async fn until_cancelled<T>(
+    work: impl Future<Output = T>,
+    cancel: oneshot::Receiver<()>,
+) -> Option<T> {
+    let mut work = std::pin::pin!(work);
+    let mut cancel = cancel;
+    std::future::poll_fn(move |cx| {
+        // Cancelled already: `work` is not even started.
+        if Pin::new(&mut cancel).poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        work.as_mut().poll(cx).map(Some)
+    })
+    .await
 }
 
 /// The app's state. It is `Send` and `Sync`: the app shares one `Arc<Session>` between the UI

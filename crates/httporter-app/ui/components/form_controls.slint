@@ -367,7 +367,7 @@ export component RegionPicker inherits Rectangle {
                 root.choose(root.current-index - 1);
                 return accept;
             }
-            if ((event.text == Key.Return || event.text == Key.Space) && !event.repeat) {
+            if ((event.text == Key.Return || event.text == Key.Space) && !event.repeat && !event.modifiers.alt) {
                 root.open-list();
                 return accept;
             }
@@ -401,7 +401,7 @@ export component RegionPicker inherits Rectangle {
 
             list-scope := FocusScope {
                 key-pressed(event) => {
-                    if (event.text == Key.Escape || ((event.text == Key.Return || event.text == Key.Space) && !event.repeat)) {
+                    if (event.text == Key.Escape || ((event.text == Key.Return || event.text == Key.Space) && !event.repeat && !event.modifiers.alt)) {
                         popup.close();
                         return accept;
                     }
@@ -571,7 +571,7 @@ export component CheckLine inherits Rectangle {
         width: 0;
         enabled: root.enabled;
         key-pressed(event) => {
-            if (root.enabled && event.text == Key.Space) {
+            if (root.enabled && event.text == Key.Space && !event.modifiers.alt) {
                 if (!event.repeat) {
                     root.toggled(!root.checked);
                 }

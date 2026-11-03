@@ -83,7 +83,7 @@ component SiteRow inherits Rectangle {
         x: 0;
         width: 0;
         key-pressed(event) => {
-            if (Activation.triggers(event.text, event.repeat)) {
+            if (Activation.triggers(event)) {
                 root.clicked();
                 return accept;
             }

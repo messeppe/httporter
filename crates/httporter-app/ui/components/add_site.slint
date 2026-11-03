@@ -243,7 +243,7 @@ component BucketRow inherits Rectangle {
         x: 0;
         width: 0;
         key-pressed(event) => {
-            if (!event.repeat && (event.text == Key.Space || event.text == Key.Return)) {
+            if (!event.repeat && !event.modifiers.alt && (event.text == Key.Space || event.text == Key.Return)) {
                 root.picked();
                 return accept;
             }

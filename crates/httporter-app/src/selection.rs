@@ -151,6 +151,14 @@ impl ActivePane {
             _ => None,
         }
     }
+
+    /// The number the window uses for the pane (0 This PC, 1 the cloud pane).
+    pub fn index(self) -> i32 {
+        match self {
+            Self::ThisPc => 0,
+            Self::Cloud => 1,
+        }
+    }
 }
 
 /// What [`toolbar_state`] needs to know.

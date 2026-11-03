@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use httporter_bunny::{REGIONS, ZoneInfo, ZoneList, storage_host};
 use httporter_core::{
-    AccountId, ProviderKind, RemotePath, S3Preset, S3Site, SiteId, SiteRecord, StorageProvider,
+    AccountId, ProviderError, ProviderKind, RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
+    StorageProvider,
 };
 use httporter_platform::{
     AccountRecord, CredentialKey, CredentialStore, SiteList, SiteSecret, Store, StoreError,
@@ -27,7 +28,7 @@ use super::{Session, blocking, lock};
 use crate::add_site::ValidSite;
 use crate::add_site::{SiteForm, s3_host};
 use crate::copy::{self, Attempt};
-use crate::site_hub::{HubError, list_interactive, read_secret};
+use crate::site_hub::{HubError, SiteHub, list_interactive, read_secret};
 
 /// The outcome of the Add Site sheet's Test Connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,13 +304,7 @@ impl Session {
             },
             Err(error) => TestResult {
                 ok: false,
-                text: copy::describe_for(
-                    site.provider,
-                    &error,
-                    &site.container,
-                    &site.host,
-                    Attempt::List(&root),
-                ),
+                text: listing_error_text(site, &error, &root),
             },
         }
     }
@@ -341,30 +336,40 @@ impl Session {
     /// waits for it (Cancel on the sheet) does not stop it. Nothing is left half done: either the
     /// secret and the site are both stored and the site is listed, or neither is changed.
     pub async fn store_prepared(&self, prepared: Prepared) -> Result<SiteRecord, String> {
-        let (creds, store, book, hub) = (
+        let (creds, store, book, hub) = self.writers();
+        blocking(move || write_prepared(&*creds, &store, &book, &hub, prepared)).await
+    }
+
+    /// As [`Self::store_prepared`], but `proceed` is asked first, on the blocking thread, at the
+    /// moment the write would begin: if it says no, nothing is written and the answer is `None`.
+    /// The Add Site sheet passes "is this run still the latest", so a Cancel before the write
+    /// saves nothing, and one after it saves the whole site.
+    pub async fn store_prepared_if(
+        &self,
+        prepared: Prepared,
+        proceed: impl FnOnce() -> bool + Send + 'static,
+    ) -> Option<Result<SiteRecord, String>> {
+        let (creds, store, book, hub) = self.writers();
+        blocking(move || proceed().then(|| write_prepared(&*creds, &store, &book, &hub, prepared)))
+            .await
+    }
+
+    /// What a write of a site needs, to hand to a blocking thread.
+    #[allow(clippy::type_complexity)]
+    fn writers(
+        &self,
+    ) -> (
+        Arc<dyn CredentialStore>,
+        Arc<Mutex<Store>>,
+        Arc<Mutex<Book>>,
+        Arc<SiteHub>,
+    ) {
+        (
             self.creds.clone(),
             self.store.clone(),
             self.book.clone(),
             self.hub.clone(),
-        );
-        blocking(move || {
-            let Prepared {
-                record,
-                secret,
-                editing,
-            } = prepared;
-            let stored = secret.to_stored();
-            let saved = if editing {
-                update_in_stores(&*creds, &store, &book, record, &stored)
-            } else {
-                save_to_stores(&*creds, &store, &book, record, Some(&stored))
-            };
-            if let Ok(record) = &saved {
-                hub.invalidate(&record.id);
-            }
-            saved
-        })
-        .await
+        )
     }
 
     /// Saves a copy of site `id` under a new id, with its secret, named "{name} copy". Blocks
@@ -531,6 +536,14 @@ impl Session {
             .map_err(|e| hub_error_text(&e, site))
     }
 
+    /// The id of the site in row `index` of the sidebar (the order of [`Self::sites`]).
+    pub fn site_id_at(&self, index: usize) -> Option<SiteId> {
+        lock(&self.book)
+            .sites
+            .get(index)
+            .map(|site| site.id.clone())
+    }
+
     /// The saved site with id `id`.
     pub fn site(&self, id: &SiteId) -> Option<SiteRecord> {
         lock(&self.book)
@@ -658,6 +671,33 @@ fn secret_of(
     }
 }
 
+/// Writes a prepared site: a new one with [`save_to_stores`], a changed one with
+/// [`update_in_stores`]; the site's client is dropped from the hub, so the next request builds one
+/// with what was saved. One blocking task from the first write to the last change of the list.
+fn write_prepared(
+    creds: &dyn CredentialStore,
+    store: &Mutex<Store>,
+    book: &Mutex<Book>,
+    hub: &SiteHub,
+    prepared: Prepared,
+) -> Result<SiteRecord, String> {
+    let Prepared {
+        record,
+        secret,
+        editing,
+    } = prepared;
+    let stored = secret.to_stored();
+    let saved = if editing {
+        update_in_stores(creds, store, book, record, &stored)
+    } else {
+        save_to_stores(creds, store, book, record, Some(&stored))
+    };
+    if let Ok(record) = &saved {
+        hub.invalidate(&record.id);
+    }
+    saved
+}
+
 /// Puts a new site's secret in the credential store (when it has one) and the site in the
 /// database, then reads the list of sites back and lists the new site. Whichever write fails, the
 /// other leaves nothing behind: no secret stays for a site that was not saved. It is one blocking
@@ -745,6 +785,27 @@ fn keep_account_key(
         return Err(e.to_string());
     }
     Ok(())
+}
+
+/// Why listing `dir` of `site` failed, in words. A 404 on the root names the zone (or bucket) and
+/// its region, the fields that can be wrong.
+pub(super) fn listing_error_text(
+    site: &SiteRecord,
+    error: &ProviderError,
+    dir: &RemotePath,
+) -> String {
+    let region = match SiteProvider::of(site) {
+        SiteProvider::Bunny => region_city(&site.region),
+        SiteProvider::S3(_) => &site.region,
+    };
+    copy::describe_listing(
+        site.provider,
+        error,
+        &site.container,
+        &site.host,
+        region,
+        dir,
+    )
 }
 
 /// Why `site` has no client, in words.

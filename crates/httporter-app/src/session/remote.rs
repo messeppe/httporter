@@ -7,10 +7,11 @@ use std::sync::Arc;
 use httporter_core::{
     Entry, Listing, ProviderError, RemotePath, RequestInfo, SiteId, SiteRecord, StorageProvider,
 };
+use tokio::sync::oneshot;
 
-use super::sites::{SiteProvider, hub_error_text};
-use super::{History, Session, Step, Ticket, blocking, lock};
-use crate::copy::{self, Attempt};
+use super::sites::{SiteProvider, hub_error_text, listing_error_text};
+use super::{Course, Session, Step, Ticket, blocking, lock, until_cancelled};
+use crate::copy;
 use crate::site_hub::{HubError, list_interactive};
 use crate::sort::SortKey;
 use crate::viewmodel::{RowData, remote_crumbs, rows_from_remote_sorted, sort_remote_entries};
@@ -31,11 +32,18 @@ pub struct RemoteView {
     /// reach the window out of order; one older than the view on screen is dropped. A click on
     /// a row or a crumb names the version it saw, and is ignored if the pane has changed since.
     pub version: u64,
+    /// The site the view is of (`None` with no site open). The window shows a view only while
+    /// this is the site chosen in the sidebar, so a late view from the site left a moment ago
+    /// never lands under the new site's name.
+    pub site: Option<SiteId>,
     pub rows: Vec<RowData>,
     pub crumbs: Vec<String>,
     /// The toolbar's connection pill: "HTTPS · 21 ms", "Connecting…" while a site opens, "Not
     /// connected" after a failed connection, or empty with no site.
     pub connection: String,
+    /// The site is opening: nothing has come back from it yet. The status bar says so instead
+    /// of counting the (no) items.
+    pub connecting: bool,
     /// The pill is green (connected or connecting) rather than orange.
     pub connection_ok: bool,
     /// The toolbar subtitle: "Bunny Storage · {zone}".
@@ -61,11 +69,14 @@ pub(super) struct RemotePane {
     /// See [`RemoteView::version`].
     pub(super) version: u64,
     sort: (SortKey, bool),
-    /// Folders within the open site.
-    history: History<RemotePath>,
+    /// Folders within the open site, and where the request on its way is going.
+    course: Course<RemotePath>,
     pub(super) open: Option<Remote>,
     /// The listing for request `latest` is on its way.
     loading: bool,
+    /// Held by the listing for request `latest`: when the next request takes effect this is
+    /// replaced, which drops the sender and gives that listing up (and frees its connection).
+    listing: Option<oneshot::Sender<()>>,
 }
 
 impl RemotePane {
@@ -75,9 +86,10 @@ impl RemotePane {
             latest: Ticket(0),
             version: 0,
             sort,
-            history: History::default(),
+            course: Course::default(),
             open: None,
             loading: false,
+            listing: None,
         }
     }
 }
@@ -183,6 +195,7 @@ impl Session {
         switched: impl FnOnce(RemoteView) + Send,
     ) -> RemoteView {
         let site = lock(&self.book).sites.get(index).cloned();
+        let (cancel, gone) = oneshot::channel();
         let switch = {
             let mut pane = lock(&self.remote);
             if ticket < pane.latest {
@@ -190,9 +203,11 @@ impl Session {
             }
             pane.latest = ticket;
             pane.version += 1;
-            pane.history = History::default();
+            pane.course = Course::default();
             pane.open = site.clone().map(Remote::new);
             pane.loading = site.is_some();
+            // Whatever listing was on its way is of the site left: it is given up.
+            pane.listing = Some(cancel);
             self.remote_view_of(&pane)
         };
         let Some(site) = site else {
@@ -226,8 +241,10 @@ impl Session {
             }
         };
         let root = RemotePath::root();
-        let result = list_interactive(&*provider, &root).await;
-        self.finish_listing(ticket, Step::Go, root, result)
+        match until_cancelled(list_interactive(&*provider, &root), gone).await {
+            Some(result) => self.finish_listing(ticket, root, result),
+            None => self.remote_view(),
+        }
     }
 
     // Each request that moves the cloud pane (or the This PC pane, in `local.rs`) hands `started`
@@ -290,7 +307,8 @@ impl Session {
         ticket: Ticket,
         started: impl FnOnce(RemoteView) + Send,
     ) -> RemoteView {
-        let pick = |pane: &RemotePane| pane.history.back_to();
+        // Counted from where a Back already on its way is going: two quick Backs are two steps.
+        let pick = |pane: &RemotePane| pane.course.ahead().back_to();
         self.navigate_remote(ticket, Step::Back, pick, started)
             .await
     }
@@ -300,20 +318,25 @@ impl Session {
         ticket: Ticket,
         started: impl FnOnce(RemoteView) + Send,
     ) -> RemoteView {
-        let pick = |pane: &RemotePane| pane.history.forward_to();
+        let pick = |pane: &RemotePane| pane.course.ahead().forward_to();
         self.navigate_remote(ticket, Step::Forward, pick, started)
             .await
     }
 
-    /// Lists the folder shown again (F5, Ctrl+R). The history stays as it is. A request still on
-    /// its way to another folder is given up, as for any later request.
+    /// Lists the folder shown again (F5, Ctrl+R), or, while a listing is on its way, the folder
+    /// that one is for: the request is asked again, not given up for the folder shown. The
+    /// history stays as it is.
     pub async fn remote_refresh(
         &self,
         ticket: Ticket,
         started: impl FnOnce(RemoteView) + Send,
     ) -> RemoteView {
-        let pick = |pane: &RemotePane| Some(pane.open.as_ref()?.dir.clone());
-        self.navigate_remote(ticket, Step::Go, pick, started).await
+        let pick = |pane: &RemotePane| {
+            let shown = &pane.open.as_ref()?.dir;
+            Some(pane.course.refresh_target(shown))
+        };
+        self.navigate_remote(ticket, Step::Refresh, pick, started)
+            .await
     }
 
     /// Reorders the cloud pane (and every later listing in it).
@@ -338,6 +361,7 @@ impl Session {
         pick: impl FnOnce(&RemotePane) -> Option<RemotePath>,
         started: impl FnOnce(RemoteView) + Send,
     ) -> RemoteView {
+        let (cancel, gone) = oneshot::channel();
         let (site, provider, dir, loading) = {
             let mut pane = lock(&self.remote);
             if ticket < pane.latest {
@@ -346,19 +370,24 @@ impl Session {
             let open = pane
                 .open
                 .as_ref()
-                .and_then(|r| Some((r.site.clone(), r.provider.clone()?)));
-            let Some(((site, provider), dir)) = open.zip(pick(&pane)) else {
+                .and_then(|r| Some((r.site.clone(), r.provider.clone()?, r.dir.clone())));
+            let Some(((site, provider, shown), dir)) = open.zip(pick(&pane)) else {
                 return self.remote_view_of(&pane);
             };
+            pane.course.begin(step, &shown, dir.clone());
             pane.latest = ticket;
             pane.loading = true;
             pane.version += 1;
+            // The listing this one replaces is given up, and its connection freed.
+            pane.listing = Some(cancel);
             (site, provider, dir, self.remote_view_of(&pane))
         };
         started(loading);
         let provider = self.current_client(&site, provider).await;
-        let result = list_interactive(&*provider, &dir).await;
-        self.finish_listing(ticket, step, dir, result)
+        match until_cancelled(list_interactive(&*provider, &dir), gone).await {
+            Some(result) => self.finish_listing(ticket, dir, result),
+            None => self.remote_view(),
+        }
     }
 
     /// The client to list `site` with: `provider`, the one the pane opened it with, unless the
@@ -382,64 +411,57 @@ impl Session {
 
     /// Takes in the answer to the listing of `dir` that request `ticket` asked for. If a later
     /// request has taken effect since, the answer is dropped and the pane stays as it is.
-    /// Otherwise, on success the pane moves to `dir`. A folder that is not there leaves the pane
-    /// where it was, connected; any other failure leaves it there, not connected.
+    /// Otherwise, on success the pane moves to `dir`. A folder that is not there, or a server
+    /// that failed in its own way (a 5xx, Bunny's busy 400), has answered: the pane stays where
+    /// it was, still connected if it had connected before. Any other failure leaves it there, not
+    /// connected. A failed listing leaves the history as it was.
     fn finish_listing(
         &self,
         ticket: Ticket,
-        step: Step,
         dir: RemotePath,
         result: Result<Listing, ProviderError>,
     ) -> RemoteView {
-        // A missing folder is an answer from the server: the site itself is fine.
-        let healthy = !matches!(&result, Err(e) if *e != ProviderError::NotFound);
-        let (view, site) = {
+        let (view, site, healthy) = {
             let mut pane = lock(&self.remote);
             let (key, ascending) = pane.sort;
             let current = pane.latest == ticket;
             let Some(remote) = pane.open.as_mut().filter(|_| current) else {
                 return self.remote_view_of(&pane);
             };
-            let mut left = None;
             remote.offer_edit = matches!(result, Err(ProviderError::Auth { .. }));
-            match result {
+            let arrived = result.is_ok();
+            let healthy = match result {
                 Ok(listing) => {
-                    if remote.dir != dir {
-                        left = Some(std::mem::replace(&mut remote.dir, dir));
-                    }
+                    remote.dir = dir;
                     remote.entries = listing.entries;
                     remote.merge_virtual();
                     sort_remote_entries(&mut remote.entries, key, ascending);
                     remote.info = Some(listing.info);
                     remote.error = None;
+                    true
                 }
-                Err(ProviderError::NotFound) => {
-                    remote.error = Some(copy::describe_for(
-                        remote.site.provider,
-                        &ProviderError::NotFound,
-                        &remote.site.container,
-                        &remote.site.host,
-                        Attempt::List(&dir),
-                    ));
+                // The server answered, with "not there" or with a failure of its own: the site
+                // itself is fine, if it had been reached before. (With no listing yet there is
+                // nothing to show the pill is connected by: it goes orange and the dot grey.)
+                Err(error @ (ProviderError::NotFound | ProviderError::Server { .. })) => {
+                    remote.error = Some(listing_error_text(&remote.site, &error, &dir));
+                    remote.info.is_some()
                 }
                 Err(error) => {
                     remote.info = None;
-                    remote.error = Some(copy::describe_for(
-                        remote.site.provider,
-                        &error,
-                        &remote.site.container,
-                        &remote.site.host,
-                        Attempt::List(&dir),
-                    ));
+                    remote.error = Some(listing_error_text(&remote.site, &error, &dir));
+                    false
                 }
-            }
+            };
             let site = remote.site.id.clone();
-            if let Some(left) = left {
-                pane.history.record(step, left);
+            if arrived {
+                pane.course.arrive();
+            } else {
+                pane.course.fail();
             }
             pane.loading = false;
             pane.version += 1;
-            (self.remote_view_of(&pane), site)
+            (self.remote_view_of(&pane), site, healthy)
         };
         lock(&self.book).healthy.insert(site, healthy);
         view
@@ -556,15 +578,17 @@ impl Session {
         }
         RemoteView {
             version: pane.version,
+            site: Some(site.id.clone()),
             rows,
             crumbs: remote_crumbs(&site.container, &remote.dir),
             connection,
+            connecting: remote.info.is_none() && remote.error.is_none(),
             connection_ok: remote.info.is_some() || remote.error.is_none(),
             endpoint: copy::endpoint(service, &site.container),
             chip: copy::chip(&site.host),
             status_right,
-            can_back: !pane.history.back.is_empty(),
-            can_forward: !pane.history.forward.is_empty(),
+            can_back: !pane.course.history.back.is_empty(),
+            can_forward: !pane.course.history.forward.is_empty(),
             loading: pane.loading,
             error: remote.error.clone(),
         }

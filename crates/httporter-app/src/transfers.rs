@@ -428,7 +428,7 @@ impl Transfers {
         let _ = self.link.ui().upgrade_in_event_loop(move |ui| {
             sheets_view::apply_conflicts(&ui, &view);
             ui.set_conflicts_open(true);
-            ui.set_status_message(note.unwrap_or_default().into());
+            crate::binding::show_status(&ui, None, note.unwrap_or_default());
         });
     }
 
@@ -515,7 +515,7 @@ impl Transfers {
                 jobs: plan.jobs,
             });
             let _ = this.link.ui().upgrade_in_event_loop(move |ui| {
-                ui.set_status_message(SharedString::new());
+                crate::binding::show_status(&ui, None, String::new());
                 sheets_view::show_delete_alert(&ui, &alert);
             });
         });

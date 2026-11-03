@@ -24,7 +24,7 @@ import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { FileKind, FileRow, PaneBounds } from "../types.slint";
-import { Activation } from "buttons.slint";
+import { Activation, ToolButton } from "buttons.slint";
 import { VCenter } from "layout.slint";
 
 // Sizes shared by the column headers and the rows (mockup `.cols, .row`: padding 0 12px, gap 8px).
@@ -76,7 +76,7 @@ component Crumb inherits Rectangle {
         x: 0;
         width: 0;
         key-pressed(event) => {
-            if (Activation.triggers(event.text, event.repeat)) {
+            if (Activation.triggers(event)) {
                 root.clicked();
                 return accept;
             }
@@ -144,7 +144,7 @@ component ColumnHeader inherits Rectangle {
         x: 0;
         width: 0;
         key-pressed(event) => {
-            if (Activation.triggers(event.text, event.repeat)) {
+            if (Activation.triggers(event)) {
                 root.clicked();
                 return accept;
             }
@@ -425,8 +425,11 @@ export component Pane inherits Rectangle {
     // The folder row (index into `rows`) that letting go would put the files into, shown while
     // `drop-hover`; -1 for the folder the pane is showing.
     in property <int> drop-row: -1;
-    // A listing for this pane is on its way: the header says "Loading…" until it is in.
+    // A listing for this pane is on its way: the header says "Loading…" until it is in, if that
+    // takes more than 200 ms (a quicker listing flashes nothing, and a screen reader says nothing).
     in property <bool> loading: false;
+    // The header's Refresh button can be pressed (the cloud pane needs a site).
+    in property <bool> can-refresh: true;
     // The cloud pane (its rows and context menu), as opposed to This PC.
     in property <bool> cloud: false;
     // What the toolbar may do now; the context menus offer the same.
@@ -459,7 +462,11 @@ export component Pane inherits Rectangle {
     callback download-to();
     callback new-folder();
     callback delete();
+    // The header's Refresh button, the context menu's Refresh: list the folder shown again.
     callback refresh();
+    // A key reached the pane from one of its parts that is not the list (a breadcrumb or a column
+    // header): the pane holds the keyboard focus.
+    callback key-inside();
     // Ctrl+V in the cloud pane: upload the files on the clipboard into the folder shown.
     callback paste();
     // A drag out of a row of this pane: it moved to this point of the window (the first call is
@@ -488,6 +495,8 @@ export component Pane inherits Rectangle {
     };
 
     property <bool> keyboard-focus: false;
+    // `loading` for 200 ms: only then does the header show the "Loading…" mark.
+    property <bool> show-loading: false;
     // The row the open context menu is for, or -1.
     property <int> context-row: -1;
     // A drag out of a row may start: This PC can upload and the cloud pane can download, which the
@@ -587,6 +596,19 @@ export component Pane inherits Rectangle {
     }
 
     changed selected => { root.reveal(); }
+
+    // The mark appears 200 ms into a listing and goes with it. The timer runs while `loading`,
+    // so a listing that is in sooner never shows it.
+    changed loading => {
+        if (!root.loading) {
+            root.show-loading = false;
+        }
+    }
+    Timer {
+        interval: 200ms;
+        running: root.loading;
+        triggered => { root.show-loading = true; }
+    }
 
     // First child, so that the list is the pane's first Tab stop, ahead of the column headers. Zero
     // width so that clicks do not focus it; a click on a row focuses it through `pick`.
@@ -752,260 +774,287 @@ export component Pane inherits Rectangle {
             }
         }
 
-        VerticalLayout {
-            // Header (mockup `.pane-head`).
-            Rectangle {
-                height: 37px;
+        // Every key that reaches the pane from one of its parts (a breadcrumb, a column header)
+        // tells the window the pane holds the focus, so that Alt+Left and Alt+Right, which the
+        // window handles, act on this pane. The list is the pane's own first child: it marks the
+        // pane through `has-focus`. Not a Tab stop, and the keys go on to the window.
+        inside-keys := FocusScope {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            key-pressed(event) => {
+                root.key-inside();
+                return reject;
+            }
 
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 10px;
-                    spacing: 8px;
+            VerticalLayout {
+                // Header (mockup `.pane-head`).
+                Rectangle {
+                    height: 37px;
 
-                    VCenter {
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Image {
-                                source: root.icon;
-                                colorize: Theme.label;
-                                width: 16px;
-                                height: 16px;
-                                accessible-role: none;
-                            }
-                            Text {
-                                text: root.title;
-                                color: Theme.label;
-                                font-size: Theme.font-body;
-                                font-weight: Theme.weight-semibold;
-                                vertical-alignment: center;
-                                overflow: elide;
-                                accessible-role: none;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        VCenter {
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Image {
+                                    source: root.icon;
+                                    colorize: Theme.label;
+                                    width: 16px;
+                                    height: 16px;
+                                    accessible-role: none;
+                                }
+                                Text {
+                                    text: root.title;
+                                    color: Theme.label;
+                                    font-size: Theme.font-body;
+                                    font-weight: Theme.weight-semibold;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    accessible-role: none;
+                                }
                             }
                         }
-                    }
-                    // Breadcrumbs (mockup `.crumbs`). Every crumb but the last is a button; the last
-                    // is the current folder, in plain text. A path too long for the header shrinks
-                    // the names with an ellipsis instead of overflowing it.
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        min-width: 0px;
-                        clip: true;
+                        // Breadcrumbs (mockup `.crumbs`). Every crumb but the last is a button; the last
+                        // is the current folder, in plain text. A path too long for the header shrinks
+                        // the names with an ellipsis instead of overflowing it.
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            clip: true;
 
-                        HorizontalLayout {
-                            alignment: start;
-                            spacing: 2px;
-
-                            for crumb[i] in root.crumbs: HorizontalLayout {
+                            HorizontalLayout {
+                                alignment: start;
                                 spacing: 2px;
 
-                                if i > 0: VCenter {
-                                    Image {
-                                        source: Icons.chev-r;
-                                        colorize: Theme.label3;
-                                        width: 12px;
-                                        height: 12px;
-                                        accessible-role: none;
+                                for crumb[i] in root.crumbs: HorizontalLayout {
+                                    spacing: 2px;
+
+                                    if i > 0: VCenter {
+                                        Image {
+                                            source: Icons.chev-r;
+                                            colorize: Theme.label3;
+                                            width: 12px;
+                                            height: 12px;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                    if i < root.crumbs.length - 1: Crumb {
+                                        text: crumb;
+                                        // A crumb holds the focus only when the keyboard put it there.
+                                        clicked => { root.go-to-crumb(i, self.has-focus); }
+                                    }
+                                    if i == root.crumbs.length - 1: HorizontalLayout {
+                                        padding-left: 3px;
+                                        padding-right: 3px;
+
+                                        Text {
+                                            text: crumb;
+                                            // The current folder keeps its name (up to 160 px) while the
+                                            // crumbs before it shrink.
+                                            min-width: Math.min(self.preferred-width, 160px);
+                                            color: Theme.label;
+                                            font-size: 12px;
+                                            font-weight: Theme.weight-medium;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
                                     }
                                 }
-                                if i < root.crumbs.length - 1: Crumb {
-                                    text: crumb;
-                                    // A crumb holds the focus only when the keyboard put it there.
-                                    clicked => { root.go-to-crumb(i, self.has-focus); }
-                                }
-                                if i == root.crumbs.length - 1: HorizontalLayout {
-                                    padding-left: 3px;
-                                    padding-right: 3px;
+                            }
+                        }
+                        if root.show-loading: VCenter {
+                            LoadingMark { }
+                        }
+                        if root.header-chip != "": VCenter {
+                            Rectangle {
+                                height: 20px;
+                                background: Theme.chip;
+                                border-radius: self.height / 2;
 
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
                                     Text {
-                                        text: crumb;
-                                        // The current folder keeps its name (up to 160 px) while the
-                                        // crumbs before it shrink.
-                                        min-width: Math.min(self.preferred-width, 160px);
-                                        color: Theme.label;
-                                        font-size: 12px;
-                                        font-weight: Theme.weight-medium;
+                                        text: root.header-chip;
+                                        color: Theme.label2;
+                                        font-family: Theme.font-mono;
+                                        font-size: Theme.font-small;
+                                        font-weight: Theme.weight-semibold;
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }
                                 }
                             }
                         }
-                    }
-                    if root.loading: VCenter {
-                        LoadingMark { }
-                    }
-                    if root.header-chip != "": VCenter {
-                        Rectangle {
-                            height: 20px;
-                            background: Theme.chip;
-                            border-radius: self.height / 2;
-
-                            HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                Text {
-                                    text: root.header-chip;
-                                    color: Theme.label2;
-                                    font-family: Theme.font-mono;
-                                    font-size: Theme.font-small;
-                                    font-weight: Theme.weight-semibold;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
+                        // Lists the folder shown again (also F5 and Ctrl+R, and the menu's Refresh).
+                        VCenter {
+                            ToolButton {
+                                icon: Icons.refresh;
+                                label: @tr("Refresh");
+                                description: root.can-refresh ? "" : @tr("No site selected");
+                                enabled: root.can-refresh;
+                                clicked => { root.refresh(); }
                             }
                         }
                     }
+
+                    Rectangle {
+                        y: parent.height - self.height;
+                        height: 1px;
+                        background: Theme.sep;
+                    }
                 }
 
+                // Column headers (mockup `.cols`).
                 Rectangle {
-                    y: parent.height - self.height;
-                    height: 1px;
-                    background: Theme.sep;
-                }
-            }
+                    height: 26px;
 
-            // Column headers (mockup `.cols`).
-            Rectangle {
-                height: 26px;
+                    HorizontalLayout {
+                        padding-left: Cols.pad;
+                        padding-right: Cols.pad;
+                        spacing: Cols.gap;
 
-                HorizontalLayout {
-                    padding-left: Cols.pad;
-                    padding-right: Cols.pad;
-                    spacing: Cols.gap;
-
-                    ColumnHeader {
-                        horizontal-stretch: 1;
-                        text: @tr("Name");
-                        sorted: root.sort-column == 0;
-                        ascending: root.sort-ascending;
-                        clicked => { root.sort-by(0); }
-                    }
-                    ColumnHeader {
-                        width: Cols.size;
-                        text: @tr("Size");
-                        right-aligned: true;
-                        sorted: root.sort-column == 1;
-                        ascending: root.sort-ascending;
-                        clicked => { root.sort-by(1); }
-                    }
-                    ColumnHeader {
-                        width: Cols.modified;
-                        text: @tr("Modified");
-                        sorted: root.sort-column == 2;
-                        ascending: root.sort-ascending;
-                        clicked => { root.sort-by(2); }
-                    }
-                }
-
-                Rectangle {
-                    y: parent.height - self.height;
-                    height: 1px;
-                    background: Theme.sep;
-                }
-            }
-
-            // The list view insets its content by 2 px on every side; the list reaches out by that
-            // much so that the rows, and the selection, run edge to edge as in the mockup.
-            list-area := Rectangle {
-                vertical-stretch: 1;
-                clip: true;
-
-                list := ListView {
-                    x: -2px;
-                    y: -2px;
-                    width: parent.width + 4px;
-                    height: parent.height + 4px;
-                    accessible-label: @tr("Files in {}", root.title);
-                    accessible-item-count: root.rows.length;
-
-                    for item[i] in root.rows: PaneRow {
-                        item: item;
-                        index: i;
-                        count: root.rows.length;
-                        selected: item.selected;
-                        drop-target: root.drop-hover && i == root.drop-row;
-                        drag-ok: root.can-drag;
-                        pressed(ctrl, shift) => { root.pick(i, ctrl, shift); }
-                        held => {
-                            // The selection stays until the button comes up (it may be a drag),
-                            // but the pane takes the focus now.
-                            root.keyboard-focus = false;
-                            key-focus.focus();
+                        ColumnHeader {
+                            horizontal-stretch: 1;
+                            text: @tr("Name");
+                            sorted: root.sort-column == 0;
+                            ascending: root.sort-ascending;
+                            clicked => { root.sort-by(0); }
                         }
-                        drag-moved(point) => { root.drag-moved(point); }
-                        drag-ended(point) => { root.drag-ended(point); }
-                        drag-cancelled => { root.drag-cancelled(); }
-                        context-pressed(point) => { root.row-menu(i, point); }
-                        opened => {
-                            root.pick(i, false, false);
-                            root.open(i);
+                        ColumnHeader {
+                            width: Cols.size;
+                            text: @tr("Size");
+                            right-aligned: true;
+                            sorted: root.sort-column == 1;
+                            ascending: root.sort-ascending;
+                            clicked => { root.sort-by(1); }
                         }
-                    }
-                }
-
-                // The empty space below the last row. Pressing there clears the selection (Ctrl
-                // keeps it) and dragging draws the rubber band, which selects the rows it crosses.
-                // A full list has no empty space, so no band.
-                band-area := TouchArea {
-                    property <bool> banding: false;
-                    property <bool> additive: false;
-                    // The corner the drag started at and the pointer, in the list's coordinates.
-                    property <length> start-x;
-                    property <length> start-y;
-                    property <length> now-x;
-                    property <length> now-y;
-
-                    x: 0px;
-                    y: Math.max(0px, root.rows.length * Theme.row-height + list.content-y);
-                    width: parent.width;
-                    height: Math.max(0px, parent.height - self.y);
-
-                    // The band over the rows: its first and last row, or -1 and -1 when it
-                    // crosses none.
-                    function report() {
-                        let top = Math.max(0px, Math.min(self.start-y, self.now-y));
-                        let bottom = Math.min(parent.height, Math.max(self.start-y, self.now-y));
-                        let first = Math.floor((top - list.content-y) / Theme.row-height);
-                        let last = Math.floor((bottom - list.content-y) / Theme.row-height);
-                        if (last < 0 || first >= root.rows.length) {
-                            root.band-select(-1, -1, self.additive);
-                        } else {
-                            root.band-select(Math.max(0, first), Math.min(root.rows.length - 1, last), self.additive);
+                        ColumnHeader {
+                            width: Cols.modified;
+                            text: @tr("Modified");
+                            sorted: root.sort-column == 2;
+                            ascending: root.sort-ascending;
+                            clicked => { root.sort-by(2); }
                         }
                     }
 
-                    pointer-event(event) => {
-                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                            self.banding = true;
-                            self.additive = event.modifiers.control;
-                            self.start-x = self.x + self.mouse-x;
-                            self.start-y = self.y + self.mouse-y;
-                            self.now-x = self.start-x;
-                            self.now-y = self.start-y;
-                            root.keyboard-focus = false;
-                            key-focus.focus();
-                            self.report();
-                        } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
-                            self.banding = false;
-                        }
-                    }
-                    moved => {
-                        if (self.banding) {
-                            self.now-x = Math.max(0px, Math.min(parent.width, self.x + self.mouse-x));
-                            self.now-y = Math.max(0px, Math.min(parent.height, self.y + self.mouse-y));
-                            self.report();
-                        }
+                    Rectangle {
+                        y: parent.height - self.height;
+                        height: 1px;
+                        background: Theme.sep;
                     }
                 }
 
-                if band-area.banding: Rectangle {
-                    x: Math.min(band-area.start-x, band-area.now-x);
-                    y: Math.min(band-area.start-y, band-area.now-y);
-                    width: Math.abs(band-area.now-x - band-area.start-x);
-                    height: Math.abs(band-area.now-y - band-area.start-y);
-                    background: Theme.accent.with-alpha(0.2);
-                    border-width: 1px;
-                    border-color: Theme.accent;
+                // The list view insets its content by 2 px on every side; the list reaches out by that
+                // much so that the rows, and the selection, run edge to edge as in the mockup.
+                list-area := Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+
+                    list := ListView {
+                        x: -2px;
+                        y: -2px;
+                        width: parent.width + 4px;
+                        height: parent.height + 4px;
+                        accessible-label: @tr("Files in {}", root.title);
+                        accessible-item-count: root.rows.length;
+
+                        for item[i] in root.rows: PaneRow {
+                            item: item;
+                            index: i;
+                            count: root.rows.length;
+                            selected: item.selected;
+                            drop-target: root.drop-hover && i == root.drop-row;
+                            drag-ok: root.can-drag;
+                            pressed(ctrl, shift) => { root.pick(i, ctrl, shift); }
+                            held => {
+                                // The selection stays until the button comes up (it may be a drag),
+                                // but the pane takes the focus now.
+                                root.keyboard-focus = false;
+                                key-focus.focus();
+                            }
+                            drag-moved(point) => { root.drag-moved(point); }
+                            drag-ended(point) => { root.drag-ended(point); }
+                            drag-cancelled => { root.drag-cancelled(); }
+                            context-pressed(point) => { root.row-menu(i, point); }
+                            opened => {
+                                root.pick(i, false, false);
+                                root.open(i);
+                            }
+                        }
+                    }
+
+                    // The empty space below the last row. Pressing there clears the selection (Ctrl
+                    // keeps it) and dragging draws the rubber band, which selects the rows it crosses.
+                    // A full list has no empty space, so no band.
+                    band-area := TouchArea {
+                        property <bool> banding: false;
+                        property <bool> additive: false;
+                        // The corner the drag started at and the pointer, in the list's coordinates.
+                        property <length> start-x;
+                        property <length> start-y;
+                        property <length> now-x;
+                        property <length> now-y;
+
+                        x: 0px;
+                        y: Math.max(0px, root.rows.length * Theme.row-height + list.content-y);
+                        width: parent.width;
+                        height: Math.max(0px, parent.height - self.y);
+
+                        // The band over the rows: its first and last row, or -1 and -1 when it
+                        // crosses none.
+                        function report() {
+                            let top = Math.max(0px, Math.min(self.start-y, self.now-y));
+                            let bottom = Math.min(parent.height, Math.max(self.start-y, self.now-y));
+                            let first = Math.floor((top - list.content-y) / Theme.row-height);
+                            let last = Math.floor((bottom - list.content-y) / Theme.row-height);
+                            if (last < 0 || first >= root.rows.length) {
+                                root.band-select(-1, -1, self.additive);
+                            } else {
+                                root.band-select(Math.max(0, first), Math.min(root.rows.length - 1, last), self.additive);
+                            }
+                        }
+
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                self.banding = true;
+                                self.additive = event.modifiers.control;
+                                self.start-x = self.x + self.mouse-x;
+                                self.start-y = self.y + self.mouse-y;
+                                self.now-x = self.start-x;
+                                self.now-y = self.start-y;
+                                root.keyboard-focus = false;
+                                key-focus.focus();
+                                self.report();
+                            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                                self.banding = false;
+                            }
+                        }
+                        moved => {
+                            if (self.banding) {
+                                self.now-x = Math.max(0px, Math.min(parent.width, self.x + self.mouse-x));
+                                self.now-y = Math.max(0px, Math.min(parent.height, self.y + self.mouse-y));
+                                self.report();
+                            }
+                        }
+                    }
+
+                    if band-area.banding: Rectangle {
+                        x: Math.min(band-area.start-x, band-area.now-x);
+                        y: Math.min(band-area.start-y, band-area.now-y);
+                        width: Math.abs(band-area.now-x - band-area.start-x);
+                        height: Math.abs(band-area.now-y - band-area.start-y);
+                        background: Theme.accent.with-alpha(0.2);
+                        border-width: 1px;
+                        border-color: Theme.accent;
+                    }
                 }
             }
         }

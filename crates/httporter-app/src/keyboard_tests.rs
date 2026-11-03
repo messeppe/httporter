@@ -306,8 +306,9 @@ fn back_and_forward_are_enabled_for_the_pane_last_used() {
         (Some(false), Some(true))
     );
 
-    // So does the keyboard: Tab into the cloud pane's list.
-    tab(&w, 4);
+    // So does the keyboard: Tab into the cloud pane's list (past This PC's Refresh button and
+    // its three column headers).
+    tab(&w, 5);
     assert!(!w.get_local_pane_active());
     assert_eq!(
         (enabled("Back"), enabled("Forward")),

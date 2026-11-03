@@ -95,6 +95,39 @@ pub fn describe_for(
     }
 }
 
+/// What to tell the user about a failed listing of `dir` of a site's `container` (a Bunny zone or
+/// an S3 bucket) on `host`, in `region` (the city, or the S3 region): [`describe_for`], except
+/// that a 404 on the root of the zone or bucket names the field that is wrong (Minor 4), since
+/// there is no folder to blame.
+pub fn describe_listing(
+    provider: ProviderKind,
+    error: &ProviderError,
+    container: &str,
+    host: &str,
+    region: &str,
+    dir: &RemotePath,
+) -> String {
+    match (provider, error, dir.is_root()) {
+        (ProviderKind::Bunny, ProviderError::NotFound, true) => zone_not_found(container, region),
+        (ProviderKind::S3, ProviderError::NotFound, true) => bucket_not_found(container, region),
+        _ => describe_for(provider, error, container, host, Attempt::List(dir)),
+    }
+}
+
+/// The zone's root is not there: the zone name or the region is wrong.
+pub fn zone_not_found(zone: &str, region: &str) -> String {
+    format!("Couldn't find zone “{zone}” in {region}. Check the zone name and region.")
+}
+
+/// The bucket's root is not there: the bucket name or the region is wrong.
+pub fn bucket_not_found(bucket: &str, region: &str) -> String {
+    if region.trim().is_empty() {
+        format!("Couldn't find bucket “{bucket}”. Check the bucket name and region.")
+    } else {
+        format!("Couldn't find bucket “{bucket}” in {region}. Check the bucket name and region.")
+    }
+}
+
 /// What to tell the user about a failed attempt to talk to `zone` on `host`: plain words for each
 /// kind of error, without the labels the errors carry for the code ("network error: …", "server
 /// error (HTTP 503): …"), and never the password or a request URL. Only a client that could not
@@ -434,6 +467,11 @@ pub const THIS_PC: &str = "This PC";
 /// A folder (or the list of drives) could not be listed.
 pub fn local_open_failed(place: &str, reason: impl Display) -> String {
     format!("Couldn't open {place}: {reason}")
+}
+
+/// A folder of This PC is not there any more (deleted or renamed since the pane showed it).
+pub fn local_not_found(place: &str) -> String {
+    format!("Couldn't find {place}.")
 }
 
 // ---- The status line ----
