@@ -8,7 +8,7 @@
 //! a [`Progress`] watches it instead.
 
 use std::future::Future;
-use std::io;
+use std::io::{self, SeekFrom};
 use std::path::Path;
 use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -18,7 +18,8 @@ use bytes::Bytes;
 use futures_util::future::{Either, select};
 use futures_util::stream::{self, Stream, StreamExt};
 use httporter_core::{BodyMeter, ByteStream, ProviderError, UploadSource};
-use tokio::io::AsyncReadExt;
+use md5::{Digest, Md5};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::Instant;
 
@@ -171,6 +172,90 @@ pub(crate) async fn upload_body(
         progress,
         fault,
     })
+}
+
+/// Fails unless the file at `path` is exactly `len` bytes: it has changed since it was looked
+/// at.
+pub(crate) async fn check_file_len(path: &Path, len: u64) -> Result<(), ProviderError> {
+    let actual = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| local_file_error(path, &e))?
+        .len();
+    if actual == len {
+        Ok(())
+    } else {
+        Err(changed_file(path))
+    }
+}
+
+/// The body for the `len` bytes of the file at `path` that start at `offset`: one part of a
+/// multipart upload. The file is opened and read from there on, piece by piece through the
+/// meter; the part is never held in memory as a whole. A file that ends before the part does
+/// has changed, and the body fails.
+pub(crate) async fn file_range_body(
+    path: &Path,
+    offset: u64,
+    len: u64,
+    meter: Option<Arc<dyn BodyMeter>>,
+) -> Result<UploadBody, ProviderError> {
+    let file = open_at(path, offset).await?;
+    let progress = Progress::new();
+    let fault = Fault::default();
+    let feed = Feed {
+        reader: Reader::File {
+            file,
+            path: path.to_path_buf().into_boxed_path(),
+        },
+        left: len,
+        meter,
+        progress: progress.clone(),
+        fault: fault.clone(),
+    };
+    Ok(UploadBody {
+        stream: Box::pin(stream::try_unfold(feed, Feed::next)),
+        len,
+        progress,
+        fault,
+    })
+}
+
+/// The MD5 of the `len` bytes of the file at `path` that start at `offset`, read a piece at a
+/// time. A file that ends before the range does has changed.
+pub(crate) async fn file_range_md5(
+    path: &Path,
+    offset: u64,
+    len: u64,
+) -> Result<[u8; 16], ProviderError> {
+    let mut file = open_at(path, offset).await?;
+    let mut md5 = Md5::new();
+    let mut buf = vec![0u8; HASH_CHUNK];
+    let mut left = len;
+    while left > 0 {
+        let want = usize::try_from(left).map_or(HASH_CHUNK, |left| left.min(HASH_CHUNK));
+        let read = file
+            .read(&mut buf[..want])
+            .await
+            .map_err(|e| local_file_error(path, &e))?;
+        if read == 0 {
+            return Err(changed_file(path));
+        }
+        md5.update(&buf[..read]);
+        left -= read as u64;
+    }
+    Ok(md5.finalize().into())
+}
+
+/// How much of a file is read at once to hash it.
+const HASH_CHUNK: usize = 256 * 1024;
+
+async fn open_at(path: &Path, offset: u64) -> Result<tokio::fs::File, ProviderError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| local_file_error(path, &e))?;
+    file.seek(SeekFrom::Start(offset))
+        .await
+        .map_err(|e| local_file_error(path, &e))?;
+    Ok(file)
 }
 
 enum Reader {

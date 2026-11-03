@@ -14,6 +14,10 @@
 //! is never replayed against another host; the `Authorization` header and the session token are
 //! marked sensitive, which keeps them out of debug output.
 //!
+//! **Large files.** A file of more than [`MULTIPART_THRESHOLD`] is uploaded in parts, several
+//! side by side, and resumed from the part journal after an interruption; see
+//! [`multipart`](crate::multipart).
+//!
 //! **Where S3 differs from the [`StorageProvider`] contract**
 //! - S3 has no folders, only keys. A folder exists while a key starts with `name/`, so
 //!   [`list`](StorageProvider::list) answers [`ProviderError::NotFound`] for a folder with no
@@ -25,7 +29,7 @@
 //! - A key `RemotePath` cannot represent is left out of listings, and counted; see
 //!   [`S3Storage::skipped_keys`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,11 +38,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use futures_util::future::join_all;
+use futures_util::stream::FuturesUnordered;
 use httporter_core::{
     ByteStream, Capabilities, Checksum, ChecksumKind, EmptyFolders, Entry, HttpProtocol, Listing,
     ProviderError, ProxyMode, RemotePath, RequestInfo, StorageProvider, TransferSettings,
-    UploadOptions, UploadSource, encode_segment, walk,
+    UploadOptions, UploadSource, encode_segment,
 };
 use md5::{Digest, Md5};
 use percent_encoding::percent_decode_str;
@@ -50,6 +56,7 @@ use url::Url;
 
 use crate::body::{guard_download, read_capped, read_limited, until_stalled, upload_body};
 use crate::errors::{self, ERROR_BODY_MAX, network_error};
+use crate::multipart::{MULTIPART_THRESHOLD, PART_SIZE};
 use crate::presets::{Endpoint, bucket_url, object_url};
 use crate::sigv4::{
     Credentials, EMPTY_PAYLOAD_SHA256, SignInput, UNSIGNED_PAYLOAD, sha256_hex, sign,
@@ -68,10 +75,10 @@ pub const TRANSFER_CONCURRENCY_MAX: usize = 128;
 
 /// The largest answer to a listing, a bucket list or a delete that is read. A page of 1,000
 /// keys of the longest possible length is about 2 MB.
-const ANSWER_MAX: usize = 32 * 1024 * 1024;
+pub(crate) const ANSWER_MAX: usize = 32 * 1024 * 1024;
 
 /// The metadata header that carries an upload's SHA-256, for comparing files later.
-const SHA256_META: &str = "x-amz-meta-httporter-sha256";
+pub(crate) const SHA256_META: &str = "x-amz-meta-httporter-sha256";
 
 /// The content type of a folder marker, which is what the S3 console writes.
 const FOLDER_CONTENT_TYPE: &str = "application/x-directory";
@@ -99,6 +106,13 @@ pub struct S3Config {
     /// How long a short request (delete, create folder, list buckets) may take in all.
     pub request_timeout: Duration,
     pub proxy: ProxyMode,
+    /// The size of the parts of a multipart upload (ruling Q25). [`PART_SIZE`] unless the
+    /// service wants less: [`part_size_for`](crate::part_size_for) answers per preset, and
+    /// whoever builds the configuration for a saved site sets it. Services take parts of 5 MiB to 5 GiB, so it is
+    /// kept within that, and raised for a file so large that this many parts would be more than
+    /// the 10,000 an upload may have. An upload resumed from the journal keeps the part size it
+    /// began with, whatever this says.
+    pub part_size: u64,
 }
 
 impl S3Config {
@@ -123,22 +137,35 @@ impl S3Config {
             keep_alive: s.keep_alive,
             request_timeout: timeout,
             proxy: s.proxy.clone(),
+            part_size: PART_SIZE,
         }
     }
 }
 
+/// A [`StorageProvider`] for one bucket of AWS S3 or an S3-compatible service.
+///
+/// Where it deviates from the provider contract, on purpose:
+/// - **Ruling Q33:** [`delete_file`](StorageProvider::delete_file) of a key that is not there
+///   returns `Ok(())`, not [`ProviderError::NotFound`]. S3 answers `204` either way, and a
+///   `HEAD` first would double the requests for an answer nobody needs.
+/// - **Ruling Q34:** [`upload`](StorageProvider::upload) does not check whether the name is
+///   already taken by a folder (or a parent of it by a file): S3 allows both `a` and `a/b`, and
+///   checking would cost a request per file. Keeping the two apart is the planner's job, which
+///   knows the listing it works from.
 pub struct S3Storage {
     /// For listings, deletes and other short requests: bounded by `request_timeout`, and a
     /// listing by `list_timeout`.
-    client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
     /// For uploads and downloads: no total timeout, see the module docs.
-    transfer_client: reqwest::Client,
+    pub(crate) transfer_client: reqwest::Client,
     bucket: String,
-    endpoint: Endpoint,
-    creds: Credentials,
+    pub(crate) endpoint: Endpoint,
+    pub(crate) creds: Credentials,
     list_timeout: Duration,
-    request_timeout: Duration,
-    transfer_idle_timeout: Duration,
+    pub(crate) request_timeout: Duration,
+    pub(crate) transfer_idle_timeout: Duration,
+    /// The part size a new multipart upload starts with, see [`S3Config::part_size`].
+    pub(crate) part_size: u64,
     capabilities: Capabilities,
     list_slots: Semaphore,
     delete_slots: Semaphore,
@@ -197,6 +224,7 @@ impl S3Storage {
             list_timeout: cfg.list_timeout,
             request_timeout: cfg.request_timeout,
             transfer_idle_timeout: cfg.transfer_idle_timeout,
+            part_size: cfg.part_size,
             capabilities: Capabilities {
                 checksum_in_listing: Some(ChecksumKind::Md5),
                 server_side_copy: true,
@@ -259,42 +287,28 @@ impl S3Storage {
         }
     }
 
-    fn skip(&self) {
-        self.skipped.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// The headers for `method url`: the caller's `extra` headers (all of them signed) plus the
     /// ones the signature adds. The signature is made now, so build the request right away.
-    fn sign_request(
+    pub(crate) fn sign_request(
         &self,
         method: &Method,
         url: &Url,
         extra: &[(String, String)],
         payload_sha256: &str,
     ) -> Result<HeaderMap, ProviderError> {
-        let input = SignInput {
-            method: method.as_str(),
+        signed_headers(
+            &self.creds,
+            &self.endpoint.region,
+            method,
             url,
-            headers: extra,
+            extra,
             payload_sha256,
-        };
-        let signed = sign(&input, &self.creds, &self.endpoint.region, "s3", Utc::now());
-        let mut headers = HeaderMap::with_capacity(extra.len() + signed.len());
-        for (name, value) in extra.iter().chain(signed.iter()) {
-            let header_name =
-                HeaderName::from_bytes(name.as_bytes()).map_err(|_| unsendable(name))?;
-            let mut header_value = HeaderValue::from_str(value).map_err(|_| unsendable(name))?;
-            if header_name == AUTHORIZATION || name == "x-amz-security-token" {
-                header_value.set_sensitive(true);
-            }
-            headers.insert(header_name, header_value);
-        }
-        Ok(headers)
+        )
     }
 
     /// Sends one signed request on the short-request client. A `timeout` replaces the
     /// client's.
-    async fn call(
+    pub(crate) async fn call(
         &self,
         method: Method,
         url: Url,
@@ -395,55 +409,90 @@ impl S3Storage {
         url
     }
 
-    /// Turns the keys and prefixes of one page of listing `dir` into entries. `prefix` is
-    /// `dir` with a trailing slash, or empty for the root.
-    fn collect(&self, dir: &RemotePath, prefix: &str, page: ListPage, out: &mut Vec<Entry>) {
-        let text = |raw: String| decode_key(raw, page.url_encoded);
-        for object in page.objects {
-            let Some(key) = text(object.key) else {
-                self.skip();
-                continue;
-            };
-            // The folder's own marker, and anything a misbehaving service lists from outside.
-            let Some(name) = key.strip_prefix(prefix).filter(|name| !name.is_empty()) else {
-                continue;
-            };
-            // The marker of a subfolder: the folder is shown from its common prefix.
-            if name.ends_with('/') {
-                continue;
-            }
-            match dir.join(name) {
-                Ok(path) => out.push(Entry {
-                    path,
-                    is_folder: false,
-                    size: object.size,
-                    modified: object.modified.as_deref().and_then(parse_time),
-                    checksum: checksum_from_etag(object.etag.as_deref()),
-                    content_type: None,
-                    replicated_regions: Vec::new(),
-                }),
-                Err(_) => self.skip(),
+    /// Every page of the listing of `dir`, with the names this one call had to leave out. Both
+    /// [`list`](StorageProvider::list) and the walk of [`delete_folder`](StorageProvider::delete_folder)
+    /// are made of it.
+    async fn list_dir(&self, dir: &RemotePath) -> Result<(Listing, Skips), ProviderError> {
+        let bucket = self.bucket()?;
+        let prefix = if dir.is_root() {
+            String::new()
+        } else {
+            format!("{}/", dir.as_str())
+        };
+        let mut entries = Vec::new();
+        let mut skips = Skips::default();
+        let mut info = None;
+        let mut exists = false;
+        let mut token: Option<String> = None;
+        loop {
+            let (page, page_info) = self
+                .list_page(bucket, &prefix, token.as_deref(), None)
+                .await?;
+            info.get_or_insert(page_info);
+            exists |= !page.objects.is_empty() || !page.prefixes.is_empty();
+            let next = page.truncated.then(|| page.next_token.clone());
+            let mut page_skips = Skips::default();
+            collect(dir, &prefix, page, &mut entries, &mut page_skips);
+            self.skipped.fetch_add(page_skips.count, Ordering::Relaxed);
+            skips.merge(page_skips);
+            match next {
+                None => break,
+                Some(None) => {
+                    return Err(ProviderError::Permanent(
+                        "unexpected response from server (listing is cut short without a continuation token)"
+                            .into(),
+                    ));
+                }
+                Some(Some(next)) if token.as_deref() == Some(next.as_str()) => {
+                    return Err(ProviderError::Permanent(
+                        "unexpected response from server (listing repeats its continuation token)"
+                            .into(),
+                    ));
+                }
+                Some(Some(next)) => token = Some(next),
             }
         }
-        for common in page.prefixes {
-            let Some(full) = text(common) else {
-                self.skip();
-                continue;
+        if !exists && !dir.is_root() {
+            return Err(ProviderError::NotFound);
+        }
+        let info = info.ok_or_else(|| ProviderError::Permanent("no listing was fetched".into()))?;
+        Ok((Listing { entries, info }, skips))
+    }
+
+    /// Every file and folder below `root` (not `root` itself), each once, folders listed side
+    /// by side, and the names left out of all of those listings. The same walk as
+    /// [`httporter_core::walk`], over [`Self::list_dir`] because that knows what it skipped for
+    /// this call alone: the cumulative [`skipped_keys`](Self::skipped_keys) also counts what
+    /// other calls skip at the same time.
+    async fn walk_dir(&self, root: &RemotePath) -> Result<(Vec<Entry>, Skips), ProviderError> {
+        let mut waiting = VecDeque::from([root.clone()]);
+        let mut listing = FuturesUnordered::new();
+        let mut found = Vec::new();
+        let mut skips = Skips::default();
+        loop {
+            while listing.len() < LIST_CONCURRENCY
+                && let Some(dir) = waiting.pop_front()
+            {
+                listing.push(async move {
+                    let result = self.list_dir(&dir).await;
+                    (dir, result)
+                });
+            }
+            let Some((dir, result)) = listing.next().await else {
+                return Ok((found, skips));
             };
-            let Some(rest) = full.strip_prefix(prefix) else {
-                continue;
-            };
-            match dir.join(rest.strip_suffix('/').unwrap_or(rest)) {
-                Ok(path) => out.push(Entry {
-                    path,
-                    is_folder: true,
-                    size: 0,
-                    modified: None,
-                    checksum: None,
-                    content_type: None,
-                    replicated_regions: Vec::new(),
-                }),
-                Err(_) => self.skip(),
+            let (listed, listed_skips) = result?;
+            skips.merge(listed_skips);
+            for entry in listed.entries {
+                // The folder itself (S3 lists the marker `a/` under the prefix `a/`) would be
+                // walked again forever, and a path from elsewhere leads out of `root`.
+                if entry.path == dir || !entry.path.is_within(&dir) {
+                    continue;
+                }
+                if entry.is_folder {
+                    waiting.push_back(entry.path.clone());
+                }
+                found.push(entry);
             }
         }
     }
@@ -577,54 +626,21 @@ impl StorageProvider for S3Storage {
     /// listing. The latency and HTTP version are those of the first request. A folder with no
     /// key under it does not exist: [`ProviderError::NotFound`].
     async fn list(&self, dir: &RemotePath) -> Result<Listing, ProviderError> {
-        let bucket = self.bucket()?;
-        let prefix = if dir.is_root() {
-            String::new()
-        } else {
-            format!("{}/", dir.as_str())
-        };
-        let mut entries = Vec::new();
-        let mut info = None;
-        let mut exists = false;
-        let mut token: Option<String> = None;
-        loop {
-            let (page, page_info) = self
-                .list_page(bucket, &prefix, token.as_deref(), None)
-                .await?;
-            info.get_or_insert(page_info);
-            exists |= !page.objects.is_empty() || !page.prefixes.is_empty();
-            let next = page.truncated.then(|| page.next_token.clone());
-            self.collect(dir, &prefix, page, &mut entries);
-            match next {
-                None => break,
-                Some(None) => {
-                    return Err(ProviderError::Permanent(
-                        "unexpected response from server (listing is cut short without a continuation token)"
-                            .into(),
-                    ));
-                }
-                Some(Some(next)) if token.as_deref() == Some(next.as_str()) => {
-                    return Err(ProviderError::Permanent(
-                        "unexpected response from server (listing repeats its continuation token)"
-                            .into(),
-                    ));
-                }
-                Some(Some(next)) => token = Some(next),
-            }
-        }
-        if !exists && !dir.is_root() {
-            return Err(ProviderError::NotFound);
-        }
-        let info = info.ok_or_else(|| ProviderError::Permanent("no listing was fetched".into()))?;
-        Ok(Listing { entries, info })
+        self.list_dir(dir).await.map(|(listing, _)| listing)
     }
 
     /// `PutObject` with the content type, `Content-MD5` when `opts.md5` is set (the service
     /// rejects the upload with `BadDigest`, [`ProviderError::ChecksumMismatch`], if the bytes
     /// differ) and `opts.sha256` recorded as `x-amz-meta-httporter-sha256` for later
     /// comparisons; S3 cannot check a SHA-256 itself. The body is not covered by the signature
-    /// (`UNSIGNED-PAYLOAD`), and goes through `opts.meter` piece by piece. Larger files use
-    /// multipart uploads.
+    /// (`UNSIGNED-PAYLOAD`), and goes through `opts.meter` piece by piece.
+    ///
+    /// A file of more than [`MULTIPART_THRESHOLD`] (64 MiB) is not sent in one piece but as a
+    /// multipart upload, in parts of [`S3Config::part_size`] with four in flight at once, each
+    /// with its own `Content-MD5`. `opts.parts` keeps its progress so that the next attempt
+    /// carries on where this one stopped; `opts.md5` is not used then, since a service can
+    /// check a whole-file digest only of a single `PutObject`. A byte source is always sent in
+    /// one piece. See the [`multipart`](crate::multipart) module.
     async fn upload(
         &self,
         path: &RemotePath,
@@ -644,18 +660,16 @@ impl StorageProvider for S3Storage {
             .await
             .map_err(|_| limiter_closed("transfer"))?;
 
+        if let UploadSource::File { path, len } = &source
+            && *len > MULTIPART_THRESHOLD
+        {
+            return self.upload_in_parts(&url, path, *len, opts).await;
+        }
+
         let upload = upload_body(&source, opts.meter.clone()).await?;
-        let content_type = if opts.content_type.is_empty() {
-            "application/octet-stream"
-        } else {
-            &opts.content_type
-        };
-        let mut extra = vec![("content-type".to_owned(), content_type.to_owned())];
+        let mut extra = object_headers(opts);
         if let Some(md5) = &opts.md5 {
             extra.push(("content-md5".to_owned(), b64(md5)));
-        }
-        if let Some(sha256) = &opts.sha256 {
-            extra.push((SHA256_META.to_owned(), hex::encode(sha256)));
         }
         let headers = self.sign_request(&Method::PUT, &url, &extra, UNSIGNED_PAYLOAD)?;
         let request = self
@@ -731,9 +745,15 @@ impl StorageProvider for S3Storage {
     }
 
     /// Lists everything below `dir` (a request per folder, side by side), then deletes the
-    /// files, the markers of the folders and `dir`'s own marker with `DeleteObjects`. If some
-    /// keys cannot be deleted, the rest still are, and the first failure is returned. The
+    /// files, the markers of the folders and `dir`'s own marker with `DeleteObjects`. The
     /// bucket root is refused: that is emptying the bucket.
+    ///
+    /// It deletes everything it can, and then answers honestly:
+    /// - If some keys cannot be deleted, the rest still are, and the first failure is returned.
+    /// - A key `RemotePath` cannot hold (`a//b`, a `..` segment, a name that is not UTF-8) is
+    ///   left out of the walk and so survives. Rather than claim the folder is gone, the call
+    ///   ends with [`ProviderError::Refused`] naming one of those keys, once everything else is
+    ///   deleted. (A failed delete comes first: a retry may clear it, and ends in the refusal.)
     async fn delete_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
         let bucket = self.bucket()?;
         if dir.is_root() {
@@ -741,7 +761,7 @@ impl StorageProvider for S3Storage {
                 "Deleting the whole bucket isn't allowed".into(),
             ));
         }
-        let found = walk(self, dir).await?;
+        let (found, skips) = self.walk_dir(dir).await?;
         let mut targets: Vec<Target> = found
             .into_iter()
             .map(|entry| Target {
@@ -753,10 +773,18 @@ impl StorageProvider for S3Storage {
             path: dir.clone(),
             folder: true,
         });
-        self.delete_targets(bucket, &targets)
-            .await
-            .into_iter()
-            .collect()
+        let deleted = self.delete_targets(bucket, &targets).await;
+        if let Some(error) = deleted.into_iter().find_map(Result::err) {
+            return Err(error);
+        }
+        match skips.first {
+            None => Ok(()),
+            Some(key) => Err(ProviderError::Refused(format!(
+                "Some files in this folder have names HTTPorter can't handle, such as \"{}\". \
+                 Delete them in your storage provider's console.",
+                shown(&key)
+            ))),
+        }
     }
 
     /// Writes a zero-byte `dir/` marker; writing it again is harmless.
@@ -803,6 +831,125 @@ impl StorageProvider for S3Storage {
         let bucket = self.bucket()?;
         self.list_page(bucket, "", None, Some(1)).await.map(|_| ())
     }
+}
+
+/// The names one listing call left out because no [`RemotePath`] can hold them.
+#[derive(Debug, Default)]
+struct Skips {
+    count: u64,
+    /// The smallest of the names (a key, or a folder prefix standing for several keys): an
+    /// example for a message, the same whatever order the listings finished in.
+    first: Option<String>,
+}
+
+impl Skips {
+    fn note(&mut self, name: String) {
+        self.count += 1;
+        self.keep_smaller(Some(name));
+    }
+
+    fn merge(&mut self, other: Skips) {
+        self.count += other.count;
+        self.keep_smaller(other.first);
+    }
+
+    fn keep_smaller(&mut self, name: Option<String>) {
+        if let Some(name) = name
+            && self.first.as_ref().is_none_or(|first| name < *first)
+        {
+            self.first = Some(name);
+        }
+    }
+}
+
+/// Turns the keys and prefixes of one page of listing `dir` into entries. `prefix` is `dir`
+/// with a trailing slash, or empty for the root. What cannot become an entry is noted in
+/// `skips`.
+fn collect(
+    dir: &RemotePath,
+    prefix: &str,
+    page: ListPage,
+    out: &mut Vec<Entry>,
+    skips: &mut Skips,
+) {
+    let url_encoded = page.url_encoded;
+    let text = |raw: &str| decode_key(raw, url_encoded);
+    for object in page.objects {
+        let Some(key) = text(&object.key) else {
+            skips.note(lossy_key(&object.key, url_encoded));
+            continue;
+        };
+        // The folder's own marker, and anything a misbehaving service lists from outside.
+        let Some(name) = key.strip_prefix(prefix).filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        // The marker of a subfolder: the folder is shown from its common prefix.
+        if name.ends_with('/') {
+            continue;
+        }
+        match dir.join(name) {
+            Ok(path) => out.push(Entry {
+                path,
+                is_folder: false,
+                size: object.size,
+                modified: object.modified.as_deref().and_then(parse_time),
+                checksum: checksum_from_etag(object.etag.as_deref()),
+                content_type: None,
+                replicated_regions: Vec::new(),
+            }),
+            Err(_) => skips.note(key),
+        }
+    }
+    for common in page.prefixes {
+        let Some(full) = text(&common) else {
+            skips.note(lossy_key(&common, url_encoded));
+            continue;
+        };
+        let Some(rest) = full.strip_prefix(prefix) else {
+            continue;
+        };
+        match dir.join(rest.strip_suffix('/').unwrap_or(rest)) {
+            Ok(path) => out.push(Entry {
+                path,
+                is_folder: true,
+                size: 0,
+                modified: None,
+                checksum: None,
+                content_type: None,
+                replicated_regions: Vec::new(),
+            }),
+            Err(_) => skips.note(full),
+        }
+    }
+}
+
+/// A key as far as it can be read, for naming it to the user: the replacement character stands
+/// for bytes that are not UTF-8.
+fn lossy_key(raw: &str, url_encoded: bool) -> String {
+    if url_encoded {
+        percent_decode_str(&raw.replace('+', " "))
+            .decode_utf8_lossy()
+            .into_owned()
+    } else {
+        raw.to_owned()
+    }
+}
+
+/// The longest key shown in a message.
+const SHOWN_MAX: usize = 120;
+
+/// A key for a message: control characters become `?` (a key may hold anything), and a very
+/// long one is cut.
+fn shown(key: &str) -> String {
+    let mut text: String = key
+        .chars()
+        .take(SHOWN_MAX)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    if key.chars().count() > SHOWN_MAX {
+        text.push_str("...");
+    }
+    text
 }
 
 /// A key to delete: a file, or the marker of a folder (`name/`), which a [`RemotePath`] cannot
@@ -876,9 +1023,54 @@ fn outcomes(
         .collect()
 }
 
+/// The headers that describe an object being written: its content type (S3 does not guess it,
+/// and an object without one is served as `binary/octet-stream`) and its SHA-256 for later
+/// comparisons.
+pub(crate) fn object_headers(opts: &UploadOptions) -> Vec<(String, String)> {
+    let content_type = if opts.content_type.is_empty() {
+        "application/octet-stream"
+    } else {
+        &opts.content_type
+    };
+    let mut headers = vec![("content-type".to_owned(), content_type.to_owned())];
+    if let Some(sha256) = &opts.sha256 {
+        headers.push((SHA256_META.to_owned(), hex::encode(sha256)));
+    }
+    headers
+}
+
+/// The headers for `method url`: the caller's `extra` headers (all of them signed) plus the
+/// ones the signature adds. The signature is made now, so build the request right away.
+pub(crate) fn signed_headers(
+    creds: &Credentials,
+    region: &str,
+    method: &Method,
+    url: &Url,
+    extra: &[(String, String)],
+    payload_sha256: &str,
+) -> Result<HeaderMap, ProviderError> {
+    let input = SignInput {
+        method: method.as_str(),
+        url,
+        headers: extra,
+        payload_sha256,
+    };
+    let signed = sign(&input, creds, region, "s3", Utc::now());
+    let mut headers = HeaderMap::with_capacity(extra.len() + signed.len());
+    for (name, value) in extra.iter().chain(signed.iter()) {
+        let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| unsendable(name))?;
+        let mut header_value = HeaderValue::from_str(value).map_err(|_| unsendable(name))?;
+        if header_name == AUTHORIZATION || name == "x-amz-security-token" {
+            header_value.set_sensitive(true);
+        }
+        headers.insert(header_name, header_value);
+    }
+    Ok(headers)
+}
+
 /// The error for an unsuccessful answer, from its status, `Retry-After` and (a part of) its
 /// body. Reading the body is best effort: without it the status alone decides.
-async fn failure(response: reqwest::Response, limit: Duration) -> ProviderError {
+pub(crate) async fn failure(response: reqwest::Response, limit: Duration) -> ProviderError {
     let status = response.status().as_u16();
     let retry_after = errors::retry_after(response.headers());
     let body = tokio::time::timeout(limit, read_capped(response, ERROR_BODY_MAX))
@@ -965,15 +1157,15 @@ fn http_version(version: Version) -> &'static str {
     }
 }
 
-fn b64(bytes: &[u8]) -> String {
+pub(crate) fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// A key or prefix as the service sent it: as is, or URL-decoded when the answer says it is
 /// encoded (`+` is a space). `None` for a name that is not UTF-8 once decoded.
-fn decode_key(raw: String, url_encoded: bool) -> Option<String> {
+fn decode_key(raw: &str, url_encoded: bool) -> Option<String> {
     if !url_encoded {
-        return Some(raw);
+        return Some(raw.to_owned());
     }
     percent_decode_str(&raw.replace('+', " "))
         .decode_utf8()

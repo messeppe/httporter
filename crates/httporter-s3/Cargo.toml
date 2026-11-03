@@ -20,7 +20,7 @@ quick-xml = { workspace = true, features = ["serialize", "overlapped-lists"] }
 reqwest = { workspace = true, features = ["rustls", "http2", "stream", "system-proxy"] }
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
 url.workspace = true
 
 [dev-dependencies]

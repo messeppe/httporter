@@ -1,7 +1,8 @@
-//! The XML documents of the S3 API: listings, the bucket list, error documents and the
-//! `DeleteObjects` request and answer. Parsing is lenient about what it does not need (unknown
-//! elements, namespaces, the order of elements) and strict about what it does: a document of
-//! the wrong kind is an error, never an empty result.
+//! The XML documents of the S3 API: listings, the bucket list, error documents, the
+//! `DeleteObjects` request and answer, and the documents of a multipart upload. Parsing is
+//! lenient about what it does not need (unknown elements, namespaces, the order of elements)
+//! and strict about what it does: a document of the wrong kind is an error, never an empty
+//! result.
 
 use httporter_core::ProviderError;
 use quick_xml::Reader;
@@ -193,6 +194,66 @@ pub(crate) fn parse_delete_result(
         .collect())
 }
 
+#[derive(Deserialize)]
+struct InitiateXml {
+    #[serde(rename = "UploadId")]
+    upload_id: String,
+}
+
+/// The upload id in an `InitiateMultipartUploadResult`.
+pub(crate) fn parse_initiate(body: &[u8], status: u16) -> Result<String, ProviderError> {
+    let text = expect_root(body, "InitiateMultipartUploadResult", status)?;
+    let doc: InitiateXml =
+        quick_xml::de::from_str(&text).map_err(|e| unrecognised("multipart upload", &e))?;
+    let id = doc.upload_id.trim();
+    if id.is_empty() {
+        return Err(ProviderError::Permanent(
+            "unexpected response from server (the multipart upload has no id)".into(),
+        ));
+    }
+    Ok(id.to_owned())
+}
+
+/// What a successful-looking answer to `CompleteMultipartUpload` says. S3 may begin its answer
+/// with `200` and fail afterwards, with an `<Error>` in the body instead of the result, so the
+/// body is checked for one. Anything else is taken as done: the upload has been assembled
+/// whatever else the service chooses to tell about it (some answer with nothing).
+pub(crate) fn parse_complete(body: &[u8], status: u16) -> Result<(), ProviderError> {
+    let text = String::from_utf8_lossy(body);
+    if root_name(&text).as_deref() == Some("Error") {
+        let doc = parse_error(body);
+        return Err(errors::from_parts(
+            status,
+            doc.code.as_deref(),
+            doc.message.as_deref(),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// The body of a `CompleteMultipartUpload` request: the parts, in the order given (which must be
+/// by number), each with the `ETag` the service answered when it stored it.
+pub(crate) fn complete_request(parts: &[(u32, String)]) -> String {
+    let mut xml = String::with_capacity(80 + parts.len() * 90);
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUpload>");
+    for (number, etag) in parts {
+        xml.push_str("<Part><PartNumber>");
+        xml.push_str(&number.to_string());
+        xml.push_str("</PartNumber><ETag>");
+        // Quotes are legal in element content, and are how a service writes its own ETags.
+        xml.push_str(
+            &etag
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;"),
+        );
+        xml.push_str("</ETag></Part>");
+    }
+    xml.push_str("</CompleteMultipartUpload>");
+    xml
+}
+
 /// The body as text, after checking that its root element is `root`. A body that is an
 /// `<Error>` (some services answer 200 with one) becomes that error; anything else is an
 /// unexpected answer. Without this check a document of the wrong kind would parse as an empty
@@ -215,6 +276,7 @@ fn expect_root(body: &[u8], root: &str, status: u16) -> Result<String, ProviderE
             match root {
                 "ListBucketResult" => "listing",
                 "ListAllMyBucketsResult" => "list of buckets",
+                "InitiateMultipartUploadResult" => "multipart upload",
                 _ => "result",
             }
         ))),
