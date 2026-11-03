@@ -8,6 +8,8 @@ export struct FileRow {
     size: string,
     modified: string,
     folder: bool,
+    // In the pane's selection: the row is drawn highlighted. The app keeps it up to date.
+    selected: bool,
 }
 
 // The provider tile a site shows (mockup `providers`): Bunny, or an S3 service by preset. The

@@ -3,9 +3,15 @@
 // arrive with the compare milestone.
 //
 // Keyboard: Tab reaches the list, then the breadcrumbs, then the three column headers. In the list,
-// Up and Down move the selection (Home, End, PageUp and PageDown too), Enter opens the selected row
-// and Backspace goes up one folder. Space or Return on a breadcrumb goes to that folder and on a
-// column header sorts by it. Every breadcrumb except the last (the current folder) is a button.
+// Up and Down move the selection (Home, End, PageUp and PageDown too; with Shift they extend it),
+// Ctrl+A selects every row, Enter opens the row the keyboard is on and Backspace goes up one
+// folder. Space or Return on a breadcrumb goes to that folder and on a column header sorts by it.
+// Every breadcrumb except the last (the current folder) is a button.
+//
+// Selection: the pane only reports what was pressed (`row-pointer`, `band-select`, `select-all`);
+// the app decides what is selected and sets each row's `selected`. Dragging in the empty space
+// below the rows draws a rubber band over the rows it crosses. A right click on a row opens its
+// context menu (cloud or This PC rows have their own).
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
@@ -189,7 +195,10 @@ component PaneRow inherits Rectangle {
     in property <int> index;
     in property <int> count;
     in property <bool> selected;
-    callback clicked();
+    // The left button went down on the row, with the Ctrl and Shift keys as they were.
+    callback pressed(bool /* ctrl */, bool /* shift */);
+    // The right button went down on the row, at this point of the window.
+    callback context-pressed(Point);
     callback opened();
 
     property <string> kind-label: root.item.kind == FileKind.code ? @tr("code file") : root.item.kind == FileKind.image ? @tr("image") : @tr("document");
@@ -268,8 +277,19 @@ component PaneRow inherits Rectangle {
         }
     }
 
-    TouchArea {
-        clicked => { root.clicked(); }
+    area := TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                if (event.button == PointerEventButton.left) {
+                    root.pressed(event.modifiers.control, event.modifiers.shift);
+                } else if (event.button == PointerEventButton.right) {
+                    root.context-pressed({
+                        x: area.absolute-position.x + area.mouse-x,
+                        y: area.absolute-position.y + area.mouse-y,
+                    });
+                }
+            }
+        }
         double-clicked => { root.opened(); }
     }
 }
@@ -287,7 +307,15 @@ export component Pane inherits Rectangle {
     in property <bool> drop-hover: false;
     // A listing for this pane is on its way: the header says "Loading…" until it is in.
     in property <bool> loading: false;
-    // Index into `rows` of the selected row, or -1 for none.
+    // The cloud pane (its rows and context menu), as opposed to This PC.
+    in property <bool> cloud: false;
+    // What the toolbar may do now; the context menus offer the same.
+    in property <bool> can-upload: false;
+    in property <bool> can-download: false;
+    in property <bool> can-new-folder: false;
+    in property <bool> can-delete: false;
+    // Index into `rows` of the row the keyboard is on (the focus), or -1 for none. Which rows are
+    // selected is in each row's `selected`.
     in-out property <int> selected: -1;
     // Sorted column: 0 name, 1 size, 2 modified. Pressing a column header changes these two and
     // then calls `sort`.
@@ -298,26 +326,66 @@ export component Pane inherits Rectangle {
     out property <bool> focus-visible: root.has-focus && root.keyboard-focus;
     callback open(int);
     callback up();
+    // A row was pressed, or the keyboard landed on it: its index, and whether Ctrl and Shift were
+    // held.
+    callback row-pointer(int, bool, bool);
+    // The rubber band covers the rows from the first to the last index (both -1 when it covers
+    // none); the last argument is true when Ctrl was held, to add to the selection.
+    callback band-select(int, int, bool);
+    callback select-all();
+    // The context menus and the shortcuts' commands. The app acts on the selection.
+    callback upload();
+    callback download();
+    callback download-to();
+    callback new-folder();
+    callback delete();
+    callback refresh();
+    // The row (index into `rows`) that the menu was opened on.
+    callback show-in-explorer(int);
     // A breadcrumb other than the last was pressed: the index into `crumbs`, 0 being the root.
     callback crumb-clicked(int);
     callback sort(int);
 
     property <bool> keyboard-focus: false;
+    // The row the open context menu is for, or -1.
+    property <int> context-row: -1;
 
     forward-focus: key-focus;
     accessible-role: region;
     accessible-label: root.title;
 
-    function pick(index: int) {
+    function pick(index: int, ctrl: bool, shift: bool) {
         root.selected = index;
         root.keyboard-focus = false;
         key-focus.focus();
+        root.row-pointer(index, ctrl, shift);
     }
 
-    function move-to(index: int) {
+    // The keyboard goes to a row; with `extend` (Shift) the selection grows to it.
+    function move-to(index: int, extend: bool) {
         if (root.rows.length > 0) {
             root.selected = Math.max(0, Math.min(root.rows.length - 1, index));
+            root.row-pointer(root.selected, false, extend);
         }
+    }
+
+    // Opens the context menu for `row` at `at`, a point of the card.
+    function show-menu(row: int, at: Point) {
+        root.context-row = row;
+        if (root.cloud) {
+            cloud-menu.show(at);
+        } else {
+            local-menu.show(at);
+        }
+    }
+
+    // The right button went down on row `index` at `point` (window coordinates): the row joins
+    // the selection unless it is in it already, then the menu opens.
+    function row-menu(index: int, point: Point) {
+        if (!root.rows[index].selected) {
+            root.pick(index, false, false);
+        }
+        root.show-menu(index, { x: point.x - card.absolute-position.x, y: point.y - card.absolute-position.y });
     }
 
     // A breadcrumb was pressed. The app answers with the new path, which rebuilds the crumbs and
@@ -375,37 +443,53 @@ export component Pane inherits Rectangle {
             }
         }
         key-pressed(event) => {
+            // Ctrl+A: every row.
+            if (event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift && (event.text == "a" || event.text == "A")) {
+                root.keyboard-focus = true;
+                root.select-all();
+                return accept;
+            }
+            // The Menu key and Shift+F10: the context menu of the row the keyboard is on, at the
+            // left of that row (or at the top of the list when there is none).
+            if (event.text == Key.Menu || (event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && event.text == Key.F10)) {
+                root.keyboard-focus = true;
+                root.show-menu(root.selected, {
+                    x: 48px,
+                    y: root.selected < 0 ? 70px : Math.max(63px, Math.min(card.height - 4px, 63px + list.content-y + (root.selected + 0.5) * Theme.row-height)),
+                });
+                return accept;
+            }
             if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                 return reject;
             }
             if (event.text == Key.DownArrow) {
                 root.keyboard-focus = true;
-                root.move-to(root.selected + 1);
+                root.move-to(root.selected + 1, event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.UpArrow) {
                 root.keyboard-focus = true;
-                root.move-to(root.selected < 0 ? root.rows.length - 1 : root.selected - 1);
+                root.move-to(root.selected < 0 ? root.rows.length - 1 : root.selected - 1, event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.Home) {
                 root.keyboard-focus = true;
-                root.move-to(0);
+                root.move-to(0, event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.End) {
                 root.keyboard-focus = true;
-                root.move-to(root.rows.length - 1);
+                root.move-to(root.rows.length - 1, event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.PageDown) {
                 root.keyboard-focus = true;
-                root.move-to(root.selected + Math.max(1, Math.floor(list.visible-height / Theme.row-height) - 1));
+                root.move-to(root.selected + Math.max(1, Math.floor(list.visible-height / Theme.row-height) - 1), event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.PageUp) {
                 root.keyboard-focus = true;
-                root.move-to(root.selected - Math.max(1, Math.floor(list.visible-height / Theme.row-height) - 1));
+                root.move-to(root.selected - Math.max(1, Math.floor(list.visible-height / Theme.row-height) - 1), event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.Return) {
@@ -443,6 +527,67 @@ export component Pane inherits Rectangle {
         border-width: 0.5px;
         border-color: Theme.sep-strong;
         clip: true;
+
+        // The context menus, one per kind of pane. They open only through `show-menu` (a right
+        // click on a row, the Menu key), after the row has been selected, so the native trigger is
+        // off.
+        cloud-menu := ContextMenuArea {
+            enabled: false;
+            Menu {
+                MenuItem {
+                    title: @tr("Download");
+                    enabled: root.can-download;
+                    activated => { root.download(); }
+                }
+                MenuItem {
+                    title: @tr("Download to…");
+                    enabled: root.can-download;
+                    activated => { root.download-to(); }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: @tr("New Folder…");
+                    enabled: root.can-new-folder;
+                    activated => { root.new-folder(); }
+                }
+                MenuItem {
+                    title: @tr("Delete…");
+                    enabled: root.can-delete;
+                    activated => { root.delete(); }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: @tr("Refresh");
+                    activated => { root.refresh(); }
+                }
+            }
+        }
+        local-menu := ContextMenuArea {
+            enabled: false;
+            Menu {
+                MenuItem {
+                    title: @tr("Upload");
+                    enabled: root.can-upload;
+                    activated => { root.upload(); }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: @tr("New Folder…");
+                    enabled: root.can-new-folder;
+                    activated => { root.new-folder(); }
+                }
+                MenuItem {
+                    title: @tr("Show in Explorer");
+                    enabled: root.context-row >= 0;
+                    activated => { root.show-in-explorer(root.context-row); }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: @tr("Refresh");
+                    activated => { root.refresh(); }
+                }
+            }
+        }
 
         VerticalLayout {
             // Header (mockup `.pane-head`).
@@ -614,13 +759,79 @@ export component Pane inherits Rectangle {
                         item: item;
                         index: i;
                         count: root.rows.length;
-                        selected: i == root.selected;
-                        clicked => { root.pick(i); }
+                        selected: item.selected;
+                        pressed(ctrl, shift) => { root.pick(i, ctrl, shift); }
+                        context-pressed(point) => { root.row-menu(i, point); }
                         opened => {
-                            root.pick(i);
+                            root.pick(i, false, false);
                             root.open(i);
                         }
                     }
+                }
+
+                // The empty space below the last row. Pressing there clears the selection (Ctrl
+                // keeps it) and dragging draws the rubber band, which selects the rows it crosses.
+                // A full list has no empty space, so no band.
+                band-area := TouchArea {
+                    property <bool> banding: false;
+                    property <bool> additive: false;
+                    // The corner the drag started at and the pointer, in the list's coordinates.
+                    property <length> start-x;
+                    property <length> start-y;
+                    property <length> now-x;
+                    property <length> now-y;
+
+                    x: 0px;
+                    y: Math.max(0px, root.rows.length * Theme.row-height + list.content-y);
+                    width: parent.width;
+                    height: Math.max(0px, parent.height - self.y);
+
+                    // The band over the rows: its first and last row, or -1 and -1 when it
+                    // crosses none.
+                    function report() {
+                        let top = Math.max(0px, Math.min(self.start-y, self.now-y));
+                        let bottom = Math.min(parent.height, Math.max(self.start-y, self.now-y));
+                        let first = Math.floor((top - list.content-y) / Theme.row-height);
+                        let last = Math.floor((bottom - list.content-y) / Theme.row-height);
+                        if (last < 0 || first >= root.rows.length) {
+                            root.band-select(-1, -1, self.additive);
+                        } else {
+                            root.band-select(Math.max(0, first), Math.min(root.rows.length - 1, last), self.additive);
+                        }
+                    }
+
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            self.banding = true;
+                            self.additive = event.modifiers.control;
+                            self.start-x = self.x + self.mouse-x;
+                            self.start-y = self.y + self.mouse-y;
+                            self.now-x = self.start-x;
+                            self.now-y = self.start-y;
+                            root.keyboard-focus = false;
+                            key-focus.focus();
+                            self.report();
+                        } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                            self.banding = false;
+                        }
+                    }
+                    moved => {
+                        if (self.banding) {
+                            self.now-x = Math.max(0px, Math.min(parent.width, self.x + self.mouse-x));
+                            self.now-y = Math.max(0px, Math.min(parent.height, self.y + self.mouse-y));
+                            self.report();
+                        }
+                    }
+                }
+
+                if band-area.banding: Rectangle {
+                    x: Math.min(band-area.start-x, band-area.now-x);
+                    y: Math.min(band-area.start-y, band-area.now-y);
+                    width: Math.abs(band-area.now-x - band-area.start-x);
+                    height: Math.abs(band-area.now-y - band-area.start-y);
+                    background: Theme.accent.with-alpha(0.2);
+                    border-width: 1px;
+                    border-color: Theme.accent;
                 }
             }
         }

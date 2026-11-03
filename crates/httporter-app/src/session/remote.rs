@@ -372,7 +372,7 @@ impl Session {
         let (connection, status_right) = match (&remote.info, &remote.error) {
             (Some(info), _) => (
                 copy::connection(info.latency),
-                copy::status_right(&info.http_version, &site.host),
+                copy::status_right(&info.http_version, &site.host, None),
             ),
             (None, Some(_)) => (copy::NOT_CONNECTED.to_owned(), String::new()),
             (None, None) => (copy::CONNECTING.to_owned(), site.host.clone()),

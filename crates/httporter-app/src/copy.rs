@@ -22,6 +22,8 @@ use std::time::Duration;
 use httporter_core::{ProviderError, RemotePath};
 
 use crate::drop_hook::{DropBatch, PaneSide};
+use crate::format::format_size;
+use crate::viewmodel::RowData;
 
 // ---- Counts ----
 
@@ -211,9 +213,15 @@ pub const CONNECTING: &str = "Connecting…";
 /// The pill after a failed connection.
 pub const NOT_CONNECTED: &str = "Not connected";
 
-/// The right side of the status bar once a listing has come back: "{http_version} · {host}".
-pub fn status_right(http_version: &str, host: &str) -> String {
-    format!("{http_version} · {host}")
+/// The right side of the status bar once a listing has come back: "{http_version} · {host}", and
+/// with `ready` (the connections open and idle) " · {n} connections ready". `None` until the
+/// transfer engine can say (Task 23).
+pub fn status_right(http_version: &str, host: &str, ready: Option<usize>) -> String {
+    match ready {
+        None => format!("{http_version} · {host}"),
+        Some(1) => format!("{http_version} · {host} · 1 connection ready"),
+        Some(n) => format!("{http_version} · {host} · {n} connections ready"),
+    }
 }
 
 /// Opening a site needs its password, and none is saved.
@@ -228,6 +236,37 @@ pub fn password_unreadable(site: &str, reason: impl Display) -> String {
 
 /// Opening an S3 site, which nothing can save yet.
 pub const S3_LATER: &str = "Opening S3 sites arrives later in this build.";
+
+// ---- Selection, the toolbar and the context menus ----
+
+/// The status bar's left side for the rows selected in a pane: "index.html selected · 383.4 KB"
+/// for one file, "uploads selected" for one folder, "12 items selected · 4.2 MB" for several (the
+/// size is that of the files; with only folders there is none). Empty when nothing is selected,
+/// so that the item count shows instead.
+pub fn selection_summary(rows: &[&RowData]) -> String {
+    match rows {
+        [] => String::new(),
+        [row] if row.folder => format!("{} selected", row.name),
+        [row] => format!("{} selected · {}", row.name, format_size(row.bytes)),
+        rows => {
+            let mut files = rows.iter().filter(|row| !row.folder).peekable();
+            let has_files = files.peek().is_some();
+            let bytes: u64 = files.map(|row| row.bytes).sum();
+            if has_files {
+                format!("{} selected · {}", items(rows.len()), format_size(bytes))
+            } else {
+                format!("{} selected", items(rows.len()))
+            }
+        }
+    }
+}
+
+/// Why Delete is off while the This PC pane is the one in use (its tooltip).
+pub const DELETE_ON_THIS_PC: &str =
+    "Delete works in the cloud pane. Use Explorer for files on this PC.";
+
+/// Why Upload, Download, New folder and Delete are off until the transfer engine is wired in.
+pub const TRANSFERS_LATER: &str = "Transfers arrive in a later version";
 
 // ---- The This PC pane ----
 
@@ -431,7 +470,7 @@ mod tests {
         );
         assert_eq!(connection(Duration::from_millis(21)), "HTTPS · 21 ms");
         assert_eq!(
-            status_right("http/1.1", "sg.storage.bunnycdn.com"),
+            status_right("http/1.1", "sg.storage.bunnycdn.com", None),
             "http/1.1 · sg.storage.bunnycdn.com"
         );
         assert_eq!(

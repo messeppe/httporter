@@ -68,7 +68,11 @@ export component AppWindow inherits Window {
     in property <string> local-status;
     in property <string> remote-status;
     in-out property <string> status-message;
-    out property <string> status-left: root.status-message != "" ? root.status-message : (root.local-pane-active ? root.local-status : root.remote-status);
+    // What is selected in a pane ("index.html selected · 383.4 KB"), empty for nothing. It takes
+    // the place of the item count while the pane is the one shown.
+    in property <string> local-selection-text;
+    in property <string> remote-selection-text;
+    out property <string> status-left: root.status-message != "" ? root.status-message : (root.local-pane-active ? (root.local-selection-text != "" ? root.local-selection-text : root.local-status) : (root.remote-selection-text != "" ? root.remote-selection-text : root.remote-status));
     in property <string> status-right;
     in property <string> error-text;
     in property <[FileRow]> local-rows;
@@ -85,7 +89,8 @@ export component AppWindow inherits Window {
     // A listing for the pane is on its way: the pane says "Loading…" until it is in.
     in property <bool> local-loading: false;
     in property <bool> remote-loading: false;
-    // Selected row of each pane (-1 for none) and its sorted column (0 name, 1 size, 2 modified).
+    // The row the keyboard is on in each pane (-1 for none; which rows are selected is in each
+    // row's `selected`) and the pane's sorted column (0 name, 1 size, 2 modified).
     in-out property <int> local-selected: -1;
     in-out property <int> remote-selected: -1;
     in-out property <int> local-sort-column: 0;
@@ -127,6 +132,33 @@ export component AppWindow inherits Window {
     callback go-forward();
     // F5 or Ctrl+R: list the folder of the pane last used or focused again (as Back and Forward).
     callback refresh();
+
+    // File actions. The toolbar buttons, the context menus and the keys (Ctrl+U, Ctrl+Shift+N,
+    // Del) call them, only while the matching `can-*` is true; the app sets those from what is
+    // selected and where. `delete-note` is why Delete is off when that is down to the pane in use;
+    // `actions-note` is why the actions are off for now.
+    in property <bool> can-upload: false;
+    in property <bool> can-download: false;
+    in property <bool> can-new-folder: false;
+    in property <bool> can-delete: false;
+    in property <string> delete-note;
+    in property <string> actions-note;
+    callback upload();
+    callback download();
+    callback download-to();
+    callback new-folder();
+    callback delete();
+    // A row of a pane was pressed (pane 0 is This PC, 1 the cloud pane; row index into its
+    // rows; whether Ctrl and Shift were held) or the keyboard landed on it. The app updates the
+    // rows' `selected`.
+    callback row-pointer(int /* pane */, int /* row */, bool /* ctrl */, bool /* shift */);
+    // The rubber band covers rows `from` to `to` (both -1 for none); `additive` when Ctrl was held.
+    callback band-select(int /* pane */, int /* from */, int /* to */, bool /* additive */);
+    callback select-all(int /* pane */);
+    // The This PC menu's Show in Explorer, for a row of that pane.
+    callback show-in-explorer(int /* row */);
+    // The pane last used or focused changed (`local-pane-active`), which the toolbar follows.
+    callback active-pane-changed();
 
     callback site-selected(int);
     callback add-site();
@@ -175,6 +207,7 @@ export component AppWindow inherits Window {
     // Turning to the other pane puts its count in the status bar, over any message.
     changed local-pane-active => {
         root.status-message = "";
+        root.active-pane-changed();
     }
 
     // Alt+Left and Alt+Right anywhere in the window (but not on the Add Site sheet, which sits
@@ -187,6 +220,25 @@ export component AppWindow inherits Window {
             if (!event.modifiers.alt && !event.modifiers.meta && ((event.text == Key.F5 && !event.modifiers.control) || (event.modifiers.control && (event.text == "r" || event.text == "R")))) {
                 if (!event.repeat) {
                     root.refresh();
+                }
+                return accept;
+            }
+            // Ctrl+U uploads, Ctrl+Shift+N makes a folder and Del deletes, while the toolbar would.
+            if (event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift && (event.text == "u" || event.text == "U")) {
+                if (!event.repeat && root.can-upload) {
+                    root.upload();
+                }
+                return accept;
+            }
+            if (event.modifiers.control && event.modifiers.shift && !event.modifiers.alt && !event.modifiers.meta && (event.text == "n" || event.text == "N")) {
+                if (!event.repeat && root.can-new-folder) {
+                    root.new-folder();
+                }
+                return accept;
+            }
+            if (event.text == Key.Delete && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift) {
+                if (!event.repeat && root.can-delete) {
+                    root.delete();
                 }
                 return accept;
             }
@@ -215,9 +267,19 @@ export component AppWindow inherits Window {
                 connection-ok: root.connection-ok;
                 can-go-back: root.can-go-back;
                 can-go-forward: root.can-go-forward;
+                can-upload: root.can-upload;
+                can-download: root.can-download;
+                can-new-folder: root.can-new-folder;
+                can-delete: root.can-delete;
+                delete-note: root.delete-note;
+                actions-note: root.actions-note;
                 toggle-sidebar => { root.sidebar-visible = !root.sidebar-visible; }
                 go-back => { root.go-back(); }
                 go-forward => { root.go-forward(); }
+                upload => { root.upload(); }
+                download => { root.download(); }
+                new-folder => { root.new-folder(); }
+                delete => { root.delete(); }
             }
 
             HorizontalLayout {
@@ -272,6 +334,10 @@ export component AppWindow inherits Window {
                             crumbs: root.local-crumbs;
                             rows: root.local-rows;
                             loading: root.local-loading;
+                            can-upload: root.can-upload;
+                            can-download: root.can-download;
+                            can-new-folder: root.can-new-folder;
+                            can-delete: root.can-delete;
                             selected <=> root.local-selected;
                             sort-column <=> root.local-sort-column;
                             sort-ascending <=> root.local-sort-ascending;
@@ -279,6 +345,16 @@ export component AppWindow inherits Window {
                             up => { root.local-up(); }
                             crumb-clicked(index) => { root.local-crumb-clicked(index); }
                             sort(column) => { root.sort-local(column); }
+                            row-pointer(row, ctrl, shift) => { root.row-pointer(0, row, ctrl, shift); }
+                            band-select(from, to, additive) => { root.band-select(0, from, to, additive); }
+                            select-all => { root.select-all(0); }
+                            upload => { root.upload(); }
+                            download => { root.download(); }
+                            download-to => { root.download-to(); }
+                            new-folder => { root.new-folder(); }
+                            delete => { root.delete(); }
+                            refresh => { root.refresh(); }
+                            show-in-explorer(row) => { root.show-in-explorer(row); }
                         }
                         remote-pane := Pane {
                             x: panes.side-by-side ? (panes.width + 8px) / 2 : 0px;
@@ -297,6 +373,11 @@ export component AppWindow inherits Window {
                             header-chip: root.remote-chip;
                             loading: root.remote-loading;
                             drop-hover: root.drop-hover-remote && root.has-selection;
+                            cloud: true;
+                            can-upload: root.can-upload;
+                            can-download: root.can-download;
+                            can-new-folder: root.can-new-folder;
+                            can-delete: root.can-delete;
                             selected <=> root.remote-selected;
                             sort-column <=> root.remote-sort-column;
                             sort-ascending <=> root.remote-sort-ascending;
@@ -304,6 +385,16 @@ export component AppWindow inherits Window {
                             up => { root.remote-up(); }
                             crumb-clicked(index) => { root.remote-crumb-clicked(index); }
                             sort(column) => { root.sort-remote(column); }
+                            row-pointer(row, ctrl, shift) => { root.row-pointer(1, row, ctrl, shift); }
+                            band-select(from, to, additive) => { root.band-select(1, from, to, additive); }
+                            select-all => { root.select-all(1); }
+                            upload => { root.upload(); }
+                            download => { root.download(); }
+                            download-to => { root.download-to(); }
+                            new-folder => { root.new-folder(); }
+                            delete => { root.delete(); }
+                            refresh => { root.refresh(); }
+                            show-in-explorer(row) => { root.show-in-explorer(row); }
                         }
                     }
                 }

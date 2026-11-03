@@ -18,6 +18,7 @@ mod copy;
 mod drop_hook;
 mod format;
 mod local_fs;
+mod selection;
 mod session;
 mod sort;
 mod viewmodel;
@@ -196,6 +197,7 @@ mod tests {
             size: "".into(),
             modified: "".into(),
             folder: true,
+            selected: false,
         };
         assert!(site.healthy && row.folder);
         for provider in [
