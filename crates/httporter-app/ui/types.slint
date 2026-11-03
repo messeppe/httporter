@@ -8,6 +8,8 @@ export struct FileRow {
     size: string,
     modified: string,
     folder: bool,
+    // In the pane's selection: the row is drawn highlighted. The app keeps it up to date.
+    selected: bool,
 }
 
 // The provider tile a site shows (mockup `providers`): Bunny, or an S3 service by preset. The
@@ -51,4 +53,18 @@ export struct ConflictRow {
     contents: string,
     same: ConflictContents,
     action: int,
+}
+
+// Where a pane is in the window, in logical pixels, for telling what a point is over (a dragged
+// file's position, see src/drop_hook.rs). `list-top` is the top edge of the list, where its first
+// row starts when it is not scrolled; `scroll-y` is how far it is scrolled down (0 or more).
+export struct PaneBounds {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    list-top: length,
+    row-height: length,
+    scroll-y: length,
+    rows: int,
 }

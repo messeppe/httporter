@@ -1,0 +1,29 @@
+[package]
+name = "httporter-s3"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+hmac.workspace = true
+httporter-core = { version = "0.1.0", path = "../httporter-core" }
+md-5.workspace = true
+percent-encoding.workspace = true
+# `overlapped-lists`: some services put `<Contents>` and `<CommonPrefixes>` in any order.
+quick-xml = { workspace = true, features = ["serialize", "overlapped-lists"] }
+reqwest = { workspace = true, features = ["rustls", "http2", "stream", "system-proxy"] }
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+wiremock.workspace = true

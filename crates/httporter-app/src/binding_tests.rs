@@ -59,6 +59,7 @@ fn row(name: &str, folder: bool) -> RowData {
         size: "1 B".into(),
         modified: "Today 10:02".into(),
         folder,
+        bytes: 1,
     }
 }
 

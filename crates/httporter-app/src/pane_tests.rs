@@ -9,7 +9,7 @@ use crate::{AppWindow, ProviderTile};
 use i_slint_backend_testing as testing;
 use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
 use slint::platform::{Key, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, SharedString, VecModel};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -48,6 +48,7 @@ fn row_data(prefix: &str, count: usize) -> Vec<RowData> {
             size: "1 B".into(),
             modified: "Today 10:02".into(),
             folder: i % 5 == 0,
+            bytes: 1,
         })
         .collect()
 }
@@ -336,6 +337,11 @@ fn clicking_a_column_header_sorts_by_it() {
 fn rows_and_headers_are_described_for_screen_readers() {
     let w = window_with_panes(3, 2);
     w.set_local_selected(1);
+    // The highlight comes from the row's own flag (the app sets it with the selection).
+    let rows = w.get_local_rows();
+    let mut picked = rows.row_data(1).unwrap();
+    picked.selected = true;
+    rows.set_row_data(1, picked);
 
     assert!(pane_named(&w, "This PC").is_valid());
     assert!(pane_named(&w, "No site selected").is_valid());

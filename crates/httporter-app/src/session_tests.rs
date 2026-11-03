@@ -494,7 +494,7 @@ async fn a_save_that_has_started_lists_the_site_even_if_it_is_given_up() {
     assert_eq!(sites.len(), 1, "listed once");
     assert_eq!(s.site_items().len(), 1, "and so in the sidebar's rows");
     assert_eq!(
-        lock(&s.store).list_sites().unwrap(),
+        lock(&s.store).list_sites().unwrap().sites,
         sites,
         "as in the database"
     );

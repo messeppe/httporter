@@ -7,7 +7,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use chrono::Local;
-use drop_hook::PaneLayout;
+use drop_hook::{PaneGeometry, PaneLayout, PaneSide};
 use httporter_platform::{KeyringStore, Store, default_db_path};
 use session::{RealFactory, Session};
 use slint::Model;
@@ -19,6 +19,7 @@ mod drawer_view;
 mod drop_hook;
 mod format;
 mod local_fs;
+mod selection;
 mod session;
 mod sheets_view;
 mod sort;
@@ -116,35 +117,76 @@ fn open_session() -> Result<Session, httporter_platform::StoreError> {
 }
 
 /// Files dragged in from Explorer: the cloud pane lights up while they are over it (if a site is
-/// selected; the window sees to that). Dropping is only acknowledged in the status line for now;
-/// uploads arrive in I2.
+/// selected; the window sees to that), and so does the folder row they are over. Dropping is only
+/// acknowledged in the status line for now; Task 23 turns it into an upload. Files released where
+/// the window cannot tell, or over no pane, are ignored.
 fn install_drop(ui: &AppWindow) {
     let hover_ui = ui.as_weak();
     let drop_ui = ui.as_weak();
+    let lost_ui = ui.as_weak();
     let layout_ui = ui.as_weak();
     drop_hook::install_drop_hook(
         ui.window(),
-        move |over_remote| {
+        move |target| {
             if let Some(ui) = hover_ui.upgrade() {
+                let (over_remote, row) = match target {
+                    Some((PaneSide::Remote, row)) => (true, row),
+                    _ => (false, None),
+                };
                 ui.set_drop_hover_remote(over_remote);
+                let folder = remote_folder(&ui, row);
+                ui.set_drop_hover_row(folder.map_or(-1, |(row, _)| row));
             }
         },
         move |batch| {
             if let Some(ui) = drop_ui.upgrade() {
                 let site = selected_site_name(&ui);
-                ui.set_status_message(copy::drop_status(&batch, site.as_deref()).into());
+                let folder = match batch.side {
+                    PaneSide::Remote => remote_folder(&ui, batch.row).map(|(_, name)| name),
+                    PaneSide::Local => None,
+                };
+                let status = copy::drop_status(&batch, site.as_deref(), folder.as_deref());
+                ui.set_status_message(status.into());
+            }
+        },
+        move || {
+            if let Some(ui) = lost_ui.upgrade() {
+                ui.set_status_message(copy::DROP_NOT_LOCATED.into());
             }
         },
         move || {
             layout_ui
                 .upgrade()
                 .map_or_else(PaneLayout::default, |ui| PaneLayout {
-                    split_x: ui.get_pane_split(),
-                    stacked: ui.get_panes_stacked(),
-                    remote_y: ui.get_remote_pane_y(),
+                    local: geometry(&ui.get_local_bounds()),
+                    remote: geometry(&ui.get_remote_bounds()),
                 })
         },
     );
+}
+
+/// A pane's place in the window as the hook wants it.
+fn geometry(bounds: &PaneBounds) -> PaneGeometry {
+    PaneGeometry {
+        x: bounds.x,
+        y: bounds.y,
+        w: bounds.width,
+        h: bounds.height,
+        list_top: bounds.list_top,
+        row_height: bounds.row_height,
+        scroll_y: bounds.scroll_y,
+        rows: usize::try_from(bounds.rows).unwrap_or(0),
+    }
+}
+
+/// The row of the cloud pane and its name, when `row` is a folder there. A file row is not a
+/// target: files dropped on one go to the folder the pane shows.
+fn remote_folder(ui: &AppWindow, row: Option<usize>) -> Option<(i32, String)> {
+    let index = row?;
+    let row = ui.get_remote_rows().row_data(index)?;
+    row.folder
+        .then(|| i32::try_from(index).ok().map(|i| (i, row.name.to_string())))
+        .flatten()
 }
 
 /// The name of the site selected in the sidebar, if any.
@@ -198,6 +240,7 @@ mod tests {
             size: "".into(),
             modified: "".into(),
             folder: true,
+            selected: false,
         };
         assert!(site.healthy && row.folder);
         for provider in [

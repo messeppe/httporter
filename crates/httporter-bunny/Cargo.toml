@@ -20,5 +20,6 @@ tokio-util = { version = "0.7.20", features = ["io"] }
 hex = "0.4.3"
 sha2 = "0.11.1"
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# test-util: the paused clock; net + io-util: small local servers that count connections.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "net", "io-util"] }
 wiremock.workspace = true

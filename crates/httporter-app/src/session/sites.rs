@@ -13,7 +13,7 @@ use httporter_bunny::{BunnyConfig, REGIONS, storage_host};
 use httporter_core::{
     ProviderError, ProviderKind, RemotePath, S3Preset, SiteId, SiteRecord, StorageProvider,
 };
-use httporter_platform::{CredentialKey, CredentialStore, Store, StoreError};
+use httporter_platform::{CredentialKey, CredentialStore, SiteList, Store, StoreError};
 
 use super::{ProviderFactory, Session, blocking, interactive, lock};
 use crate::add_site::ValidSite;
@@ -110,9 +110,9 @@ impl Book {
     }
 
     /// Takes in the database's list of sites, or notes that it could not be read.
-    fn take(&mut self, listed: Result<Vec<SiteRecord>, StoreError>) {
+    fn take(&mut self, listed: Result<SiteList, StoreError>) {
         match listed {
-            Ok(sites) => self.sites = sites,
+            Ok(list) => self.sites = list.sites,
             Err(e) => self.notice = Some(copy::sites_unreadable(e)),
         }
     }

@@ -26,6 +26,8 @@ pub struct RowData {
     pub size: String,
     pub modified: String,
     pub folder: bool,
+    /// The file's size in bytes (0 for a folder), for adding up a selection.
+    pub bytes: u64,
 }
 
 /// A listing entry's time in the PC's time zone, which is what the panes show.
@@ -104,6 +106,7 @@ fn row(
         },
         modified: modified.map_or_else(|| NONE.to_owned(), |t| format_date(t, now)),
         folder,
+        bytes: if folder { 0 } else { size },
     }
 }
 
@@ -258,6 +261,7 @@ pub fn to_slint_rows(rows: &[RowData]) -> ModelRc<FileRow> {
             size: r.size.as_str().into(),
             modified: r.modified.as_str().into(),
             folder: r.folder,
+            selected: false,
         })
         .collect();
     ModelRc::new(VecModel::from(rows))
@@ -589,6 +593,7 @@ mod tests {
                 size: "\u{2014}".into(),
                 modified: "Today 10:02".into(),
                 folder: true,
+                bytes: 0,
             },
             RowData {
                 name: "index.html".into(),
@@ -596,6 +601,7 @@ mod tests {
                 size: "383.4 KB".into(),
                 modified: "Yesterday 17:02".into(),
                 folder: false,
+                bytes: 392_641,
             },
             RowData {
                 name: "a.png".into(),
@@ -603,6 +609,7 @@ mod tests {
                 size: "1 B".into(),
                 modified: "".into(),
                 folder: false,
+                bytes: 1,
             },
             RowData {
                 name: "robots.txt".into(),
@@ -610,6 +617,7 @@ mod tests {
                 size: "67 B".into(),
                 modified: "".into(),
                 folder: false,
+                bytes: 67,
             },
         ];
         let model = to_slint_rows(&rows);
@@ -642,6 +650,7 @@ mod tests {
                 size: "1 B".into(),
                 modified: "".into(),
                 folder: false,
+                bytes: 1,
             })
             .collect();
         w.set_remote_rows(to_slint_rows(&rows));

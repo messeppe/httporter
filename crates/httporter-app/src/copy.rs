@@ -22,6 +22,8 @@ use std::time::Duration;
 use httporter_core::{ProviderError, RemotePath};
 
 use crate::drop_hook::{DropBatch, PaneSide};
+use crate::format::format_size;
+use crate::viewmodel::RowData;
 
 // ---- Counts ----
 
@@ -211,9 +213,15 @@ pub const CONNECTING: &str = "Connecting…";
 /// The pill after a failed connection.
 pub const NOT_CONNECTED: &str = "Not connected";
 
-/// The right side of the status bar once a listing has come back: "{http_version} · {host}".
-pub fn status_right(http_version: &str, host: &str) -> String {
-    format!("{http_version} · {host}")
+/// The right side of the status bar once a listing has come back: "{http_version} · {host}", and
+/// with `ready` (the connections open and idle) " · {n} connections ready". `None` until the
+/// transfer engine can say (Task 23).
+pub fn status_right(http_version: &str, host: &str, ready: Option<usize>) -> String {
+    match ready {
+        None => format!("{http_version} · {host}"),
+        Some(1) => format!("{http_version} · {host} · 1 connection ready"),
+        Some(n) => format!("{http_version} · {host} · {n} connections ready"),
+    }
 }
 
 /// Opening a site needs its password, and none is saved.
@@ -229,6 +237,37 @@ pub fn password_unreadable(site: &str, reason: impl Display) -> String {
 /// Opening an S3 site, which nothing can save yet.
 pub const S3_LATER: &str = "Opening S3 sites arrives later in this build.";
 
+// ---- Selection, the toolbar and the context menus ----
+
+/// The status bar's left side for the rows selected in a pane: "index.html selected · 383.4 KB"
+/// for one file, "uploads selected" for one folder, "12 items selected · 4.2 MB" for several (the
+/// size is that of the files; with only folders there is none). Empty when nothing is selected,
+/// so that the item count shows instead.
+pub fn selection_summary(rows: &[&RowData]) -> String {
+    match rows {
+        [] => String::new(),
+        [row] if row.folder => format!("{} selected", row.name),
+        [row] => format!("{} selected · {}", row.name, format_size(row.bytes)),
+        rows => {
+            let mut files = rows.iter().filter(|row| !row.folder).peekable();
+            let has_files = files.peek().is_some();
+            let bytes: u64 = files.map(|row| row.bytes).sum();
+            if has_files {
+                format!("{} selected · {}", items(rows.len()), format_size(bytes))
+            } else {
+                format!("{} selected", items(rows.len()))
+            }
+        }
+    }
+}
+
+/// Why Delete is off while the This PC pane is the one in use (its tooltip).
+pub const DELETE_ON_THIS_PC: &str =
+    "Delete works in the cloud pane. Use Explorer for files on this PC.";
+
+/// Why Upload, Download, New folder and Delete are off until the transfer engine is wired in.
+pub const TRANSFERS_LATER: &str = "Transfers arrive in a later version";
+
 // ---- The This PC pane ----
 
 /// What the pane's list of drives is called when a message has to name it.
@@ -241,21 +280,36 @@ pub fn local_open_failed(place: &str, reason: impl Display) -> String {
 
 // ---- The status line ----
 
-/// The status line for a drop on a pane, naming the selected site (placeholder text until uploads
-/// exist). With no site selected there is no cloud pane to point to, so the text says to add one.
-pub fn drop_status(batch: &DropBatch, site: Option<&str>) -> String {
+/// The status line for a drop on a pane, naming the selected site and, when the files landed on a
+/// folder row of the cloud pane, the folder (placeholder text until uploads exist). With no site
+/// selected there is no cloud pane to point to, so the text says to add one.
+pub fn drop_status(batch: &DropBatch, site: Option<&str>, folder: Option<&str>) -> String {
     let dropped = items(batch.paths.len());
-    match (batch.side, site) {
-        (PaneSide::Remote, Some(site)) => {
+    match (batch.side, site, folder) {
+        (PaneSide::Remote, Some(site), Some(folder)) => format!(
+            "Uploading arrives in the next build (I2): {dropped} dropped on the {folder} folder in {site}."
+        ),
+        (PaneSide::Remote, None, Some(folder)) => format!(
+            "Uploading arrives in the next build (I2): {dropped} dropped on the {folder} folder."
+        ),
+        (PaneSide::Remote, Some(site), None) => {
             format!("Uploading arrives in the next build (I2): {dropped} dropped on {site}.")
         }
-        (PaneSide::Remote, None) => {
+        (PaneSide::Remote, None, None) => {
             format!("Uploading arrives in the next build (I2): {dropped} dropped.")
         }
-        (PaneSide::Local, Some(site)) => format!("Drop files on the {site} pane to upload them."),
-        (PaneSide::Local, None) => "Add a site, then drop files on its pane to upload them.".into(),
+        (PaneSide::Local, Some(site), _) => {
+            format!("Drop files on the {site} pane to upload them.")
+        }
+        (PaneSide::Local, None, _) => {
+            "Add a site, then drop files on its pane to upload them.".into()
+        }
     }
 }
+
+/// The status line when files were dropped on the window but where they landed could not be told
+/// (the window or the system would not say where the cursor was). The files are ignored.
+pub const DROP_NOT_LOCATED: &str = "Couldn't tell where the files were dropped. Try again.";
 
 // ---- Starting up ----
 
@@ -282,7 +336,7 @@ pub fn startup_error_text(error: &dyn Error) -> String {
 use chrono::{DateTime, Utc};
 use httporter_core::{BatchSummary, Direction, EngineState};
 
-use crate::format::{format_count, format_progress, format_size};
+use crate::format::{format_count, format_progress};
 
 /// The collapsed drawer when nothing is running, and the expanded drawer's title then.
 pub const NO_TRANSFERS: &str = "No transfers running";
@@ -698,6 +752,7 @@ mod tests {
     fn batch(side: PaneSide, n: usize) -> DropBatch {
         DropBatch {
             side,
+            row: None,
             paths: (0..n).map(|i| format!(r"C:\f{i}").into()).collect(),
         }
     }
@@ -715,15 +770,15 @@ mod tests {
     fn a_drop_on_the_cloud_pane_is_counted_and_one_on_this_pc_points_to_the_site() {
         let site = Some("example-shop.com");
         assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 1), site),
+            drop_status(&batch(PaneSide::Remote, 1), site, None),
             "Uploading arrives in the next build (I2): 1 item dropped on example-shop.com."
         );
         assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 3), site),
+            drop_status(&batch(PaneSide::Remote, 3), site, None),
             "Uploading arrives in the next build (I2): 3 items dropped on example-shop.com."
         );
         assert_eq!(
-            drop_status(&batch(PaneSide::Local, 3), site),
+            drop_status(&batch(PaneSide::Local, 3), site, None),
             "Drop files on the example-shop.com pane to upload them."
         );
     }
@@ -731,11 +786,11 @@ mod tests {
     #[test]
     fn with_no_site_the_drop_status_names_none() {
         assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 2), None),
+            drop_status(&batch(PaneSide::Remote, 2), None, None),
             "Uploading arrives in the next build (I2): 2 items dropped."
         );
         assert_eq!(
-            drop_status(&batch(PaneSide::Local, 2), None),
+            drop_status(&batch(PaneSide::Local, 2), None, None),
             "Add a site, then drop files on its pane to upload them."
         );
     }
@@ -845,7 +900,7 @@ mod tests {
         );
         assert_eq!(connection(Duration::from_millis(21)), "HTTPS · 21 ms");
         assert_eq!(
-            status_right("http/1.1", "sg.storage.bunnycdn.com"),
+            status_right("http/1.1", "sg.storage.bunnycdn.com", None),
             "http/1.1 · sg.storage.bunnycdn.com"
         );
         assert_eq!(
