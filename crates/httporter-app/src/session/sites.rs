@@ -15,9 +15,10 @@ use httporter_core::{
 };
 use httporter_platform::{CredentialKey, CredentialStore, SiteList, Store, StoreError};
 
-use super::{ProviderFactory, Session, blocking, interactive, lock};
+use super::{ProviderFactory, Session, blocking, lock};
 use crate::add_site::ValidSite;
 use crate::copy::{self, Attempt};
+use crate::site_hub::{HubError, list_interactive};
 
 /// The outcome of the Add Site sheet's Test Connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,9 +160,10 @@ impl Session {
             .collect()
     }
 
-    /// Lists the root of the zone the sheet describes, with the password as typed (and the
-    /// short policy of [`interactive`]). It uses nothing of the session but the factory, so it
-    /// waits for no listing.
+    /// Lists the root of the zone the sheet describes, with the password as typed, on a client
+    /// made as the site's would be (the Transfers settings, a short listing timeout) and the
+    /// short retries of [`list_interactive`]. It uses nothing of the session but the factory and
+    /// the settings, so it waits for no listing.
     pub async fn test_connection(&self, v: &ValidSite) -> TestResult {
         let Some(host) = storage_host(&v.region_code) else {
             return TestResult {
@@ -169,8 +171,8 @@ impl Session {
                 text: copy::CHOOSE_REGION.into(),
             };
         };
-        let cfg = interactive(BunnyConfig::new(&v.zone, &host, &v.password));
-        let provider = match build_client(self.factory.clone(), cfg).await {
+        let cfg = BunnyConfig::for_site(&v.zone, &host, &v.password, &self.hub.settings());
+        let provider = match build_client(self.hub.factory(), cfg).await {
             Ok(provider) => provider,
             Err(error) => {
                 return TestResult {
@@ -180,7 +182,7 @@ impl Session {
             }
         };
         let root = RemotePath::root();
-        match provider.list(&root).await {
+        match list_interactive(&*provider, &root).await {
             Ok(listing) => TestResult {
                 ok: true,
                 text: copy::connected(
@@ -236,13 +238,22 @@ impl Session {
         blocking(move || save_to_stores(&*creds, &store, &book, record, &password)).await
     }
 
-    /// A storage client for `site`, with its password read from the credential store.
-    pub(super) async fn connect(
-        &self,
-        site: &SiteRecord,
-    ) -> Result<Arc<dyn StorageProvider>, String> {
-        let (creds, factory, site) = (self.creds.clone(), self.factory.clone(), site.clone());
-        blocking(move || connect_site(&*creds, &*factory, &site)).await
+    /// The storage client of `site` (the hub's, built on first use with its password from the
+    /// credential store), or why there is none, in words.
+    pub async fn connect(&self, site: &SiteRecord) -> Result<Arc<dyn StorageProvider>, String> {
+        let (hub, record) = (self.hub.clone(), site.clone());
+        blocking(move || hub.provider(&record))
+            .await
+            .map_err(|e| hub_error_text(&e, site))
+    }
+
+    /// The saved site with id `id`.
+    pub fn site(&self, id: &SiteId) -> Option<SiteRecord> {
+        lock(&self.book)
+            .sites
+            .iter()
+            .find(|site| site.id == *id)
+            .cloned()
     }
 }
 
@@ -288,25 +299,11 @@ fn save_to_stores(
     Ok(record)
 }
 
-/// The storage client for `site`, with its password read from the credential store.
-fn connect_site(
-    creds: &dyn CredentialStore,
-    factory: &dyn ProviderFactory,
-    site: &SiteRecord,
-) -> Result<Arc<dyn StorageProvider>, String> {
-    let password = match creds.get(&CredentialKey::site(&site.id)) {
-        Ok(Some(password)) => password,
-        Ok(None) => return Err(copy::no_password_saved(&site.name)),
-        Err(e) => return Err(copy::password_unreadable(&site.name, e)),
-    };
-    let client = match site.provider {
-        ProviderKind::Bunny => factory.bunny(interactive(BunnyConfig::new(
-            &site.container,
-            &site.host,
-            password,
-        ))),
-        // Nothing saves an S3 site before S3 browsing arrives.
-        ProviderKind::S3 => return Err(copy::S3_LATER.into()),
-    };
-    client.map_err(|e| copy::describe(&e, &site.container, &site.host, Attempt::Setup))
+/// Why `site` has no client, in words.
+pub fn hub_error_text(error: &HubError, site: &SiteRecord) -> String {
+    match error {
+        HubError::MissingSecret => copy::no_password_saved(&site.name),
+        HubError::Credential(reason) => copy::password_unreadable(&site.name, reason),
+        HubError::Provider(e) => copy::describe(e, &site.container, &site.host, Attempt::Setup),
+    }
 }

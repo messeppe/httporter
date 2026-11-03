@@ -110,9 +110,8 @@ pub fn describe(error: &ProviderError, zone: &str, host: &str, attempt: Attempt<
 
 /// Why a transfer failed, for its row in the queue's Failed tab. The row already names the site
 /// and the file, so the words do not: this is the short reason on its own. A `Refused` or
-/// `Permanent` error is the app's own explanation and is shown as it is.
-// The transfer engine takes this as its `describe` hook (Task 23); until then only tests use it.
-#[allow(dead_code)]
+/// `Permanent` error is the app's own explanation and is shown as it is. The transfer engine takes
+/// this as its `describe` hook.
 pub fn describe_transfer_error(error: &ProviderError) -> String {
     match error {
         ProviderError::Network(_) => "No connection".to_owned(),
@@ -283,7 +282,8 @@ pub fn selection_summary(rows: &[&RowData]) -> String {
 pub const DELETE_ON_THIS_PC: &str =
     "Delete works in the cloud pane. Use Explorer for files on this PC.";
 
-/// Why Upload, Download, New folder and Delete are off until the transfer engine is wired in.
+/// Why Upload, Download, New folder and Delete are off until the transfer engine is wired in (the
+/// window's tests run without one).
 pub const TRANSFERS_LATER: &str = "Transfers arrive in a later version";
 
 // ---- The This PC pane ----
@@ -773,6 +773,156 @@ pub const PROXY_URL_MISSING: &str = "Enter a proxy address such as http://proxy:
 /// in a database that must never hold a secret.
 pub const PROXY_HAS_PASSWORD: &str =
     "HTTPorter can't store a proxy password yet. Use a proxy without one, or Use Windows settings.";
+
+// ---- Transfers ----
+
+use httporter_transfer::messages;
+
+/// The title of the file picker Upload opens when nothing is selected on This PC.
+pub const PICK_FILES_TITLE: &str = "Choose files to upload";
+/// The title of the folder picker of Download to…, and of Download at the list of drives.
+pub const PICK_FOLDER_TITLE: &str = "Choose a folder to download to";
+
+/// The status line while an upload, a download or a delete is being worked out (folders listed,
+/// files compared).
+pub const PREPARING_UPLOAD: &str = "Preparing the upload…";
+pub const PREPARING_DOWNLOAD: &str = "Preparing the download…";
+pub const PREPARING_DELETE: &str = "Counting what to delete…";
+
+/// Ctrl+V in the cloud pane with no files on the clipboard.
+pub const NOTHING_TO_PASTE: &str = "There are no files on the clipboard to upload.";
+
+/// Files dropped on the cloud pane with no site open in it.
+pub const DROP_NO_SITE: &str = "Add a site, then drop files on its pane to upload them.";
+
+/// Files dropped on the cloud pane while its site is still opening (or couldn't be opened).
+pub fn drop_not_ready(site: &str) -> String {
+    format!("Wait until {site} has opened, then drop the files again.")
+}
+
+/// An upload or download whose every file is already there and was left alone.
+pub const NOTHING_TO_TRANSFER: &str = "Nothing to transfer: every file is already there.";
+
+/// The note on a folder made with New Folder that Bunny Storage won't list until it holds a file.
+pub const VIRTUAL_FOLDER_NOTE: &str = "Appears on Bunny Storage when you add its first file.";
+
+/// Where an upload goes, as the conflict sheet says it: the site, then each folder
+/// ("example-shop.com / wp-content / uploads").
+pub fn remote_folder_label(site: &str, dir: &RemotePath) -> String {
+    std::iter::once(site)
+        .chain(dir.segments())
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+/// A folder on this PC as the conflict sheet names it: its name ("Downloads"), or the drive.
+pub fn local_folder_label(dir: &Path) -> String {
+    dir.file_name().map_or_else(
+        || dir.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// A transfer the journal could not record, so it was not started (ruling Q21).
+pub fn transfer_not_started(reason: impl Display) -> String {
+    format!(
+        "Couldn't start the transfer: HTTPorter couldn't save its list of transfers ({reason})."
+    )
+}
+
+/// Items of an upload or download that won't be sent, with the first one and why.
+pub fn skipped_items(n: usize, first: &str, reason: &str) -> String {
+    if n == 1 {
+        format!("1 item was skipped: {first}: {reason}")
+    } else {
+        format!("{n} items were skipped. {first}: {reason}")
+    }
+}
+
+/// New Folder failed.
+pub fn folder_not_created(name: &str, reason: impl Display) -> String {
+    format!("Couldn't create the folder {name}: {reason}")
+}
+
+/// "Remember for this site" could not be saved; the transfer goes ahead.
+pub fn choice_not_remembered(reason: impl Display) -> String {
+    format!("Couldn't remember the choice for this site: {reason}")
+}
+
+/// The Transfers settings could not be saved; they apply until HTTPorter closes.
+pub fn settings_not_saved(reason: impl Display) -> String {
+    format!("Couldn't save the settings: {reason}. They apply until HTTPorter closes.")
+}
+
+/// The resume banner's Resume could not open a site the unfinished transfers go to.
+pub fn resume_needs_site(site: &str, reason: &str) -> String {
+    format!("Couldn't resume the transfers to {site}: {reason}")
+}
+
+/// The banner when the transfer journal has failed reads or writes (ruling Q21).
+pub fn journal_errors(n: u64) -> String {
+    let times = if n == 1 {
+        "once".to_owned()
+    } else {
+        format!("{} times", format_count(n))
+    };
+    format!(
+        "HTTPorter couldn't save its list of transfers ({times}). If it closes now, some \
+         transfers may be offered again or forgotten."
+    )
+}
+
+/// The banner when the transfer journal could not be opened and transfers are kept in memory.
+pub fn journal_unavailable(path: &Path, reason: impl Display) -> String {
+    format!(
+        "Couldn't open the list of transfers in {}: {reason}. Transfers won't resume after \
+         HTTPorter closes.",
+        path.display()
+    )
+}
+
+/// The notification when a long run of transfers ends while HTTPorter is in the background:
+/// title and text, "Upload finished" and "Uploaded 1,204 files to example-shop.com.", and the
+/// variants for downloads, deletes, a mix, and failures.
+pub fn finished_notification(
+    direction: Direction,
+    done: u64,
+    failed: u64,
+    site: &str,
+) -> (String, String) {
+    let (noun, body) = match direction {
+        Direction::Upload => ("Upload", format!("Uploaded {} to {site}.", files(done))),
+        Direction::Download => (
+            "Download",
+            format!("Downloaded {} from {site}.", files(done)),
+        ),
+        Direction::Delete => ("Delete", format!("Deleted {} from {site}.", files(done))),
+        Direction::Mixed => ("Transfer", format!("Finished {} with {site}.", files(done))),
+    };
+    if failed == 0 {
+        (format!("{noun} finished"), body)
+    } else {
+        (
+            format!("{noun} finished with problems"),
+            format!("{body} {} failed. Open HTTPorter to retry.", files(failed)),
+        )
+    }
+}
+
+/// A transfer engine's own reason for a failure, in the app's words: the engine's fixed phrases
+/// (`httporter_transfer::messages`) as full sentences. Anything else (the app's own
+/// `describe_transfer_error`, a local file's system message) is shown as it is.
+pub fn transfer_message(text: &str) -> String {
+    let words = match text {
+        messages::STOPPED_UNEXPECTEDLY => "The transfer stopped unexpectedly.",
+        messages::HASHING_STOPPED => "Checking the file stopped before it finished.",
+        messages::FILE_WORK_STOPPED => "Work on the file on this PC stopped before it finished.",
+        messages::NO_ANSWER_FOR_FILE => "The server didn't answer for this file.",
+        messages::DAMAGED_TWICE => "The file arrived damaged twice (checksum mismatch).",
+        other => other,
+    };
+    words.to_owned()
+}
 
 #[cfg(test)]
 mod tests {

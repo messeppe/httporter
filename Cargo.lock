@@ -1992,6 +1992,7 @@ dependencies = [
  "httporter-core",
  "httporter-platform",
  "httporter-s3",
+ "httporter-transfer",
  "i-slint-backend-testing",
  "slint",
  "slint-build",

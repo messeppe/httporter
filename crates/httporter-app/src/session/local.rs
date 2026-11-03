@@ -77,6 +77,14 @@ fn drive_entries() -> Vec<LocalEntry> {
         .collect()
 }
 
+/// Where the item `name` of the folder `dir` is; at the list of drives (`None`), the drive.
+fn entry_path(dir: Option<&Path>, name: &str) -> PathBuf {
+    match dir {
+        Some(dir) => dir.join(name),
+        None => PathBuf::from(format!("{name}\\")),
+    }
+}
+
 /// The folder This PC breadcrumb `index` of `dir` stands for (0 is the drive), or `None` for the
 /// current folder and past it.
 pub(super) fn local_ancestor(dir: &Path, index: usize) -> Option<PathBuf> {
@@ -105,10 +113,7 @@ impl Session {
                 return None;
             }
             let entry = pane.entries.get(row).filter(|entry| entry.is_folder)?;
-            Some(Some(match &pane.dir {
-                Some(dir) => dir.join(&entry.name),
-                None => PathBuf::from(format!("{}\\", entry.name)),
-            }))
+            Some(Some(entry_path(pane.dir.as_deref(), &entry.name)))
         };
         self.navigate_local(ticket, Step::Go, pick, started).await
     }
@@ -250,6 +255,36 @@ impl Session {
         pane.loading = false;
         pane.version += 1;
         self.local_view_of(&pane)
+    }
+
+    /// The folder the This PC pane shows; `None` at the list of drives.
+    pub fn local_dir(&self) -> Option<PathBuf> {
+        lock(&self.local).dir.clone()
+    }
+
+    /// The folder the This PC pane shows, while no listing for it is on its way (`Some(None)` is
+    /// the list of drives).
+    pub fn local_shows(&self) -> Option<Option<PathBuf>> {
+        let pane = lock(&self.local);
+        (!pane.loading).then(|| pane.dir.clone())
+    }
+
+    /// The paths of the This PC pane's items named `names` (the rows selected), in the order
+    /// given: files and folders in the folder shown, or drives at the list of drives.
+    pub fn local_paths(&self, names: &[String]) -> Vec<PathBuf> {
+        let pane = lock(&self.local);
+        names
+            .iter()
+            .filter(|name| pane.entries.iter().any(|entry| entry.name == **name))
+            .map(|name| entry_path(pane.dir.as_deref(), name))
+            .collect()
+    }
+
+    /// The folder (or drive) of the This PC pane's row `row`, if it is one.
+    pub fn local_folder_at(&self, row: usize) -> Option<PathBuf> {
+        let pane = lock(&self.local);
+        let entry = pane.entries.get(row).filter(|entry| entry.is_folder)?;
+        Some(entry_path(pane.dir.as_deref(), &entry.name))
     }
 
     pub(super) fn local_view_of(&self, pane: &LocalPane) -> LocalView {

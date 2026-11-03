@@ -210,6 +210,9 @@ export component AppWindow inherits Window {
 
     callback site-selected(int);
     callback add-site();
+    // The sidebar's gear opens the Settings window; it is turned off (and says why) until the app
+    // sets this.
+    in property <bool> settings-available: false;
     callback open-settings();
     // Row index into the pane's `rows`, as the user sees them.
     callback open-local(int);
@@ -296,9 +299,8 @@ export component AppWindow inherits Window {
 
     // ---- Sheets, alerts and banners (see components/sheets.slint and src/sheets_view.rs) ----
     // Each one opens when the app sets its `-open` flag (after filling in its texts), and closes
-    // itself when the user answers, before the callback below is called. Nothing opens them until
-    // the transfer engine is wired in (Task 23; Remove Site: Task 24), and until then the
-    // callbacks do nothing.
+    // itself when the user answers, before the callback below is called. The transfer engine opens
+    // them (Remove Site: Task 24).
 
     // The conflict sheet. The texts come from `ConflictSheetView`; the rows' `action` is each
     // row's choice (0 Replace, 1 Skip, 2 Keep both) and is read back when Continue is pressed.
@@ -523,6 +525,7 @@ export component AppWindow inherits Window {
                     sites: root.sites;
                     selected-site: root.selected-site;
                     sheet-open: root.add-site-open;
+                    settings-available: root.settings-available;
                     site-selected(index) => {
                         root.selected-site = index;
                         root.site-selected(index);
@@ -573,8 +576,11 @@ export component AppWindow inherits Window {
                                 icon: Icons.lock;
                                 fg: Theme.red;
                                 bg: Theme.red-soft;
+                                // Editing a site arrives with the rest of `sites-v2-ready` (Ruling Q10).
                                 CapsuleButton {
                                     text: @tr("Edit Site…");
+                                    enabled: root.sites-v2-ready;
+                                    accessible-description: root.sites-v2-ready ? "" : @tr("Arrives later in this build.");
                                     clicked => { root.auth-banner-edit-site(); }
                                 }
                             }

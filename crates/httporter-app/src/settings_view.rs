@@ -247,6 +247,11 @@ pub fn from_form(f: &SettingsFormData) -> Result<TransferSettings, (String, Stri
 
 // ---- The window ----
 
+/// Puts `settings` in the window's form and clears the messages under its fields.
+pub fn show(window: &SettingsWindow, settings: &TransferSettings) {
+    show_form(window, &to_form(settings));
+}
+
 /// Puts `form` in the window and clears the messages under its fields.
 fn show_form(window: &SettingsWindow, form: &SettingsFormData) {
     window.set_simultaneous(form.simultaneous);
@@ -304,9 +309,6 @@ fn show_error(window: &SettingsWindow, field: &str, message: &str) {
 /// its message under the field and changes nothing, an accepted one clears the messages and goes
 /// to `apply`, which stores and uses the settings. Restore Defaults puts the default settings in
 /// the form and goes to `apply` with them.
-// The Settings button opens the window and `apply` saves the settings (Task 23); until then
-// nothing builds the window.
-#[allow(dead_code)]
 pub fn wire(window: &SettingsWindow, apply: impl Fn(TransferSettings) + 'static) {
     let apply = Rc::new(apply);
 

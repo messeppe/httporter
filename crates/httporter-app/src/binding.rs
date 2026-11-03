@@ -15,12 +15,14 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use httporter_bunny::REGIONS;
-use httporter_core::{S3Preset, SiteRecord};
+use httporter_core::{Journal, RemotePath, S3Preset, SiteId, SiteRecord};
+use httporter_transfer::Engine;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
@@ -32,6 +34,7 @@ use crate::session::{
     LocalView, RemoteView, Session, SiteItemData, SiteProvider, Ticket, endpoint_preview,
 };
 use crate::sort::SortKey;
+use crate::transfers::Transfers;
 use crate::viewmodel::{RowData, sort_key_for_column, to_slint_rows};
 use crate::{AppWindow, FileRow, ProviderTile, SiteItem};
 
@@ -73,6 +76,26 @@ impl RemoteOp {
             Self::Sort(..) => Change::Sorted,
             Self::Refresh => Change::Refreshed,
             _ => Change::Listed,
+        }
+    }
+
+    /// Runs a request other than [`RemoteOp::Select`] (which [`Ctx::remote`] runs itself);
+    /// `started` gets the loading view of one that lists a folder.
+    async fn run(
+        self,
+        session: &Session,
+        ticket: Ticket,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        match self {
+            Self::Select(_) => session.remote_view(),
+            Self::Open(row, seen) => session.open_remote(ticket, row, seen, started).await,
+            Self::Up => session.remote_up(ticket, started).await,
+            Self::Crumb(index, seen) => session.remote_crumb(ticket, index, seen, started).await,
+            Self::Back => session.remote_back(ticket, started).await,
+            Self::Forward => session.remote_forward(ticket, started).await,
+            Self::Refresh => session.remote_refresh(ticket, started).await,
+            Self::Sort(key, ascending) => session.sort_remote(key, ascending),
         }
     }
 }
@@ -158,9 +181,11 @@ struct Shown {
     local_rows: Vec<RowData>,
     remote_selection: Selection,
     local_selection: Selection,
-    /// The transfer engine can act on the toolbar's commands. Until Task 23 sets it, every
-    /// `can-*` stays false (see [`refresh_toolbar`]).
+    /// The transfer engine can act on the toolbar's commands. Without it (the window's tests),
+    /// every `can-*` stays false (see [`refresh_toolbar`]).
     transfers_ready: bool,
+    /// What the transfer engine has to say about itself (its journal failing), for the banner.
+    transfer_notice: Option<String>,
 }
 
 impl Shown {
@@ -180,10 +205,12 @@ impl Shown {
         }
     }
 
-    /// The banner: the app's notice, then the cloud pane's error, then This PC's, one per line.
+    /// The banner: the app's notice, the transfer engine's, then the cloud pane's error, then
+    /// This PC's, one per line.
     fn banner(&self, notice: Option<String>) -> String {
         [
             notice.as_deref(),
+            self.transfer_notice.as_deref(),
             self.remote_error.as_deref(),
             self.local_error.as_deref(),
         ]
@@ -210,9 +237,145 @@ struct Ctx {
     /// is the latest, so a test that finishes after a cancel (or after the sheet reopened) is
     /// dropped.
     sheet_run: Arc<AtomicU64>,
+    /// The transfer engine and what it is waiting for; `None` in the window's tests.
+    transfers: Option<Arc<Transfers>>,
+}
+
+/// What the tasks need to show their results: the window, the panes' bookkeeping and the session.
+/// Unlike [`Ctx`] it can be sent to the runtime's threads, so the transfers keep one.
+#[derive(Clone)]
+pub struct Link {
+    ui: Weak<AppWindow>,
+    rt: Handle,
+    session: Arc<Session>,
+    shown: Arc<Mutex<Shown>>,
+}
+
+impl Link {
+    pub fn ui(&self) -> &Weak<AppWindow> {
+        &self.ui
+    }
+
+    pub fn rt(&self) -> &Handle {
+        &self.rt
+    }
+
+    /// Puts `text` in the status line (from any thread).
+    pub fn status(&self, text: String) {
+        let _ = self
+            .ui
+            .upgrade_in_event_loop(move |ui| ui.set_status_message(text.into()));
+    }
+
+    /// Lists the cloud pane's folder again if it shows `dir` of `site`, a folder within it, or the
+    /// folder that holds it, and no listing is on its way. The pane in use stays the pane in use.
+    pub fn refresh_remote_at(&self, site: &SiteId, dir: &RemotePath) {
+        let Some((open, shows)) = self.session.remote_shows() else {
+            return;
+        };
+        if open == *site && (shows.is_within(dir) || dir.parent().as_ref() == Some(&shows)) {
+            spawn_remote(self, RemoteOp::Refresh);
+        }
+    }
+
+    /// Lists the This PC pane's folder again if it is `dir` or a folder within it, and no
+    /// listing is on its way.
+    pub fn refresh_local_at(&self, dir: &Path) {
+        if let Some(Some(shows)) = self.session.local_shows()
+            && shows.starts_with(dir)
+        {
+            spawn_local(self, LocalOp::Refresh);
+        }
+    }
+
+    /// Puts a cloud view the session made outside a listing (a folder New Folder made) on screen.
+    pub fn show_remote(&self, view: RemoteView) {
+        post_remote(
+            &self.ui,
+            &self.shown,
+            &self.session,
+            view,
+            Change::Refreshed,
+        );
+    }
+
+    /// Sets what the transfer engine has to say in the banner (on the UI thread).
+    pub fn set_notice(&self, ui: &AppWindow, notice: Option<String>) {
+        let mut shown = lock(&self.shown);
+        if shown.transfer_notice != notice {
+            shown.transfer_notice = notice;
+            ui.set_error_text(shown.banner(self.session.notice()).into());
+        }
+    }
+}
+
+/// Runs a request for the cloud pane on the runtime and shows its views (a loading one first, for
+/// a listing). Picking a site goes through [`Ctx::remote`], which also gives up the one before.
+fn spawn_remote(link: &Link, op: RemoteOp) -> JoinHandle<()> {
+    // Taken here, at the request, so that requests count in the order they were made.
+    let ticket = link.session.remote_ticket();
+    let link = link.clone();
+    link.rt.clone().spawn(async move {
+        let Link {
+            ui, session, shown, ..
+        } = link;
+        let started = {
+            let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
+            move |view| post_remote(&ui, &shown, &session, view, Change::Loading)
+        };
+        let view = match op {
+            RemoteOp::Select(index) => {
+                let switched = {
+                    let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
+                    move |view| post_remote(&ui, &shown, &session, view, Change::Listed)
+                };
+                session.select_site(ticket, index, switched).await
+            }
+            op => op.run(&session, ticket, started).await,
+        };
+        post_remote(&ui, &shown, &session, view, op.change());
+    })
+}
+
+/// As [`spawn_remote`], for the This PC pane.
+fn spawn_local(link: &Link, op: LocalOp) {
+    let ticket = link.session.local_ticket();
+    let link = link.clone();
+    link.rt.clone().spawn(async move {
+        let Link {
+            ui, session, shown, ..
+        } = link;
+        let started = {
+            let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
+            move |view| post_local(&ui, &shown, &session, view, Change::Loading)
+        };
+        let view = op.run(&session, ticket, started).await;
+        post_local(&ui, &shown, &session, view, op.change());
+    });
 }
 
 impl Ctx {
+    fn link(&self) -> Link {
+        Link {
+            ui: self.ui.clone(),
+            rt: self.rt.clone(),
+            session: self.session.clone(),
+            shown: self.shown.clone(),
+        }
+    }
+
+    /// The names of the rows selected in `pane`, as the window shows them.
+    fn selected_names(&self, pane: ActivePane) -> Vec<String> {
+        let shown = lock(&self.shown);
+        let (selection, rows) = shown.view(pane);
+        selection
+            .rows()
+            .into_iter()
+            .filter_map(|i| rows.get(i))
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
     fn remote(&self, op: RemoteOp) {
         let moves = !matches!(op, RemoteOp::Select(_) | RemoteOp::Sort(..));
         // While another site opens, the pane has been emptied and the rows the user saw are gone:
@@ -223,34 +386,7 @@ impl Ctx {
         if let Some(ui) = self.ui.upgrade() {
             ui.set_local_pane_active(false);
         }
-        // Taken here, at the click, so that requests count in the order the user made them.
-        let ticket = self.session.remote_ticket();
-        let (session, shown, ui) = (self.session.clone(), self.shown.clone(), self.ui.clone());
-        let task = self.rt.spawn(async move {
-            let started = {
-                let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
-                move |view| post_remote(&ui, &shown, &session, view, Change::Loading)
-            };
-            let view = match op {
-                RemoteOp::Select(index) => {
-                    let switched = {
-                        let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
-                        move |view| post_remote(&ui, &shown, &session, view, Change::Listed)
-                    };
-                    session.select_site(ticket, index, switched).await
-                }
-                RemoteOp::Open(row, seen) => session.open_remote(ticket, row, seen, started).await,
-                RemoteOp::Up => session.remote_up(ticket, started).await,
-                RemoteOp::Crumb(index, seen) => {
-                    session.remote_crumb(ticket, index, seen, started).await
-                }
-                RemoteOp::Back => session.remote_back(ticket, started).await,
-                RemoteOp::Forward => session.remote_forward(ticket, started).await,
-                RemoteOp::Refresh => session.remote_refresh(ticket, started).await,
-                RemoteOp::Sort(key, ascending) => session.sort_remote(key, ascending),
-            };
-            post_remote(&ui, &shown, &session, view, op.change());
-        });
+        let task = spawn_remote(&self.link(), op);
         if matches!(op, RemoteOp::Select(_)) {
             // A site picked before this one is of no interest any more. (Older listings within a
             // site need no aborting: the session drops their answers.)
@@ -262,16 +398,7 @@ impl Ctx {
         if let Some(ui) = self.ui.upgrade() {
             ui.set_local_pane_active(true);
         }
-        let ticket = self.session.local_ticket();
-        let (session, shown, ui) = (self.session.clone(), self.shown.clone(), self.ui.clone());
-        self.rt.spawn(async move {
-            let started = {
-                let (session, shown, ui) = (session.clone(), shown.clone(), ui.clone());
-                move |view| post_local(&ui, &shown, &session, view, Change::Loading)
-            };
-            let view = op.run(&session, ticket, started).await;
-            post_local(&ui, &shown, &session, view, op.change());
-        });
+        spawn_local(&self.link(), op);
     }
 
     /// Back or Forward, from the toolbar or the keyboard, for the pane last used or focused.
@@ -503,19 +630,39 @@ fn validated(ui: &AppWindow, form: &AddSiteForm) -> Option<ValidSite> {
 /// Wires every callback of `ui` to `session`, fills the window with the session's starting state
 /// and selects the first site, if there is one. Returns the shared session.
 ///
-/// The toolbar's commands stay off (every `can-*` false) until Task 23 has the transfer engine
-/// act on them and installs with `transfers_ready`.
+/// Without a transfer engine the toolbar's commands stay off (every `can-*` false): the window's
+/// tests use this. The app installs with [`install_app`].
+#[cfg(test)]
 pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
-    install_with(ui, rt, session, false)
+    install_with(ui, rt, session, None).0
 }
 
-/// As [`install`], with the toolbar's commands switched on (`transfers_ready`) or off.
+/// What the transfers run on: the engine and the journal it writes.
+pub struct Engines {
+    pub engine: Engine,
+    pub journal: Arc<dyn Journal>,
+}
+
+/// Wires the window as `install` does, with the transfer engine acting on the toolbar's commands,
+/// the menus, drags, drops and pastes, and feeding the drawer, the sheets and the banners. Returns
+/// the transfers.
+pub fn install_app(
+    ui: &AppWindow,
+    rt: Handle,
+    session: Session,
+    engines: Engines,
+) -> Arc<Transfers> {
+    let (_, transfers) = install_with(ui, rt, session, Some(engines));
+    transfers.expect("installed with an engine")
+}
+
+/// Wires the window, with the transfer engine (the toolbar's commands switched on) or without.
 fn install_with(
     ui: &AppWindow,
     rt: Handle,
     session: Session,
-    transfers_ready: bool,
-) -> Arc<Session> {
+    engines: Option<Engines>,
+) -> (Arc<Session>, Option<Arc<Transfers>>) {
     let regions: Vec<SharedString> = REGIONS.iter().map(|(_, city)| (*city).into()).collect();
     ui.set_region_names(ModelRc::new(VecModel::from(regions)));
     let session = Arc::new(session);
@@ -525,7 +672,7 @@ fn install_with(
         let mut shown = lock(&shown);
         shown.local = local.version;
         shown.local_error = local.error.clone();
-        shown.transfers_ready = transfers_ready;
+        shown.transfers_ready = engines.is_some();
         apply_local(ui, &local, Change::Listed);
         adopt(ui, &mut shown, ActivePane::ThisPc, &local.rows);
         ui.set_error_text(shown.banner(session.notice()).into());
@@ -534,6 +681,14 @@ fn install_with(
     let sites = session.site_items();
     sync_sites(ui, &sites);
 
+    let link = Link {
+        ui: ui.as_weak(),
+        rt: rt.clone(),
+        session: session.clone(),
+        shown: shown.clone(),
+    };
+    let transfers = engines
+        .map(|Engines { engine, journal }| Transfers::new(engine, journal, session.clone(), link));
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         rt,
@@ -542,6 +697,7 @@ fn install_with(
         opening: Slot::default(),
         sheet: Slot::default(),
         sheet_run: Arc::new(AtomicU64::new(0)),
+        transfers: transfers.clone(),
     });
     let row = |index: i32| usize::try_from(index).ok();
 
@@ -659,6 +815,22 @@ fn install_with(
             }
         }
     });
+    ui.on_drag_to_remote({
+        let ctx = ctx.clone();
+        move |index| drag_to_remote(&ctx, row(index))
+    });
+    ui.on_drag_to_local({
+        let ctx = ctx.clone();
+        move |index| drag_to_local(&ctx, row(index))
+    });
+    ui.on_paste({
+        let ctx = ctx.clone();
+        move || {
+            if let Some(transfers) = &ctx.transfers {
+                transfers.paste();
+            }
+        }
+    });
 
     ui.on_go_back({
         let ctx = ctx.clone();
@@ -701,17 +873,22 @@ fn install_with(
     // The Add Site sheet's S3 address preview; the rest of its new callbacks wait for Task 24.
     crate::add_site::install(ui);
 
-    // The transfer drawer: its idle state and callback stubs until the engine is wired (Task 23).
+    // The transfer drawer: its idle state, and callbacks that do nothing without an engine.
     crate::drawer_view::install(ui);
 
-    // The sheets, alerts and banners: callback stubs until the engine is wired (Task 23).
+    // The sheets, alerts and banners, likewise.
     crate::sheets_view::install(ui);
+
+    // With an engine: the drawer, the sheets, the banners, Settings and closing act on it.
+    if let Some(transfers) = &transfers {
+        crate::transfers::install(ui, transfers);
+    }
 
     if !sites.is_empty() {
         ui.set_selected_site(0);
         ctx.remote(RemoteOp::Select(0));
     }
-    session
+    (session, transfers)
 }
 
 /// Hands a cloud view to the window (from a task).
@@ -962,8 +1139,8 @@ fn show_selection(ui: &AppWindow, shown: &Shown, pane: ActivePane, before: &[usi
     show_summary(ui, shown, pane);
 }
 
-/// Sets which of the toolbar's commands may be pressed (and the notes that say why not). Until
-/// the transfer engine is wired in (`transfers_ready`), none may: the buttons are off, not inert.
+/// Sets which of the toolbar's commands may be pressed (and the notes that say why not). Without
+/// the transfer engine (`transfers_ready`), none may: the buttons are off, not inert.
 fn refresh_toolbar(ui: &AppWindow, shown: &Shown) {
     let state = if shown.transfers_ready {
         toolbar_state(ToolbarInputs {
@@ -997,29 +1174,108 @@ fn refresh_toolbar(ui: &AppWindow, shown: &Shown) {
     });
 }
 
-// ---- The toolbar's commands and the context menus' ----
+// ---- The toolbar's commands, the context menus', drags between the panes ----
 //
-// Stubs for Task 23, which wires them to the transfer engine and the file dialogs (Ruling Q6).
-// Until it sets `transfers_ready` every `can-*` is false, so the buttons, the menu items and the
-// shortcuts that reach these are off.
+// Each gathers what is selected and where, and hands it to the transfers, which plan on the
+// runtime, ask through a sheet or an alert when they must, and submit to the engine. Without an
+// engine (the window's tests) every `can-*` is false, so nothing reaches these.
 
-/// Upload: the This PC selection into the cloud pane's folder, or the file picker with none.
-fn upload(_ctx: &Ctx) {}
+/// Upload: the This PC selection into the cloud pane's folder, or the file picker with none (or
+/// at the list of drives, whose rows are drives).
+fn upload(ctx: &Ctx) {
+    let Some(transfers) = &ctx.transfers else {
+        return;
+    };
+    let names = ctx.selected_names(ActivePane::ThisPc);
+    if names.is_empty() || ctx.session.local_dir().is_none() {
+        transfers.pick_and_upload();
+    } else {
+        transfers.upload(ctx.session.local_paths(&names), None);
+    }
+}
 
-/// Download: the cloud selection into the This PC pane's folder (asks at the list of drives).
-fn download(_ctx: &Ctx) {}
+/// Download: the cloud selection into the This PC pane's folder (asks for one at the list of
+/// drives).
+fn download(ctx: &Ctx) {
+    let Some(transfers) = &ctx.transfers else {
+        return;
+    };
+    let entries = ctx
+        .session
+        .remote_entries(&ctx.selected_names(ActivePane::Cloud));
+    transfers.download(entries, ctx.session.local_dir());
+}
 
 /// Download to…: the cloud selection into a folder asked for.
-fn download_to(_ctx: &Ctx) {}
+fn download_to(ctx: &Ctx) {
+    let Some(transfers) = &ctx.transfers else {
+        return;
+    };
+    let entries = ctx
+        .session
+        .remote_entries(&ctx.selected_names(ActivePane::Cloud));
+    transfers.download(entries, None);
+}
 
-/// New folder, in the pane in use.
-fn new_folder(_ctx: &Ctx) {}
+/// New folder, in the pane in use: opens the New Folder sheet.
+fn new_folder(ctx: &Ctx) {
+    let (Some(transfers), Some(ui)) = (&ctx.transfers, ctx.ui.upgrade()) else {
+        return;
+    };
+    transfers.new_folder(&ui, !ui.get_local_pane_active());
+}
 
-/// Delete the cloud selection (after the alert).
-fn delete(_ctx: &Ctx) {}
+/// Delete the cloud selection: counts what goes, then asks with the delete alert.
+fn delete(ctx: &Ctx) {
+    let Some(transfers) = &ctx.transfers else {
+        return;
+    };
+    let entries = ctx
+        .session
+        .remote_entries(&ctx.selected_names(ActivePane::Cloud));
+    transfers.delete(entries);
+}
 
-/// Show row `row` of the This PC pane in Explorer.
-fn show_in_explorer(_ctx: &Ctx, _row: usize) {}
+/// The This PC selection was dragged onto the cloud pane: onto its folder row `row`, or the
+/// folder it shows.
+fn drag_to_remote(ctx: &Ctx, row: Option<usize>) {
+    let Some(transfers) = &ctx.transfers else {
+        return;
+    };
+    let names = ctx.selected_names(ActivePane::ThisPc);
+    if names.is_empty() || ctx.session.local_dir().is_none() {
+        return;
+    }
+    let folder = row.and_then(|row| ctx.session.remote_folder_at(row));
+    transfers.upload(ctx.session.local_paths(&names), folder);
+}
+
+/// The cloud selection was dragged onto the This PC pane: onto its folder row `row`, or the
+/// folder it shows (asks for one at the list of drives).
+fn drag_to_local(ctx: &Ctx, row: Option<usize>) {
+    let Some(transfers) = &ctx.transfers else {
+        return;
+    };
+    let entries = ctx
+        .session
+        .remote_entries(&ctx.selected_names(ActivePane::Cloud));
+    let local = row
+        .and_then(|row| ctx.session.local_folder_at(row))
+        .or_else(|| ctx.session.local_dir());
+    transfers.download(entries, local);
+}
+
+/// Show row `row` of the This PC pane in Explorer, selected.
+fn show_in_explorer(ctx: &Ctx, row: usize) {
+    let name = lock(&ctx.shown)
+        .local_rows
+        .get(row)
+        .map(|row| row.name.clone());
+    let Some(path) = name.and_then(|name| ctx.session.local_paths(&[name]).pop()) else {
+        return;
+    };
+    crate::transfers::show_in_explorer(&path);
+}
 
 /// Puts a cloud view on screen (everything but the banner, which [`Shown`] puts together). A
 /// loading view only marks the pane: its rows stay until the listing is in.

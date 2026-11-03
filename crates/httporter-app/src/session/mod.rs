@@ -13,12 +13,14 @@
 //! the user has left, and is dropped. From the moment a request takes effect until its answer is
 //! in, the pane says it is loading.
 //!
-//! Every listing someone waits for (a pane, Test Connection, the test before a site is added) uses
-//! a short timeout and few retries ([`interactive`]), so a dead connection is reported within a
-//! minute rather than after twelve.
+//! Every site has one storage client, kept by the [`SiteHub`] and shared with the transfer engine.
+//! Each call on it is a single attempt, so every listing someone waits for (a pane, Test
+//! Connection, the test before a site is added) retries a little itself
+//! ([`list_interactive`](crate::site_hub::list_interactive)):
+//! a dead connection is reported within a minute rather than after twelve.
 //!
-//! A site's password is read from the credential store only when the site is selected, and goes
-//! straight into the storage client's configuration. It is never kept here, written to the site
+//! A site's password is read from the credential store only when its client is first built, and
+//! goes straight into the client's configuration. It is never kept here, written to the site
 //! database, logged or put in a view.
 //!
 //! Anything that waits on Windows (the credential store, the site database, building an HTTP
@@ -32,22 +34,23 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
 use chrono::NaiveDateTime;
 use httporter_bunny::{BunnyConfig, BunnyStorage};
-use httporter_core::{ProviderError, RetryPolicy, StorageProvider};
-use httporter_platform::{CredentialStore, Store};
+use httporter_core::{ProviderError, StorageProvider, TransferSettings};
+use httporter_platform::{CredentialStore, SETTINGS_TRANSFERS, Store};
 
+use crate::site_hub::SiteHub;
 use crate::sort::SortKey;
 
 mod local;
 mod remote;
 mod sites;
+mod store;
 
 pub use local::LocalView;
-pub use remote::RemoteView;
-pub use sites::{SiteItemData, SiteProvider, endpoint_preview};
+pub use remote::{RemotePlace, RemoteView};
+pub use sites::{SiteItemData, SiteProvider, endpoint_preview, hub_error_text};
 
 use local::LocalPane;
 use remote::RemotePane;
@@ -56,20 +59,6 @@ use sites::Book;
 /// Builds the storage client for a site. The app uses [`RealFactory`]; tests hand out mocks.
 pub trait ProviderFactory: Send + Sync {
     fn bunny(&self, cfg: BunnyConfig) -> Result<Arc<dyn StorageProvider>, ProviderError>;
-}
-
-/// How long one try at a listing someone is waiting for may take.
-const INTERACTIVE_LIST_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// `cfg` for a site someone is browsing or adding: a listing gives up after 20 s and is tried at
-/// most three times, 1 s and 2 s apart ([`RetryPolicy::interactive`]), so a dead connection is
-/// reported in about a minute at worst (the default, six tries of up to 120 s with 25 s of waits,
-/// takes some twelve). A server that asks for more than 5 s of quiet is reported busy at once
-/// rather than waited for. Uploads, downloads and deletes keep the default policy.
-fn interactive(mut cfg: BunnyConfig) -> BunnyConfig {
-    cfg.list_timeout = INTERACTIVE_LIST_TIMEOUT;
-    cfg.list_retry = Some(RetryPolicy::interactive());
-    cfg
 }
 
 /// Talks to the real Bunny Storage API.
@@ -84,7 +73,7 @@ impl ProviderFactory for RealFactory {
 /// Runs `work` on tokio's blocking threads and returns what it returned. A panic in `work`
 /// panics the caller, as it would had `work` run in place. (The pool is only gone when the
 /// runtime is shutting down, and then nothing is waiting for the answer any more.)
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     match tokio::task::spawn_blocking(work).await {
         Ok(value) => value,
         Err(e) => match e.try_into_panic() {
@@ -163,12 +152,15 @@ impl<T: Clone> History<T> {
 /// thread and the tasks that list folders.
 pub struct Session {
     creds: Arc<dyn CredentialStore>,
-    factory: Arc<dyn ProviderFactory>,
+    /// Every site's storage client, shared with the transfer engine.
+    hub: Arc<SiteHub>,
     /// Local time, for the "Today 10:02" dates in the rows.
     now: fn() -> NaiveDateTime,
     /// The site database. Its own lock, so that a slow disk write holds up only other writes.
     /// Shared, so that a write can run on a blocking thread.
     store: Arc<Mutex<Store>>,
+    /// Transfers settings waiting to be written (see [`Session::save_settings`]).
+    pending_settings: Arc<Mutex<Option<TransferSettings>>>,
     /// Shared, so that a save can update it from the blocking thread that writes the site.
     book: Arc<Mutex<Book>>,
     remote: Mutex<RemotePane>,
@@ -180,7 +172,7 @@ pub struct Session {
 
 impl Session {
     /// A session over the sites in `store`, with the This PC pane at the list of drives and no
-    /// site open.
+    /// site open. The sites' clients are built with the Transfers settings stored in `store`.
     pub fn new(
         store: Store,
         creds: Arc<dyn CredentialStore>,
@@ -188,17 +180,26 @@ impl Session {
         now: fn() -> NaiveDateTime,
     ) -> Self {
         let sort = (SortKey::Name, true);
+        // The defaults when nothing (readable) is stored; nothing is written back.
+        let settings: TransferSettings = store.settings(SETTINGS_TRANSFERS);
+        let hub = Arc::new(SiteHub::new(creds.clone(), factory, settings));
         Self {
             creds,
-            factory,
+            hub,
             now,
             book: Arc::new(Mutex::new(Book::read(&store))),
             store: Arc::new(Mutex::new(store)),
+            pending_settings: Arc::new(Mutex::new(None)),
             remote: Mutex::new(RemotePane::new(sort)),
             local: Mutex::new(LocalPane::new(sort)),
             remote_tickets: AtomicU64::new(0),
             local_tickets: AtomicU64::new(0),
         }
+    }
+
+    /// The sites' storage clients, which the transfer engine shares.
+    pub fn hub(&self) -> &Arc<SiteHub> {
+        &self.hub
     }
 
     /// A place in line for moving the cloud pane. Take it when the user asks, before handing the

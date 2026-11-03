@@ -7,8 +7,8 @@
 //! ten times a second. The bottom of the file is the Slint side: [`apply_drawer`] puts a view in the
 //! window and [`install`] wires the drawer's callbacks.
 //!
-//! Until the engine is wired in (Task 23) the window shows the idle drawer and the callbacks do
-//! nothing, but Show / Hide Transfers works: the drawer flips itself.
+//! [`install`] shows the idle drawer with callbacks that do nothing (the window's tests run
+//! without an engine); `transfers.rs` wires them to the engine and feeds the window.
 
 use std::time::{Duration, Instant};
 
@@ -105,7 +105,11 @@ fn row(view: &JobView, list: List) -> TransferRowData {
         List::Active | List::Failed => percent(view.done_bytes, view.size),
     };
     let detail = match list {
-        List::Failed => view.error.clone().unwrap_or_default(),
+        List::Failed => view
+            .error
+            .as_deref()
+            .map(copy::transfer_message)
+            .unwrap_or_default(),
         List::Queued if paused => copy::ROW_PAUSED.to_owned(),
         _ => String::new(),
     };
@@ -183,18 +187,15 @@ pub fn drawer_view(s: &EngineSnapshot, now: DateTime<Utc>) -> DrawerView {
 }
 
 /// How often the engine's progress may redraw the drawer.
-#[allow(dead_code)] // The engine's progress feed uses it (Task 23).
 pub const REDRAW_EVERY: Duration = Duration::from_millis(100);
 
 /// Lets one thing through per `min`, so a feed of progress reports redraws the window at a steady
 /// pace however fast they arrive.
-#[allow(dead_code)] // The engine's progress feed uses it (Task 23).
 pub struct Throttle {
     min: Duration,
     last: Option<Instant>,
 }
 
-#[allow(dead_code)] // The engine's progress feed uses it (Task 23).
 impl Throttle {
     pub fn new(min: Duration) -> Self {
         Self { min, last: None }
@@ -285,10 +286,9 @@ pub fn apply_drawer(ui: &AppWindow, view: &DrawerView) {
     }
 }
 
-/// Shows the idle drawer and wires its callbacks. Task 23 replaces each stub below with a call
-/// into the engine and feeds the window with [`apply_drawer`]; until then nothing runs, so the
-/// buttons that act on transfers have nothing to act on. Show / Hide Transfers needs no wiring: the
-/// drawer flips itself.
+/// Shows the idle drawer and wires its callbacks to nothing. With an engine, `transfers.rs`
+/// replaces each with a call into it and feeds the window with [`apply_drawer`]. Show / Hide
+/// Transfers needs no wiring: the drawer flips itself.
 pub fn install(ui: &AppWindow) {
     apply_drawer(ui, &drawer_view(&EngineSnapshot::default(), Utc::now()));
     ui.on_transfers_toggle(|| {});

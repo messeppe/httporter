@@ -6,15 +6,18 @@
 //! words go with which facts (singular and plural, upload and download, Bunny and S3) and lays the
 //! conflict table out. Every function is tested without a window.
 //!
-//! Until the engine is wired in (Task 23, and Task 24 for Remove Site) nothing opens a sheet or an
-//! alert and the banners stay empty, so the callbacks installed here do nothing. The two that can
-//! already work do: choosing a default action on the conflict sheet sets its rows, and Create on
-//! the New Folder sheet checks the name against the cloud pane's listing.
+//! [`install`] wires the callbacks for a window without a transfer engine (the window's tests):
+//! nothing opens a sheet or an alert and the banners stay empty, so they do nothing, except
+//! choosing a default action on the conflict sheet, which sets its rows, and Create on the New
+//! Folder sheet, which checks the name against the cloud pane's listing. With an engine,
+//! `transfers.rs` replaces them (Remove Site waits for Task 24).
 
 use std::collections::HashSet;
 
 use chrono::{DateTime, FixedOffset, Local, Utc};
-use httporter_core::{CompareBy, Conflict, DeleteSummary, Direction, ProviderKind, Resolution};
+use httporter_core::{
+    CompareBy, Conflict, ConflictPolicy, DeleteSummary, Direction, ProviderKind, Resolution,
+};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::format::{format_date, format_size};
@@ -81,7 +84,6 @@ pub fn default_action(mode: i32, same: Option<bool>) -> i32 {
 }
 
 /// The engine's resolution for the sheet's default action.
-#[allow(dead_code)] // Continue is answered by the engine (Task 23).
 pub fn mode_resolution(mode: i32) -> Resolution {
     match mode {
         MODE_REPLACE_IF_DIFFERENT => Resolution::ReplaceIfDifferent,
@@ -91,8 +93,17 @@ pub fn mode_resolution(mode: i32) -> Resolution {
     }
 }
 
+/// The conflict policy that "Remember for … this site" stores for the default action `mode`.
+pub fn mode_policy(mode: i32) -> ConflictPolicy {
+    match mode {
+        MODE_REPLACE_IF_DIFFERENT => ConflictPolicy::ReplaceIfDifferent,
+        MODE_REPLACE_ALL => ConflictPolicy::Replace,
+        MODE_SKIP_ALL => ConflictPolicy::Skip,
+        _ => ConflictPolicy::KeepBoth,
+    }
+}
+
 /// The engine's resolution for one row's action.
-#[allow(dead_code)] // Continue is answered by the engine (Task 23).
 pub fn action_resolution(action: i32) -> Resolution {
     match action {
         ACTION_REPLACE => Resolution::Replace,
@@ -116,7 +127,6 @@ fn strength(by: CompareBy) -> u8 {
 /// `total_files` is the size of the whole batch, `target` the folder the files go to as the sheet
 /// says it ("wp-content / uploads / 2026 / 10"), and `short` the site's short name for the column
 /// heading ("Bunny").
-#[allow(dead_code)] // The engine's conflict check opens the sheet (Task 23).
 pub fn conflict_sheet(
     dir: Direction,
     conflicts: &[Conflict],
@@ -231,7 +241,6 @@ fn contents_kind(text: &str) -> ConflictContents {
 // ---- The alerts ----
 
 /// The delete alert: title, text and the label of the delete button.
-#[allow(dead_code)] // Delete asks through it (Task 23).
 pub fn delete_alert(
     summary: &DeleteSummary,
     site: &str,
@@ -255,7 +264,6 @@ pub fn remove_site_alert(site: &str, provider_label: &str) -> (String, String) {
 }
 
 /// The alert for closing the window with `unfinished` files not done: title and text.
-#[allow(dead_code)] // The window's close request asks through it (Task 23).
 pub fn quit_alert(unfinished: u64) -> (String, String) {
     (copy::QUIT_TITLE.to_owned(), copy::quit_body(unfinished))
 }
@@ -263,25 +271,21 @@ pub fn quit_alert(unfinished: u64) -> (String, String) {
 // ---- The banners ----
 
 /// "5 transfers didn't finish last time." (Resume, Discard).
-#[allow(dead_code)] // The engine's start-up check shows it (Task 23).
 pub fn resume_banner(n: usize) -> String {
     copy::resume_banner(n)
 }
 
 /// "You're offline. Transfers continue when the connection is back."
-#[allow(dead_code)] // The engine's state feed shows it (Task 23).
 pub fn offline_banner() -> String {
     copy::offline_banner()
 }
 
 /// "Couldn't sign in to {site}. Its transfers are paused." (Edit Site…).
-#[allow(dead_code)] // The engine's state feed shows it (Task 23).
 pub fn auth_banner(site: &str) -> String {
     copy::auth_banner(site)
 }
 
 /// "Drive {drive} is full. Free up {size} and click Resume." (Resume).
-#[allow(dead_code)] // The engine's state feed shows it (Task 23).
 pub fn disk_full_banner(drive: &str, needed: u64) -> String {
     copy::disk_full_banner(drive, needed)
 }
@@ -322,7 +326,6 @@ fn slint_rows(rows: &[ConflictRowData]) -> Vec<ConflictRow> {
 }
 
 /// Puts `view` in the window; the sheet opens when `conflicts-open` is set.
-#[allow(dead_code)] // The engine's conflict check opens the sheet (Task 23).
 pub fn apply_conflicts(ui: &AppWindow, view: &ConflictSheetView) {
     ui.set_conflicts_title(view.title.as_str().into());
     ui.set_conflicts_body(view.body.as_str().into());
@@ -364,7 +367,6 @@ fn remote_names(ui: &AppWindow) -> HashSet<String> {
 }
 
 /// Opens the delete alert for `alert` (see [`delete_alert`]).
-#[allow(dead_code)] // Delete asks through it (Task 23).
 pub fn show_delete_alert(ui: &AppWindow, (title, body, button): &(String, String, String)) {
     ui.set_delete_title(title.as_str().into());
     ui.set_delete_body(body.as_str().into());
@@ -381,7 +383,6 @@ pub fn show_remove_site_alert(ui: &AppWindow, (title, body): &(String, String)) 
 }
 
 /// Opens the quit alert for `alert` (see [`quit_alert`]).
-#[allow(dead_code)] // The window's close request asks through it (Task 23).
 pub fn show_quit_alert(ui: &AppWindow, (title, body): &(String, String)) {
     ui.set_quit_title(title.as_str().into());
     ui.set_quit_body(body.as_str().into());

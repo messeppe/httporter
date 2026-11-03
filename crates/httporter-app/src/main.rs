@@ -7,10 +7,13 @@ use std::error::Error;
 use std::sync::Arc;
 
 use chrono::Local;
-use drop_hook::{PaneGeometry, PaneLayout, PaneSide};
-use httporter_platform::{KeyringStore, Store, default_db_path};
+use drop_hook::{DropBatch, PaneGeometry, PaneLayout, PaneSide};
+use httporter_core::Journal;
+use httporter_platform::{KeyringStore, SqliteJournal, Store, default_db_path, win};
+use httporter_transfer::Engine;
 use session::{RealFactory, Session};
 use slint::Model;
+use transfers::Transfers;
 
 mod add_site;
 mod binding;
@@ -24,7 +27,9 @@ mod selection;
 mod session;
 mod settings_view;
 mod sheets_view;
+mod site_hub;
 mod sort;
+mod transfers;
 mod viewmodel;
 
 #[cfg(test)]
@@ -37,6 +42,9 @@ mod lint_tests;
 mod pane_tests;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Before any window exists: Windows reads the identity when it makes the taskbar button.
+    // Without it notifications still try again, so a failure here is only noted by them.
+    let _ = win::ensure_app_identity();
     let result = run();
     if let Err(error) = &result {
         report_startup_failure(error.as_ref(), show_message_box);
@@ -85,17 +93,56 @@ fn run() -> Result<(), Box<dyn Error>> {
             .select()?;
     }
 
-    // Listings and connection tests run here, off the UI thread.
+    // Listings, connection tests, planning and transfers run here, off the UI thread.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    let session = open_session()?;
+    let journal = open_journal(&session);
+    let engine = Engine::new(
+        rt.handle().clone(),
+        journal.clone(),
+        session.settings(),
+        copy::describe_transfer_error,
+    );
     let ui = AppWindow::new()?;
-    binding::install(&ui, rt.handle().clone(), open_session()?);
-    install_drop(&ui);
+    let transfers = binding::install_app(
+        &ui,
+        rt.handle().clone(),
+        session,
+        binding::Engines { engine, journal },
+    );
+    install_drop(&ui, transfers.clone());
     ui.run()?;
+    // The work in flight stops and the journal catches up (a few seconds at most), so what is
+    // left resumes next time.
+    transfers.finish();
     // Whatever is still being listed is of no use once the window has closed.
     rt.shutdown_background();
     Ok(())
+}
+
+/// The transfer journal, in the same database file as the sites. If it cannot be opened the
+/// transfers are kept in memory, won't resume after a restart, and the banner says so (unless it
+/// already says the database is unavailable). Jobs finished in an earlier run are let go.
+fn open_journal(session: &Session) -> Arc<dyn Journal> {
+    let path = default_db_path();
+    let journal = match SqliteJournal::open(&path) {
+        Ok(journal) => journal,
+        Err(e) => {
+            if session.notice().is_none() {
+                session.set_notice(copy::journal_unavailable(&path, e));
+            }
+            match SqliteJournal::open_in_memory() {
+                Ok(journal) => journal,
+                // Not even SQLite in memory: a journal that keeps nothing but still works.
+                Err(_) => return Arc::new(httporter_core::MemoryJournal::new()),
+            }
+        }
+    };
+    // Only lean housekeeping: a failure leaves the finished jobs for next time.
+    let _ = journal.clear_finished();
+    Arc::new(journal)
 }
 
 /// The session over the saved sites in `%APPDATA%\HTTPorter`. If that database cannot be opened
@@ -119,10 +166,10 @@ fn open_session() -> Result<Session, httporter_platform::StoreError> {
 }
 
 /// Files dragged in from Explorer: the cloud pane lights up while they are over it (if a site is
-/// selected; the window sees to that), and so does the folder row they are over. Dropping is only
-/// acknowledged in the status line for now; Task 23 turns it into an upload. Files released where
-/// the window cannot tell, or over no pane, are ignored.
-fn install_drop(ui: &AppWindow) {
+/// selected; the window sees to that), and so does the folder row they are over. Dropped there,
+/// they are uploaded into that folder, or the folder the pane shows ([`dropped`]). Files released
+/// where the window cannot tell, or over no pane, are ignored.
+fn install_drop(ui: &AppWindow, transfers: Arc<Transfers>) {
     let hover_ui = ui.as_weak();
     let drop_ui = ui.as_weak();
     let lost_ui = ui.as_weak();
@@ -142,13 +189,7 @@ fn install_drop(ui: &AppWindow) {
         },
         move |batch| {
             if let Some(ui) = drop_ui.upgrade() {
-                let site = selected_site_name(&ui);
-                let folder = match batch.side {
-                    PaneSide::Remote => remote_folder(&ui, batch.row).map(|(_, name)| name),
-                    PaneSide::Local => None,
-                };
-                let status = copy::drop_status(&batch, site.as_deref(), folder.as_deref());
-                ui.set_status_message(status.into());
+                dropped(&ui, &transfers, batch);
             }
         },
         move || {
@@ -165,6 +206,23 @@ fn install_drop(ui: &AppWindow) {
                 })
         },
     );
+}
+
+/// Files dropped from Explorer. On the cloud pane, once its site is open, they are uploaded into
+/// the folder row they landed on, or the folder the pane shows. On This PC there is nothing to do
+/// with them: the status line says where to drop them.
+fn dropped(ui: &AppWindow, transfers: &Arc<Transfers>, batch: DropBatch) {
+    let site = selected_site_name(ui);
+    let status = match (batch.side, site) {
+        (PaneSide::Remote, _) if ui.get_can_upload() => {
+            transfers.upload_dropped(batch.paths, batch.row);
+            return;
+        }
+        (PaneSide::Remote, None) => copy::DROP_NO_SITE.to_owned(),
+        (PaneSide::Remote, Some(site)) => copy::drop_not_ready(&site),
+        (PaneSide::Local, site) => copy::drop_status(&batch, site.as_deref(), None),
+    };
+    ui.set_status_message(status.into());
 }
 
 /// A pane's place in the window as the hook wants it.
