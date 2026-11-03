@@ -1,0 +1,20 @@
+[package]
+name = "httporter-transfer"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+httporter-core = { version = "0.1.0", path = "../httporter-core" }
+md-5.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
