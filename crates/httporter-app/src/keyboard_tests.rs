@@ -280,7 +280,7 @@ pub(crate) fn click(window: &slint::Window, at: LogicalPosition, times: usize) {
     }
 }
 
-fn toolbar_button(w: &AppWindow, label: &str) -> ElementHandle {
+pub(crate) fn toolbar_button(w: &AppWindow, label: &str) -> ElementHandle {
     ElementHandle::find_by_accessible_label(w, label)
         .find(|e| e.accessible_role() == Some(AccessibleRole::Button))
         .unwrap_or_else(|| panic!("no {label} button"))

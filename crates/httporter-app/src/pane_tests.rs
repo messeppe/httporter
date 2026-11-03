@@ -983,7 +983,7 @@ fn the_status_bar_follows_the_pane_last_used() {
 
 // ---- Task 17: selecting, the rubber band and the context menus ----
 
-use crate::keyboard_tests::{chord, description};
+use crate::keyboard_tests::{chord, description, toolbar_button};
 use slint::platform::PointerEventButton;
 use std::cell::RefCell;
 
@@ -1951,4 +1951,720 @@ fn init_headless() {
     if !STARTED.with(|started| started.replace(true)) {
         testing::init_no_event_loop();
     }
+}
+
+// ---- A window wired to a session, with an event loop (Task 25, item 12) ----
+//
+// The binding hands what its tasks find to the window with `upgrade_in_event_loop`. Tests with no
+// event loop never see those closures run; the scenarios below start the testing backend with its
+// simple event loop and run it, from a timer that stops it when a condition holds or the time is
+// up.
+//
+// A process can have that backend only once (the event loop's proxy is process-wide, and any test
+// that opens a window with no backend of its own starts the real one), so the scenarios are not
+// tests of their own: `polish_12_binding_scenarios_run_through_a_real_event_loop` runs them, one
+// after the other, each in a window of its own, in a process of its own (it starts the test
+// binary again for that one test), and reports every one that fails.
+
+use crate::binding::{self, Engines};
+use crate::session::Session;
+use crate::session::fakes::{FakeFactory, SpyStore, fixed_now, session_with};
+use httporter_core::{
+    Journal, MemoryJournal, MockOp, MockProvider, ProviderError, RemotePath, StorageProvider,
+    TransferSettings, UploadOptions, UploadSource,
+};
+use httporter_platform::Store;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+pub(crate) struct Live {
+    pub ui: AppWindow,
+    /// Runs the tasks the window starts; they stop when it is dropped.
+    pub rt: tokio::runtime::Runtime,
+    pub session: Option<Arc<Session>>,
+    _transfers: Option<Arc<crate::transfers::Transfers>>,
+}
+
+fn valid_site(zone: &str) -> crate::add_site::ValidSite {
+    crate::add_site::ValidSite {
+        name: zone.into(),
+        zone: zone.into(),
+        region_code: "sg".into(),
+        password: "pw".into(),
+    }
+}
+
+/// A window installed over `session` (the first saved site is opened at once), with the
+/// transfer engine wired in when `app`.
+fn wire(rt: tokio::runtime::Runtime, session: Session, app: bool) -> Live {
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    ui.show().unwrap();
+    let handle = rt.handle().clone();
+    if app {
+        let journal: Arc<dyn Journal> = Arc::new(MemoryJournal::new());
+        let engine = httporter_transfer::Engine::new(
+            handle.clone(),
+            journal.clone(),
+            TransferSettings::default(),
+            crate::copy::describe_transfer_error,
+        );
+        let transfers = binding::install_app(&ui, handle, session, Engines { engine, journal });
+        Live {
+            ui,
+            rt,
+            session: None,
+            _transfers: Some(transfers),
+        }
+    } else {
+        let session = binding::install(&ui, handle, session);
+        Live {
+            ui,
+            rt,
+            session: Some(session),
+            _transfers: None,
+        }
+    }
+}
+
+/// A window over a session browsing `provider` with the sites `zones` saved (all in Singapore,
+/// password "pw"); `prepare` sees the factory before the window opens the first site.
+fn live_with(
+    provider: Arc<dyn StorageProvider>,
+    zones: &[&str],
+    app: bool,
+    prepare: impl FnOnce(&FakeFactory),
+) -> Live {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (session, _creds, factory) = session_with(provider);
+    for zone in zones {
+        rt.block_on(session.save_site(&valid_site(zone))).unwrap();
+    }
+    prepare(&factory);
+    drop(factory);
+    wire(rt, session, app)
+}
+
+fn live(provider: Arc<dyn StorageProvider>, zones: &[&str]) -> Live {
+    live_with(provider, zones, false, |_| {})
+}
+
+/// Runs the event loop until `done` holds of the window, for at most `within`. Returns whether it
+/// did.
+pub(crate) fn pump(
+    ui: &AppWindow,
+    within: Duration,
+    done: impl Fn(&AppWindow) -> bool + 'static,
+) -> bool {
+    let weak = ui.as_weak();
+    let check = Rc::new(move || weak.upgrade().is_some_and(|ui| done(&ui)));
+    if check() {
+        return true;
+    }
+    let (hit, over) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
+    let deadline = Instant::now() + within;
+    let timer = slint::Timer::default();
+    timer.start(slint::TimerMode::Repeated, Duration::from_millis(5), {
+        let (hit, over) = (hit.clone(), over.clone());
+        move || {
+            if over.get() {
+                return;
+            }
+            let found = check();
+            if found || Instant::now() >= deadline {
+                hit.set(found);
+                over.set(true);
+                slint::quit_event_loop().unwrap();
+            }
+        }
+    });
+    // A window closed by an earlier scenario leaves a "quit" in the queue: run again until the
+    // timer is the one that stopped the loop.
+    while !over.get() {
+        slint::run_event_loop().unwrap();
+    }
+    drop(timer);
+    hit.get()
+}
+
+/// Runs the event loop until `done` holds of the window, or fails the test after ten seconds.
+pub(crate) fn pump_until(ui: &AppWindow, what: &str, done: impl Fn(&AppWindow) -> bool + 'static) {
+    assert!(
+        pump(ui, Duration::from_secs(10), done),
+        "timed out waiting for {what}"
+    );
+}
+
+/// Runs the event loop for `ms` milliseconds, whatever happens.
+pub(crate) fn pump_for(ui: &AppWindow, ms: u64) {
+    pump(ui, Duration::from_millis(ms), |_| false);
+}
+
+fn remote_names(ui: &AppWindow) -> Vec<String> {
+    ui.get_remote_rows()
+        .iter()
+        .map(|r| r.name.to_string())
+        .collect()
+}
+
+/// Waits (without the event loop) for a condition of something the tasks do off the UI thread.
+fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// "wp-content" and "index.html", once the root of the site is listed.
+fn root_listed(ui: &AppWindow) -> bool {
+    ui.get_remote_rows().row_count() == 2 && !ui.get_remote_loading()
+}
+
+const AUTH_TEXT: &str = "Couldn't sign in to testzone. Check the password, zone name and region.";
+
+/// Item 12: closures the tasks post run only through the event loop, and the pump stops as soon as
+/// what it waits for is there, or gives up in time.
+fn polish_12_the_pump_runs_posted_closures_and_gives_up_in_time() {
+    let ui = AppWindow::new().unwrap();
+    ui.show().unwrap();
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        weak.upgrade_in_event_loop(|ui| ui.set_status_message("posted".into()))
+            .unwrap();
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        ui.get_status_message(),
+        "",
+        "nothing runs it without the loop"
+    );
+    let started = Instant::now();
+    pump_until(&ui, "the posted closure", |ui| {
+        ui.get_status_message() == "posted"
+    });
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // Already true: no loop at all. Never true: gives up when the time is up, and can run again.
+    assert!(pump(&ui, Duration::from_secs(5), |ui| ui
+        .get_status_message()
+        == "posted"));
+    let started = Instant::now();
+    assert!(!pump(&ui, Duration::from_millis(60), |_| false));
+    assert!(started.elapsed() >= Duration::from_millis(55));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        weak.upgrade_in_event_loop(|ui| ui.set_status_message("again".into()))
+            .unwrap();
+    })
+    .join()
+    .unwrap();
+    assert!(pump(&ui, Duration::from_secs(5), |ui| ui
+        .get_status_message()
+        == "again"));
+}
+
+/// Task 17: without the transfer engine (as in the window's other tests) every file action is
+/// off, and the toolbar says why; selecting rows does not change that.
+fn toolbar_state_is_off_until_the_engine_is_wired_in() {
+    let live = live(site_mock_for_panes(), &["testzone"]);
+    let ui = &live.ui;
+    pump_until(ui, "the root listing", root_listed);
+    let all_off = |ui: &AppWindow| {
+        !ui.get_can_upload()
+            && !ui.get_can_download()
+            && !ui.get_can_new_folder()
+            && !ui.get_can_delete()
+    };
+    assert!(all_off(ui));
+    assert_eq!(ui.get_actions_note(), "Transfers arrive in a later version");
+    assert_eq!(ui.get_delete_note(), "");
+
+    ui.invoke_row_pointer(1, 1, false, false);
+    ui.invoke_select_all(1);
+    pump_for(ui, 40);
+    assert!(all_off(ui), "a selection turns nothing on");
+    assert_eq!(ui.get_remote_selection_text(), "2 items selected · 13 B");
+    ui.set_local_pane_active(true);
+    pump_for(ui, 40);
+    assert!(all_off(ui));
+    assert_eq!(ui.get_delete_note(), "");
+    for label in ["Upload", "Download", "New folder", "Delete"] {
+        let button = toolbar_button(ui, label);
+        assert_eq!(button.accessible_enabled(), Some(false), "{label}");
+        assert_eq!(
+            description(&button),
+            "Transfers arrive in a later version",
+            "{label}"
+        );
+    }
+}
+
+/// "wp-content/x.txt" (a folder) and "index.html" (13 bytes) at the root.
+fn site_mock_for_panes() -> Arc<MockProvider> {
+    Arc::new(
+        MockProvider::new(Default::default())
+            .with_file("index.html", b"<html></html>")
+            .with_file("wp-content/x.txt", b"x"),
+    )
+}
+
+/// Task 17: with the engine wired in the toolbar follows `toolbar_state`: what is open, what is
+/// selected, which pane is in use and whether a listing is on its way.
+fn toolbar_state_follows_the_rules_once_the_engine_is_wired_in() {
+    let live = live_with(site_mock_for_panes(), &["testzone"], true, |_| {});
+    let ui = &live.ui;
+    pump_until(ui, "the root listing", root_listed);
+    pump_until(ui, "the toolbar", |ui| ui.get_can_upload());
+    let flags = |ui: &AppWindow| {
+        (
+            ui.get_can_upload(),
+            ui.get_can_download(),
+            ui.get_can_new_folder(),
+            ui.get_can_delete(),
+        )
+    };
+    // A site is open, the cloud pane is in use, nothing is selected.
+    assert_eq!(flags(ui), (true, false, true, false));
+    assert_eq!(ui.get_actions_note(), "");
+    assert_eq!(ui.get_delete_note(), "");
+
+    // Rows selected in the cloud pane: Download and Delete come on.
+    ui.invoke_row_pointer(1, 1, false, false);
+    assert_eq!(flags(ui), (true, true, true, true));
+    assert_eq!(description(&toolbar_button(ui, "Delete")), "");
+    assert_eq!(
+        toolbar_button(ui, "Delete").accessible_enabled(),
+        Some(true)
+    );
+    ui.invoke_select_all(1);
+    assert_eq!(flags(ui), (true, true, true, true));
+    ui.invoke_row_pointer(1, 0, true, false);
+    ui.invoke_row_pointer(1, 1, true, false);
+    assert_eq!(
+        flags(ui),
+        (true, false, true, false),
+        "Ctrl+click took both out"
+    );
+
+    // This PC in use: Delete is off with its note; New folder needs a folder, and the pane is at
+    // the list of drives; Upload and Download do not care which pane.
+    ui.invoke_row_pointer(1, 1, false, false);
+    ui.set_local_pane_active(true);
+    let note = "Delete works in the cloud pane. Use Explorer for files on this PC.";
+    pump_until(ui, "the note", move |ui| ui.get_delete_note() == note);
+    assert_eq!(flags(ui), (true, true, false, false));
+    let delete = toolbar_button(ui, "Delete");
+    assert_eq!(delete.accessible_enabled(), Some(false));
+    assert_eq!(description(&delete), note);
+    assert_eq!(
+        toolbar_button(ui, "New folder").accessible_enabled(),
+        Some(false)
+    );
+
+    // Back to the cloud pane: the note goes and Delete is on again.
+    ui.invoke_row_pointer(1, 1, false, false);
+    pump_until(ui, "the note to go", |ui| ui.get_delete_note().is_empty());
+    assert_eq!(flags(ui), (true, true, true, true));
+
+    // While the folder is being listed nothing is open: all off, and on again with the answer.
+    ui.set_remote_loading(true);
+    ui.invoke_select_all(1);
+    assert_eq!(flags(ui), (false, false, false, false));
+    ui.set_remote_loading(false);
+    ui.invoke_select_all(1);
+    assert_eq!(flags(ui), (true, true, true, true));
+}
+
+/// Task 17: Ctrl+A, through the app: every row of the pane is selected, the status bar sums the
+/// files, and the other pane is left alone.
+fn ctrl_a_selects_all_rows_and_the_status_bar_sums_them() {
+    let live = live(site_mock_for_panes(), &["testzone"]);
+    let ui = &live.ui;
+    pump_until(ui, "the root listing", root_listed);
+    assert_eq!(ui.get_status_left(), "2 items");
+
+    click(ui.window(), center(&row_starting(ui, "wp-content")), 1);
+    assert_eq!(ui.get_status_left(), "wp-content selected");
+    chord(ui.window(), &[Key::Control], "a");
+    let rows = ui.get_remote_rows();
+    assert!(rows.iter().all(|r| r.selected), "every row is selected");
+    assert_eq!(ui.get_remote_selected_count(), 2);
+    assert_eq!(ui.get_status_left(), "2 items selected · 13 B");
+    assert_eq!(ui.get_local_selection_text(), "");
+    assert!(ui.get_local_rows().iter().all(|r| !r.selected));
+    // The keyboard stays on the row it was on.
+    assert_eq!(ui.get_remote_selected(), 0);
+    // A click on one row narrows it again, and shows that row's words.
+    click(ui.window(), center(&row_starting(ui, "index.html")), 1);
+    assert_eq!(ui.get_status_left(), "index.html selected · 13 B");
+    assert_eq!(
+        ui.get_remote_rows().iter().filter(|r| r.selected).count(),
+        1
+    );
+    // The band reaches the app too: a drag in the empty space below the rows.
+    let bounds = ui.get_remote_bounds();
+    let x = bounds.x + bounds.width / 2.0;
+    press_at(
+        ui,
+        LogicalPosition::new(x, bounds.list_top + 150.0),
+        PointerEventButton::Left,
+    );
+    move_to(ui, LogicalPosition::new(x, bounds.list_top + 5.0));
+    release_at(
+        ui,
+        LogicalPosition::new(x, bounds.list_top + 5.0),
+        PointerEventButton::Left,
+    );
+    assert_eq!(ui.get_status_left(), "2 items selected · 13 B");
+}
+
+/// Polish 1: a site that is opening shows "Connecting…" in the status bar instead of "0 items" and
+/// has nowhere to go back or forward; picking a site does so at once.
+fn polish_1_the_status_bar_says_connecting_and_back_and_forward_wait() {
+    let mut hold = None;
+    let live = live_with(site_mock_for_panes(), &["testzone"], false, |factory| {
+        hold = Some(factory.hold("testzone"));
+    });
+    let (ui, hold) = (&live.ui, hold.unwrap());
+    pump_until(ui, "the switch view", |ui| {
+        ui.get_remote_status() == "Connecting…"
+    });
+    assert_eq!(ui.get_status_left(), "Connecting…");
+    assert_eq!(ui.get_connection_text(), "Connecting…");
+    assert!(ui.get_remote_loading());
+    assert!(!ui.get_remote_can_go_back() && !ui.get_remote_can_go_forward());
+    for label in ["Back", "Forward"] {
+        assert_eq!(toolbar_button(ui, label).accessible_enabled(), Some(false));
+    }
+    hold.release();
+    pump_until(ui, "the listing", root_listed);
+    assert_eq!(ui.get_status_left(), "2 items");
+
+    // Into a folder: Back is there. Picking the site again empties the pane and switches Back
+    // and Forward off at once, before anything has come back.
+    ui.invoke_open_remote(0);
+    pump_until(ui, "the folder", |ui| {
+        ui.get_remote_crumbs().row_count() == 2 && !ui.get_remote_loading()
+    });
+    assert!(ui.get_remote_can_go_back());
+    assert_eq!(toolbar_button(ui, "Back").accessible_enabled(), Some(true));
+    ui.invoke_site_selected(0);
+    assert!(!ui.get_remote_can_go_back() && !ui.get_remote_can_go_forward());
+    assert_eq!(toolbar_button(ui, "Back").accessible_enabled(), Some(false));
+    assert_eq!(ui.get_remote_rows().row_count(), 0);
+    assert_eq!(ui.get_remote_status(), "Connecting…");
+    assert_eq!(ui.get_status_left(), "Connecting…");
+    assert_eq!(ui.get_connection_text(), "Connecting…");
+    assert!(ui.get_remote_loading());
+    pump_until(ui, "the listing again", root_listed);
+    assert_eq!(ui.get_status_left(), "2 items");
+    assert!(!ui.get_remote_can_go_back());
+}
+
+/// Polish 1: a first listing that fails leaves "0 items", not "Connecting…".
+fn polish_1_a_first_listing_that_fails_says_zero_items() {
+    let mock = site_mock_for_panes();
+    // Armed once the site is saved (saving it lists the root to test it).
+    let armed = mock.clone();
+    let live = live_with(mock, &["testzone"], false, |_| {
+        armed.fail_next(MockOp::List, rejected_auth(), 1)
+    });
+    let ui = &live.ui;
+    pump_until(ui, "the failure", |ui| {
+        ui.get_connection_text() == "Not connected" && !ui.get_remote_loading()
+    });
+    assert_eq!(ui.get_remote_status(), "0 items");
+    assert_eq!(ui.get_status_left(), "0 items");
+    assert_eq!(ui.get_error_text(), AUTH_TEXT);
+}
+
+fn rejected_auth() -> ProviderError {
+    ProviderError::Auth {
+        hint: httporter_core::AuthHint::Unknown,
+    }
+}
+
+/// Polish 2: a first listing that finds no zone leaves the pill orange and the sidebar's dot grey;
+/// once a listing has worked, a missing folder does not.
+fn polish_2_a_missing_zone_greys_the_dot_but_a_missing_folder_does_not() {
+    let mock = site_mock_for_panes();
+    let armed = mock.clone();
+    let live = live_with(mock.clone(), &["testzone"], false, |_| {
+        armed.fail_next(MockOp::List, ProviderError::NotFound, 1)
+    });
+    let ui = &live.ui;
+    pump_until(ui, "the answer", |ui| {
+        ui.get_connection_text() == "Not connected" && !ui.get_remote_loading()
+    });
+    assert!(!ui.get_connection_ok());
+    assert!(!ui.get_sites().row_data(0).unwrap().healthy);
+    assert_eq!(
+        ui.get_error_text(),
+        "Couldn't find zone “testzone” in Singapore. Check the zone name and region."
+    );
+
+    ui.invoke_refresh();
+    pump_until(ui, "the listing", root_listed);
+    assert!(ui.get_connection_ok());
+    assert!(ui.get_sites().row_data(0).unwrap().healthy);
+    assert_eq!(ui.get_error_text(), "");
+
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    ui.invoke_open_remote(0);
+    pump_until(ui, "the folder to be missing", |ui| {
+        ui.get_error_text() == "Couldn't find /wp-content in testzone."
+    });
+    assert!(ui.get_connection_ok());
+    assert!(ui.get_connection_text().starts_with("HTTPS"));
+    assert!(ui.get_sites().row_data(0).unwrap().healthy);
+}
+
+/// Polish 7 (parked): a message about a drop belongs to the pane it was dropped on: a listing of
+/// the other pane leaves it; its own pane's listing, or any listing when it belongs to neither,
+/// takes it away.
+fn polish_7_a_drop_message_is_cleared_only_by_the_pane_it_belongs_to() {
+    use crate::selection::ActivePane;
+    let mock = site_mock_for_panes();
+    let live = live(mock.clone(), &["testzone"]);
+    let ui = &live.ui;
+    pump_until(ui, "the root listing", root_listed);
+
+    // A cloud listing (F5 with the cloud pane in use) after a drop on This PC: the message stays.
+    let refresh_cloud = |ui: &AppWindow| {
+        let before = mock.calls(MockOp::List);
+        ui.invoke_refresh();
+        wait_until("the listing", || mock.calls(MockOp::List) > before);
+        pump_for(ui, 120);
+    };
+    binding::show_status(ui, Some(ActivePane::ThisPc), "dropped on This PC".into());
+    refresh_cloud(ui);
+    assert_eq!(ui.get_status_message(), "dropped on This PC");
+    assert_eq!(ui.get_status_left(), "dropped on This PC");
+
+    // One about the cloud pane goes with its listing.
+    binding::show_status(ui, Some(ActivePane::Cloud), "dropped on the cloud".into());
+    refresh_cloud(ui);
+    assert_eq!(ui.get_status_message(), "");
+    assert_eq!(ui.get_status_left(), "2 items");
+
+    // One about neither goes with a listing of either.
+    binding::show_status(ui, None, "about neither".into());
+    refresh_cloud(ui);
+    assert_eq!(ui.get_status_message(), "");
+
+    // With This PC in use: a message about the cloud pane survives This PC's listing …
+    ui.set_local_pane_active(true);
+    pump_for(ui, 40);
+    binding::show_status(ui, Some(ActivePane::Cloud), "dropped on the cloud".into());
+    ui.invoke_refresh();
+    pump_for(ui, 200);
+    assert_eq!(ui.get_status_message(), "dropped on the cloud");
+    // … and one about This PC goes with it.
+    binding::show_status(ui, Some(ActivePane::ThisPc), "dropped on This PC".into());
+    ui.invoke_refresh();
+    pump_until(ui, "This PC's listing to clear it", |ui| {
+        ui.get_status_message().is_empty()
+    });
+}
+
+/// Polish 11 (Minor 5): a listing of the site the user has left never lands under the new site's
+/// name. The sidebar moves on first (the window sets `selected-site` before it tells the app);
+/// the old site's listing, arriving in between, is dropped.
+fn polish_11_a_listing_of_the_previous_site_is_not_shown_under_the_new_one() {
+    let a = Arc::new(MockProvider::new(Default::default()).with_file("from-a.txt", b"a"));
+    let b = Arc::new(MockProvider::new(Default::default()).with_file("from-b.txt", b"b"));
+    let a_for_factory = a.clone();
+    let live = live_with(b, &["zone-a", "zone-b"], false, move |factory| {
+        factory.serve("zone-a", a_for_factory);
+    });
+    let ui = &live.ui;
+    pump_until(ui, "site A's listing", |ui| {
+        ui.get_remote_rows().row_count() == 1 && !ui.get_remote_loading()
+    });
+    assert_eq!(remote_names(ui), ["from-a.txt"]);
+    live.rt
+        .block_on(a.upload(
+            &RemotePath::parse("new.txt").unwrap(),
+            UploadSource::Bytes(b"n".to_vec().into()),
+            &UploadOptions::new("text/plain"),
+        ))
+        .unwrap();
+
+    // The sidebar is on site B; the app has not been told yet. A refresh of A comes back.
+    ui.set_selected_site(1);
+    let before = a.calls(MockOp::List);
+    ui.invoke_refresh();
+    wait_until("site A's listing", || a.calls(MockOp::List) > before);
+    pump_for(ui, 200);
+    assert_eq!(
+        remote_names(ui),
+        ["from-a.txt"],
+        "A's new listing is not shown"
+    );
+    assert_eq!(ui.get_remote_status(), "1 item");
+
+    // Back on A, the same refresh shows it.
+    ui.set_selected_site(0);
+    ui.invoke_refresh();
+    pump_until(ui, "A's new listing", |ui| {
+        ui.get_remote_rows().row_count() == 2
+    });
+    assert_eq!(remote_names(ui), ["from-a.txt", "new.txt"]);
+}
+
+/// Polish 11, the usual way: picking the other site shows that site's rows.
+fn polish_11_picking_a_site_shows_that_sites_rows() {
+    let a = Arc::new(MockProvider::new(Default::default()).with_file("from-a.txt", b"a"));
+    let b = Arc::new(MockProvider::new(Default::default()).with_file("from-b.txt", b"b"));
+    let live = live_with(b, &["zone-a", "zone-b"], false, move |factory| {
+        factory.serve("zone-a", a);
+    });
+    let ui = &live.ui;
+    pump_until(ui, "site A's listing", |ui| {
+        ui.get_remote_rows().row_count() == 1 && !ui.get_remote_loading()
+    });
+    ui.set_selected_site(1);
+    ui.invoke_site_selected(1);
+    pump_until(ui, "site B's listing", |ui| {
+        remote_names(ui) == ["from-b.txt"] && !ui.get_remote_loading()
+    });
+    assert_eq!(ui.get_endpoint_text(), "Bunny Storage · zone-b");
+}
+
+/// Polish 9 (parked): while a site is being written, another Add Site is ignored (Cancel and open
+/// the sheet again, press Add), so the site is not added twice; once the write is over, Add works.
+fn polish_9_a_second_add_while_a_site_is_being_written_is_ignored() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let creds = Arc::new(SpyStore::default());
+    let factory = FakeFactory::new(Arc::new(MockProvider::new(Default::default())));
+    let session = Session::new(
+        Store::open_in_memory().unwrap(),
+        creds.clone(),
+        factory.clone(),
+        fixed_now,
+    );
+    let live = wire(rt, session, false);
+    let (ui, session) = (&live.ui, live.session.clone().unwrap());
+
+    // The first Add reaches the credential store, where the write is held.
+    let hold = creds.hold_set();
+    ui.invoke_add_site_save("A".into(), "zone-a".into(), 4, "pw".into());
+    hold.wait_entered();
+    assert!(session.sites().is_empty(), "not written yet");
+
+    // Cancel, open the sheet again and press Add for another site.
+    ui.invoke_add_site_cancel();
+    ui.invoke_add_site_save("B".into(), "zone-b".into(), 4, "pw".into());
+    hold.release();
+    wait_until("the first site", || !session.sites().is_empty());
+    pump_for(ui, 300);
+    let names: Vec<String> = session.sites().into_iter().map(|s| s.name).collect();
+    assert_eq!(names, ["A"], "the second Add did nothing");
+
+    // The guard is gone with the write: another Add is taken.
+    ui.invoke_add_site_save("C".into(), "zone-c".into(), 4, "pw".into());
+    wait_until("the second site", || session.sites().len() == 2);
+    let names: Vec<String> = session.sites().into_iter().map(|s| s.name).collect();
+    assert_eq!(names, ["A", "C"]);
+    pump_for(ui, 100);
+}
+
+/// Item 12: the binding's tests that need what the tasks post to reach the window, run through a
+/// real event loop (see the note above for why they are run here, in a process of their own, and
+/// not as tests of their own).
+#[test]
+fn polish_12_binding_scenarios_run_through_a_real_event_loop() {
+    const CHILD: &str = "HTTPORTER_EVENT_LOOP_SCENARIOS";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pane_tests::polish_12_binding_scenarios_run_through_a_real_event_loop",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}
+{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "the scenarios did not run"
+        );
+        return;
+    }
+    testing::init_integration_test_with_system_time();
+    let scenarios: &[(&str, fn())] = &[
+        (
+            "polish_12_the_pump_runs_posted_closures_and_gives_up_in_time",
+            polish_12_the_pump_runs_posted_closures_and_gives_up_in_time,
+        ),
+        (
+            "toolbar_state_is_off_until_the_engine_is_wired_in",
+            toolbar_state_is_off_until_the_engine_is_wired_in,
+        ),
+        (
+            "toolbar_state_follows_the_rules_once_the_engine_is_wired_in",
+            toolbar_state_follows_the_rules_once_the_engine_is_wired_in,
+        ),
+        (
+            "ctrl_a_selects_all_rows_and_the_status_bar_sums_them",
+            ctrl_a_selects_all_rows_and_the_status_bar_sums_them,
+        ),
+        (
+            "polish_1_the_status_bar_says_connecting_and_back_and_forward_wait",
+            polish_1_the_status_bar_says_connecting_and_back_and_forward_wait,
+        ),
+        (
+            "polish_1_a_first_listing_that_fails_says_zero_items",
+            polish_1_a_first_listing_that_fails_says_zero_items,
+        ),
+        (
+            "polish_2_a_missing_zone_greys_the_dot_but_a_missing_folder_does_not",
+            polish_2_a_missing_zone_greys_the_dot_but_a_missing_folder_does_not,
+        ),
+        (
+            "polish_7_a_drop_message_is_cleared_only_by_the_pane_it_belongs_to",
+            polish_7_a_drop_message_is_cleared_only_by_the_pane_it_belongs_to,
+        ),
+        (
+            "polish_9_a_second_add_while_a_site_is_being_written_is_ignored",
+            polish_9_a_second_add_while_a_site_is_being_written_is_ignored,
+        ),
+        (
+            "polish_11_a_listing_of_the_previous_site_is_not_shown_under_the_new_one",
+            polish_11_a_listing_of_the_previous_site_is_not_shown_under_the_new_one,
+        ),
+        (
+            "polish_11_picking_a_site_shows_that_sites_rows",
+            polish_11_picking_a_site_shows_that_sites_rows,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, scenario) in scenarios {
+        if let Err(panic) = std::panic::catch_unwind(*scenario) {
+            let message = panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|m| (*m).to_owned()))
+                .unwrap_or_else(|| "(no message)".to_owned());
+            failures.push(format!("{name}: {message}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} scenarios failed:\n{}",
+        failures.len(),
+        scenarios.len(),
+        failures.join("\n")
+    );
 }
