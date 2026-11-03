@@ -1161,6 +1161,48 @@ async fn delete_folder_deletes_what_it_can_then_refuses_for_names_it_cannot_hand
     assert_eq!(keys, ["a/", "a/ok.txt"]);
 }
 
+/// Ruling Q39 again, for a service whose listing gives the key itself (`a//weird` under `a/`)
+/// instead of rolling it into the prefix `a//`: the message then names the whole key.
+#[tokio::test]
+async fn delete_folder_names_a_skipped_key_as_the_service_listed_it() {
+    let server = MockServer::start().await;
+    list_mock(
+        "a/",
+        xml(root_listing(&[
+            contents("a/ok.txt", 1, GOOD_MD5),
+            contents("a//weird", 1, GOOD_MD5),
+        ])),
+    )
+    .expect(1)
+    .mount(&server)
+    .await;
+    delete_mock()
+        .respond_with(xml("<DeleteResult/>"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        provider(&server).delete_folder(&p("a")).await,
+        Err(ProviderError::Refused(
+            "Some files in this folder have names HTTPorter can't handle, such as \"a//weird\". \
+             Delete them in your storage provider's console."
+                .into()
+        ))
+    );
+
+    // The file and the folder's marker were deleted all the same, and nothing else was asked
+    // to be: the odd key is still there.
+    let requests = server.received_requests().await.unwrap();
+    let batch = requests
+        .iter()
+        .find(|r| r.method.as_str() == "POST")
+        .unwrap();
+    let mut keys = delete_keys(batch);
+    keys.sort();
+    assert_eq!(keys, ["a/", "a/ok.txt"]);
+}
+
 #[tokio::test]
 async fn delete_folder_names_the_first_skipped_key_of_the_whole_walk() {
     let server = MockServer::start().await;
