@@ -401,20 +401,11 @@ export component AppWindow inherits Window {
     // The sidebar is shown. The toolbar button flips it; the app may set it too (to restore what
     // the user chose last time).
     in-out property <bool> sidebar-visible: true;
-    // Where the cloud pane is, in window coordinates and logical pixels, for telling which pane a
-    // point is over. The panes sit side by side when the main area is wide enough and are stacked
-    // otherwise (`panes-stacked`). Side by side, a point is over the cloud pane when
-    // `x >= pane-split`; stacked, when `y >= remote-pane-y` (and `pane-split` is the left edge of
-    // both panes, so it says nothing).
-    out property <bool> panes-stacked: !panes.side-by-side;
-    // Absolute x of the cloud pane's left edge.
-    out property <length> pane-split: remote-pane.absolute-position.x;
-    // Absolute y of the cloud pane's top edge.
-    out property <length> remote-pane-y: remote-pane.absolute-position.y;
-    // Where each pane and its list are, for telling what a dragged file is over: the pane's
-    // rectangle (so a point over the toolbar, the status bar or the gap between the panes is over
-    // neither), where its rows start, how far it is scrolled and how many rows it has (see
-    // src/drop_hook.rs).
+    // Where each pane and its list are, in window coordinates and logical pixels, for telling what
+    // a dragged file is over: the pane's rectangle (so a point over the toolbar, the status bar or
+    // the gap between the panes is over neither; the panes sit side by side when the main area is
+    // wide enough and are stacked otherwise, and the rectangles say which), where its rows start,
+    // how far it is scrolled and how many rows it has (see src/drop_hook.rs).
     out property <PaneBounds> local-bounds: local-pane.bounds;
     out property <PaneBounds> remote-bounds: remote-pane.bounds;
 

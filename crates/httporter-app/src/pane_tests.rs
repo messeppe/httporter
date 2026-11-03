@@ -53,21 +53,29 @@ fn row_data(prefix: &str, count: usize) -> Vec<RowData> {
         .collect()
 }
 
+/// A window with one saved site (not chosen, so the cloud pane reads "No site selected"): with no
+/// site at all the window shows the Welcome screen instead of the panes.
 pub(crate) fn window_with_panes(local: usize, remote: usize) -> AppWindow {
     testing::init_no_event_loop();
     let w = AppWindow::new().unwrap();
+    w.set_sites(ModelRc::new(VecModel::from(vec![site(
+        "example-shop.com",
+        ProviderTile::Bunny,
+        "B",
+    )])));
     w.set_local_rows(to_slint_rows(&row_data("local", local)));
     w.set_remote_rows(to_slint_rows(&row_data("remote", remote)));
     w.show().unwrap();
     w
 }
 
-// Tab order with no sites: sidebar toggle, Add Site (Back, Forward, Publish and Settings are
-// turned off), then each pane: its list, its crumbs, its Refresh button (the cloud pane's is
-// turned off without a site), then its Name, Size and Modified headers.
-pub(crate) const LOCAL_LIST: usize = 3;
-pub(crate) const LOCAL_NAME_HEADER: usize = 5;
-pub(crate) const REMOTE_LIST: usize = 8;
+// Tab order of `window_with_panes`: sidebar toggle, the site's row, Add Site (Back, Forward,
+// Publish, Settings and the four file actions are turned off), then each pane: its list, its
+// crumbs, its Refresh button (the cloud pane's is turned off without a chosen site), then its
+// Name, Size and Modified headers.
+pub(crate) const LOCAL_LIST: usize = 4;
+pub(crate) const LOCAL_NAME_HEADER: usize = 6;
+pub(crate) const REMOTE_LIST: usize = 9;
 
 fn list_items(w: &impl ComponentHandle) -> Vec<ElementHandle> {
     ElementQuery::from_root(w)
@@ -460,6 +468,16 @@ fn a_selection_set_by_the_app_is_scrolled_into_view() {
     assert!(fully_visible(&row_starting(&w, "local-00000"), &pane));
 }
 
+/// The rectangle a pane reports in `local-bounds` / `remote-bounds` is the pane on screen.
+fn assert_bounds_are(bounds: crate::PaneBounds, pane: &ElementHandle, label: &str) {
+    let (p, s) = (pane.absolute_position(), pane.size());
+    assert_eq!(
+        (bounds.x, bounds.y, bounds.width, bounds.height),
+        (p.x, p.y, s.width, s.height),
+        "{label}"
+    );
+}
+
 #[test]
 fn the_panes_sit_side_by_side_when_wide_and_stack_when_narrow() {
     let w = window_with_panes(3, 3);
@@ -473,9 +491,8 @@ fn the_panes_sit_side_by_side_when_wide_and_stack_when_narrow() {
     let (l, r) = (local.absolute_position(), remote.absolute_position());
     assert_eq!(l.y, r.y);
     assert!(r.x > l.x + 400.0);
-    assert!(!w.get_panes_stacked());
-    assert_eq!(w.get_pane_split(), r.x);
-    assert_eq!(w.get_remote_pane_y(), r.y);
+    assert_bounds_are(w.get_local_bounds(), &local, "wide, This PC");
+    assert_bounds_are(w.get_remote_bounds(), &remote, "wide, cloud");
 
     // At the minimum width the sidebar leaves too little for that: one above the other.
     w.window().set_size(slint::LogicalSize::new(960.0, 700.0));
@@ -483,27 +500,52 @@ fn the_panes_sit_side_by_side_when_wide_and_stack_when_narrow() {
     assert_eq!(l.x, r.x);
     assert!(r.y > l.y + local.size().height);
     assert_eq!(local.size().width, remote.size().width);
-    assert!(w.get_panes_stacked());
-    assert_eq!(w.get_pane_split(), r.x);
-    assert_eq!(w.get_remote_pane_y(), r.y);
+    assert_bounds_are(w.get_local_bounds(), &local, "narrow, This PC");
+    assert_bounds_are(w.get_remote_bounds(), &remote, "narrow, cloud");
 
-    // Back to wide: the three values follow.
+    // Back to wide: the bounds follow.
     w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
-    let r = remote.absolute_position();
-    assert!(!w.get_panes_stacked());
-    assert_eq!((w.get_pane_split(), w.get_remote_pane_y()), (r.x, r.y));
+    assert_bounds_are(w.get_remote_bounds(), &remote, "wide again, cloud");
+    assert!(w.get_remote_bounds().x > w.get_local_bounds().x);
+}
+
+/// What the hook reads each pane's list by: where the rows start, their height, the scroll and
+/// the row count.
+#[test]
+fn the_bounds_say_where_the_rows_are_and_follow_the_scroll() {
+    let w = window_with_panes(300, 2);
+    let (local, remote) = (w.get_local_bounds(), w.get_remote_bounds());
+    assert_eq!((local.rows, remote.rows), (300, 2));
+    assert_eq!(local.row_height, 28.0);
+    // Under the 37 px header and the 26 px column titles.
+    assert_eq!(local.list_top, local.y + 63.0);
+    assert_eq!(remote.list_top, remote.y + 63.0);
+    assert_eq!(local.scroll_y, 0.0);
+
+    // The first row is where the bounds say.
+    let first = row_starting(&w, "local-00000");
+    assert_eq!(first.absolute_position().y, local.list_top);
+
+    // Scrolling the list moves the scroll offset, and `list_top` stays.
+    tab(&w, LOCAL_LIST);
+    tap(w.window(), Key::End);
+    slint::platform::update_timers_and_animations();
+    let scrolled = w.get_local_bounds();
+    assert!(scrolled.scroll_y > 28.0 * 200.0, "{}", scrolled.scroll_y);
+    assert_eq!(scrolled.list_top, local.list_top);
+    let last = row_starting(&w, "local-00299");
+    let y = last.absolute_position().y;
+    assert_eq!(
+        y,
+        scrolled.list_top + 299.0 * 28.0 - scrolled.scroll_y,
+        "the last row is where the scroll puts it"
+    );
 }
 
 #[test]
-fn the_pane_position_outputs_tell_which_pane_a_point_is_over() {
-    // The rule Task 14 applies to a dropped file's position.
-    let over_cloud = |w: &AppWindow, x: f32, y: f32| {
-        if w.get_panes_stacked() {
-            y >= w.get_remote_pane_y()
-        } else {
-            x >= w.get_pane_split()
-        }
-    };
+fn the_pane_bounds_tell_which_pane_and_row_a_point_is_over() {
+    // The rule Task 22 applies to a dropped file's position.
+    use crate::drop_hook::{PaneLayout, PaneSide, hit};
     let w = window_with_panes(3, 3);
     let (local, remote) = (
         pane_named(&w, "This PC"),
@@ -511,12 +553,37 @@ fn the_pane_position_outputs_tell_which_pane_a_point_is_over() {
     );
     for (width, height) in [(1280.0, 800.0), (960.0, 700.0)] {
         w.window().set_size(slint::LogicalSize::new(width, height));
-        let (lc, rc) = (center(&local), center(&remote));
-        assert!(!over_cloud(&w, lc.x, lc.y), "{width}: centre of This PC");
-        assert!(
-            over_cloud(&w, rc.x, rc.y),
+        let layout = PaneLayout {
+            local: crate::geometry(&w.get_local_bounds()),
+            remote: crate::geometry(&w.get_remote_bounds()),
+        };
+        let point = |e: &ElementHandle| {
+            let c = center(e);
+            (c.x, c.y)
+        };
+        assert_eq!(
+            hit(point(&local), &layout).map(|t| t.0),
+            Some(PaneSide::Local),
+            "{width}: centre of This PC"
+        );
+        assert_eq!(
+            hit(point(&remote), &layout).map(|t| t.0),
+            Some(PaneSide::Remote),
             "{width}: centre of the cloud pane"
         );
+        // A row of the cloud pane (the list is short: the middle of the pane is below its rows).
+        assert_eq!(
+            hit(point(&row_starting(&w, "remote-00001")), &layout),
+            Some((PaneSide::Remote, Some(1))),
+            "{width}"
+        );
+        assert_eq!(
+            hit(point(&row_starting(&w, "local-00002")), &layout),
+            Some((PaneSide::Local, Some(2))),
+            "{width}"
+        );
+        // The toolbar above the panes is neither.
+        assert_eq!(hit((point(&local).0, 10.0), &layout), None);
     }
 }
 
@@ -766,8 +833,20 @@ fn inside(e: &ElementHandle, pane: &ElementHandle) -> bool {
     p.x >= s.x && p.y >= s.y && p.x <= s.x + size.width && p.y <= s.y + size.height
 }
 
+/// Lets `ms` milliseconds of the testing backend's clock go by (timers fire as they come due).
+fn pass(ms: u64) {
+    testing::mock_elapsed_time(std::time::Duration::from_millis(ms));
+}
+
+/// Starts the timers that depend on a property set since (a Slint timer begins at the next pass
+/// of the event loop, not when its `running` is set).
+fn settle() {
+    slint::platform::update_timers_and_animations();
+}
+
 /// Minor 2: a pane whose listing is on its way says "Loading…", on screen and to assistive
-/// technology, until the answer is in.
+/// technology, until the answer is in. Polish 6: it says so only once the listing has taken
+/// 200 ms, so a quick one flashes nothing.
 #[test]
 fn a_pane_says_it_is_loading() {
     let w = window_with_panes(3, 3);
@@ -776,6 +855,10 @@ fn a_pane_says_it_is_loading() {
     let this_pc = pane_named(&w, "This PC");
 
     w.set_remote_loading(true);
+    settle();
+    pass(199);
+    assert!(loading_marks(&w).is_empty(), "not yet");
+    pass(1);
     let marks = loading_marks(&w);
     assert_eq!(marks.len(), 1);
     assert!(inside(&marks[0], &cloud) && !inside(&marks[0], &this_pc));
@@ -789,14 +872,63 @@ fn a_pane_says_it_is_loading() {
         Some(AccessibleRole::ListItem)
     );
 
+    // The other pane has its own clock.
     w.set_local_loading(true);
+    settle();
+    pass(199);
+    assert_eq!(loading_marks(&w).len(), 1);
+    pass(1);
     assert_eq!(loading_marks(&w).len(), 2);
     w.set_remote_loading(false);
+    settle();
     let marks = loading_marks(&w);
     assert_eq!(marks.len(), 1);
     assert!(inside(&marks[0], &this_pc));
     w.set_local_loading(false);
+    settle();
     assert!(loading_marks(&w).is_empty());
+}
+
+/// Polish 6: a listing that is in before 200 ms never shows the mark (so a screen reader says
+/// nothing); one that takes longer shows one mark for as long as it takes, and a listing after it
+/// starts its 200 ms afresh.
+#[test]
+fn polish_6_loading_flashes_nothing_for_a_quick_listing() {
+    let w = window_with_panes(3, 3);
+    // 150 ms: in before the mark would show.
+    w.set_remote_loading(true);
+    settle();
+    pass(150);
+    w.set_remote_loading(false);
+    settle();
+    pass(500);
+    assert!(
+        loading_marks(&w).is_empty(),
+        "the timer was stopped with the listing"
+    );
+
+    // A slow one: the mark is there from 200 ms, once, however long it takes.
+    w.set_remote_loading(true);
+    settle();
+    pass(200);
+    assert_eq!(loading_marks(&w).len(), 1);
+    pass(5_000);
+    assert_eq!(
+        loading_marks(&w).len(),
+        1,
+        "one live region, not one per tick"
+    );
+    w.set_remote_loading(false);
+    settle();
+    assert!(loading_marks(&w).is_empty());
+
+    // The next listing starts from zero: nothing at 199 ms.
+    w.set_remote_loading(true);
+    settle();
+    pass(199);
+    assert!(loading_marks(&w).is_empty());
+    pass(1);
+    assert_eq!(loading_marks(&w).len(), 1);
 }
 
 fn release_chips(w: &AppWindow) -> usize {
