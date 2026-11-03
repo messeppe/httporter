@@ -745,6 +745,17 @@ pub fn disk_full_banner(drive: &str, needed: u64) -> String {
     )
 }
 
+// ---- The Settings window ----
+
+/// Under the bandwidth limit when its number is not a speed above zero.
+pub const BANDWIDTH_INVALID: &str = "Enter a speed above 0 MB/s.";
+/// Under the Proxy row when Custom is chosen and no address is given.
+pub const PROXY_URL_MISSING: &str = "Enter a proxy address such as http://proxy:8080.";
+/// Under the Proxy row when the address has a user name or password in it: settings are stored
+/// in a database that must never hold a secret.
+pub const PROXY_HAS_PASSWORD: &str =
+    "HTTPorter can't store a proxy password yet. Use a proxy without one, or Use Windows settings.";
+
 #[cfg(test)]
 mod tests {
     use super::*;

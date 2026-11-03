@@ -289,7 +289,7 @@ component CheckRow inherits Rectangle {
 
 // A segmented control (mockup `.seg`): one option is chosen. One Tab stop; Left and Right (or Up
 // and Down) move the choice.
-component Segmented inherits Rectangle {
+export component Segmented inherits Rectangle {
     in property <[string]> options;
     // What assistive technology calls the group.
     in property <string> label;

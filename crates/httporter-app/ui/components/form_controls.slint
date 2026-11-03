@@ -17,6 +17,8 @@ export component Field inherits Rectangle {
     in property <string> label;
     in property <string> error;
     in property <InputType> input-type: InputType.text;
+    // False dims the field and takes it out of the Tab order and editing (a limit that is turned off).
+    in property <bool> enabled: true;
     out property <bool> has-focus: input.has-focus;
     callback edited();
     // Return was pressed (not auto-repeat).
@@ -33,6 +35,7 @@ export component Field inherits Rectangle {
     background: Theme.field;
     border-width: 1px;
     border-color: root.error != "" ? Theme.red : Theme.field-border;
+    opacity: root.enabled ? 1 : 0.5;
 
     // Where the text may be drawn: the 9 px inside the border, clipped so that a long value
     // scrolls instead of spilling out.
@@ -85,6 +88,7 @@ export component Field inherits Rectangle {
                 height: 100%;
                 single-line: true;
                 input-type: root.input-type;
+                enabled: root.enabled;
                 vertical-alignment: center;
                 color: Theme.label;
                 font-size: Theme.font-body;
@@ -264,6 +268,8 @@ export component RegionPicker inherits Rectangle {
     in-out property <int> current-index: 0;
     in property <string> label;
     in property <string> error;
+    // Open the list above the picker instead of below it, for one near the bottom of its window.
+    in property <bool> open-up: false;
     out property <bool> has-focus: key-focus.has-focus || popup.is-open;
     // The user chose another region.
     callback selected(int);
@@ -368,7 +374,7 @@ export component RegionPicker inherits Rectangle {
 
     popup := PopupWindow {
         x: 0px;
-        y: root.height + 4px;
+        y: root.open-up ? -self.height - 4px : root.height + 4px;
         width: root.width;
         height: min(root.model.length, 8) * 28px + 8px;
         close-policy: close-on-click-outside;

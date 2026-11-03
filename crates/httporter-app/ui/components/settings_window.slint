@@ -1,0 +1,649 @@
+// The Settings window (mockup `Settings.dc.html`): a window of its own with a row of tabs. Only
+// Transfers has controls in this version; the other tabs show a note, and their buttons stay
+// turned on so that the note can be seen.
+//
+// Every edit applies at once (the window has no OK button): the window tells its owner through
+// `changed()`, and the owner reads the properties back, checks them and shows a message under the
+// field it names (`bandwidth-error`, `proxy-error`). Nothing here knows about `TransferSettings`:
+// the properties hold the form as the user sees it (see `src/settings_view.rs`).
+
+import { ScrollView, Slider } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
+import { ErrorLine, Field, RegionPicker } from "form_controls.slint";
+import { Segmented } from "sheets.slint";
+import { VCenter } from "layout.slint";
+
+// One tab of the row under the title (mockup: a 82 px button with the icon over its name).
+// Reachable with Tab, activated with Space or Return.
+component TabButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> selected;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    width: 82px;
+    height: 54px;
+    border-radius: 8px;
+    background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
+    forward-focus: key-focus;
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    VerticalLayout {
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 3px;
+        alignment: center;
+
+        Image {
+            source: root.icon;
+            colorize: root.selected ? Theme.accent-text : Theme.label2;
+            height: 20px;
+            image-fit: contain;
+            accessible-role: none;
+        }
+        Text {
+            text: root.text;
+            color: Theme.label;
+            font-size: Theme.font-small;
+            font-weight: root.selected ? Theme.weight-semibold : 400;
+            horizontal-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside like the buttons' ring.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A titled block of rows (mockup `.sb-sec` over a `.group`).
+component Section inherits VerticalLayout {
+    in property <string> title;
+
+    spacing: 6px;
+
+    HorizontalLayout {
+        padding-left: 4px;
+
+        Text {
+            text: root.title;
+            color: Theme.label2;
+            font-size: Theme.font-small;
+            font-weight: Theme.weight-semibold;
+        }
+    }
+    @children
+}
+
+// The rounded box around the rows of a section (mockup `.group`).
+component Group inherits Rectangle {
+    background: Theme.content;
+    border-radius: Theme.radius-md;
+    border-width: 0.5px;
+    border-color: Theme.sep-strong;
+
+    VerticalLayout {
+        @children
+    }
+}
+
+// One row of a group (mockup `.group-row`): what the setting is called and, in small type under
+// it, what it does; its controls at the right. `error` is a red line under the explanation.
+component GroupRow inherits Rectangle {
+    in property <string> title;
+    in property <string> help;
+    in property <string> error;
+    // The last row of a group has no line under it.
+    in property <bool> last: false;
+
+    min-height: 44px;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 12px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: root.title;
+                color: Theme.label;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+            }
+            if root.help != "": Text {
+                text: root.help;
+                color: Theme.label2;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
+            }
+            if root.error != "": ErrorLine {
+                text: root.error;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                @children
+            }
+        }
+    }
+
+    if !root.last: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.sep;
+    }
+}
+
+// On/off switch (mockup `.switch`: 38 x 22 px). Space toggles it.
+component Switch inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked: false;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback toggled(bool);
+
+    function toggle() {
+        root.checked = !root.checked;
+        root.toggled(root.checked);
+    }
+
+    width: 38px;
+    height: 22px;
+    border-radius: self.height / 2;
+    background: root.checked ? Theme.accent : Theme.chip;
+    // The off switch is outlined so that it can be seen on the white group (3:1, WCAG 1.4.11).
+    border-width: 1px;
+    border-color: root.checked ? Theme.accent : Theme.field-border;
+    forward-focus: key-focus;
+    accessible-role: switch;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.toggle(); }
+
+    Rectangle {
+        x: root.checked ? 17px : 1px;
+        y: 1px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #0000004d;
+
+        animate x { duration: 120ms; }
+    }
+
+    // Keyboard focus ring, 3 px outside.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.text == Key.Space && !event.repeat) {
+                root.toggle();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.toggle(); }
+    }
+}
+
+// The Transfers tab: the form, as the user sees it. The properties are the window's own (it binds
+// them with `<=>`); the tab only draws them and reports each edit. It is a component of its own
+// because the slider and the segmented control write to their own values when the user moves them,
+// which would cut them off from the form: `changed` handlers here keep them in step when the
+// window, or the other way of changing the value, sets it.
+component TransfersTab inherits Rectangle {
+    in-out property <int> simultaneous;
+    in-out property <bool> adaptive;
+    in-out property <int> retries-index;
+    in-out property <bool> bandwidth-on;
+    in-out property <string> bandwidth-mb;
+    in-out property <int> protocol-index;
+    in-out property <bool> keep-alive;
+    in-out property <int> timeout-index;
+    in-out property <int> proxy-index;
+    in-out property <string> proxy-url;
+    in-out property <bool> verify;
+    in-out property <int> upload-conflicts-index;
+    in-out property <int> download-conflicts-index;
+    in property <string> bandwidth-error;
+    in property <string> proxy-error;
+
+    // Something was edited (see the window's `changed`).
+    callback edited();
+    callback restore-defaults();
+
+    // The options of the drop-downs, in the order the app maps to settings (see `settings_view.rs`).
+    property <[string]> retry-options: [@tr("5 times"), @tr("3 times"), @tr("Never")];
+    property <[string]> protocol-options: [@tr("HTTP/2 when available"), @tr("HTTP/1.1 only")];
+    property <[string]> timeout-options: [@tr("120 seconds"), @tr("60 seconds"), @tr("300 seconds")];
+    property <[string]> proxy-options: [@tr("Use Windows settings"), @tr("No proxy"), @tr("Custom…")];
+    property <[string]> upload-options: [@tr("Uploads: Ask once per batch"), @tr("Uploads: Replace if different"), @tr("Uploads: Skip"), @tr("Uploads: Replace all"), @tr("Uploads: Keep both")];
+    property <[string]> download-options: [@tr("Downloads: Ask once per batch"), @tr("Downloads: Replace if different"), @tr("Downloads: Keep both"), @tr("Downloads: Replace all"), @tr("Downloads: Skip")];
+
+    changed simultaneous => { slider.value = root.simultaneous; }
+    changed bandwidth-on => { bandwidth-mode.current = root.bandwidth-on ? 1 : 0; }
+
+    // Moves the number of simultaneous transfers within 1 to 128 and reports it.
+    function set-simultaneous(value: int) {
+        if (value >= 1 && value <= 128 && value != root.simultaneous) {
+            root.simultaneous = value;
+            root.edited();
+        }
+    }
+
+    ScrollView {
+        VerticalLayout {
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 20px;
+            padding-bottom: 22px;
+            spacing: 18px;
+
+            Section {
+                title: @tr("Speed");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Simultaneous transfers");
+                        help: @tr("Per site. Bunny Storage allows up to 96 from one computer; S3 services up to 128.");
+
+                        slider := Slider {
+                            width: 150px;
+                            minimum: 1;
+                            maximum: 128;
+                            step: 1;
+                            value: root.simultaneous;
+                            accessible-label: @tr("Simultaneous transfers");
+                            changed(value) => { root.set-simultaneous(Math.round(value)); }
+                        }
+                        // Fewer, the number, More (mockup `.tgroup`).
+                        HorizontalLayout {
+                            spacing: 2px;
+
+                            VCenter {
+                                ToolButton {
+                                    icon: Icons.minus;
+                                    label: @tr("Fewer");
+                                    enabled: root.simultaneous > 1;
+                                    clicked => { root.set-simultaneous(root.simultaneous - 1); }
+                                }
+                            }
+                            Text {
+                                min-width: 34px;
+                                text: root.simultaneous;
+                                color: Theme.label;
+                                font-size: Theme.font-body;
+                                font-weight: Theme.weight-semibold;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            VCenter {
+                                ToolButton {
+                                    icon: Icons.plus;
+                                    label: @tr("More");
+                                    enabled: root.simultaneous < 128;
+                                    clicked => { root.set-simultaneous(root.simultaneous + 1); }
+                                }
+                            }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Slow down when a server asks");
+                        help: @tr("On HTTP 429 or 503, halve parallel transfers, then ramp back up.");
+
+                        Switch {
+                            label: @tr("Slow down when a server asks");
+                            checked <=> root.adaptive;
+                            toggled => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Retry failed transfers");
+                        help: @tr("Waits 1, 2, 4, 8 and 10 seconds between attempts.");
+
+                        RegionPicker {
+                            width: 140px;
+                            model: root.retry-options;
+                            label: @tr("Retries");
+                            current-index <=> root.retries-index;
+                            selected => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Bandwidth limit");
+                        help: @tr("Applies to all transfers together.");
+                        error: root.bandwidth-error;
+                        last: true;
+
+                        bandwidth-mode := Segmented {
+                            options: [@tr("Off"), @tr("Limit to")];
+                            label: @tr("Bandwidth limit");
+                            current: root.bandwidth-on ? 1 : 0;
+                            selected(index) => {
+                                root.bandwidth-on = index == 1;
+                                root.edited();
+                            }
+                        }
+                        VCenter {
+                            Field {
+                                width: 90px;
+                                text <=> root.bandwidth-mb;
+                                enabled: root.bandwidth-on;
+                                label: @tr("Limit");
+                                error: root.bandwidth-error;
+                                edited => { root.edited(); }
+                            }
+                        }
+                        VCenter {
+                            Text {
+                                text: @tr("MB/s");
+                                color: root.bandwidth-on ? Theme.label : Theme.label3;
+                                font-size: Theme.font-body;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                title: @tr("HTTP connection");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Protocol");
+                        help: @tr("Every connection is encrypted with TLS 1.2 or newer.");
+
+                        RegionPicker {
+                            width: 200px;
+                            model: root.protocol-options;
+                            label: @tr("HTTP version");
+                            current-index <=> root.protocol-index;
+                            selected => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Keep connections open between files");
+                        help: @tr("Saves a TLS handshake per file. Strongly recommended.");
+
+                        Switch {
+                            label: @tr("Keep connections open");
+                            checked <=> root.keep-alive;
+                            toggled => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Request timeout");
+
+                        RegionPicker {
+                            width: 140px;
+                            model: root.timeout-options;
+                            label: @tr("Request timeout");
+                            current-index <=> root.timeout-index;
+                            selected => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Proxy");
+                        error: root.proxy-error;
+                        last: true;
+
+                        VerticalLayout {
+                            spacing: 6px;
+
+                            RegionPicker {
+                                width: 200px;
+                                open-up: true;
+                                model: root.proxy-options;
+                                label: @tr("Proxy");
+                                current-index <=> root.proxy-index;
+                                selected => { root.edited(); }
+                            }
+                            // The address of a custom proxy. It is applied when finished (Return,
+                            // or leaving the field), not as it is typed: a password typed into it
+                            // must never be saved half way.
+                            if root.proxy-index == 2: Field {
+                                width: 200px;
+                                text <=> root.proxy-url;
+                                placeholder: @tr("http://proxy:8080");
+                                label: @tr("Proxy address");
+                                error: root.proxy-error;
+                                accepted => { root.edited(); }
+                                changed has-focus => {
+                                    if (!self.has-focus) {
+                                        root.edited();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                title: @tr("Integrity and conflicts");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Verify every upload with a checksum");
+                        help: @tr("SHA-256 on Bunny Storage, MD5 on S3-compatible services. The server rejects damaged files.");
+
+                        Switch {
+                            label: @tr("Verify uploads");
+                            checked <=> root.verify;
+                            toggled => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("When a file already exists");
+                        help: @tr("One choice per batch, never one dialog per file.");
+                        last: true;
+
+                        VerticalLayout {
+                            spacing: 6px;
+
+                            RegionPicker {
+                                width: 230px;
+                                open-up: true;
+                                model: root.upload-options;
+                                label: @tr("When uploading");
+                                current-index <=> root.upload-conflicts-index;
+                                selected => { root.edited(); }
+                            }
+                            RegionPicker {
+                                width: 230px;
+                                open-up: true;
+                                model: root.download-options;
+                                label: @tr("When downloading");
+                                current-index <=> root.download-conflicts-index;
+                                selected => { root.edited(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+
+                CapsuleButton {
+                    text: @tr("Restore Defaults");
+                    clicked => { root.restore-defaults(); }
+                }
+            }
+        }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    // The tabs, in order. Only Transfers (2) has controls.
+    property <[string]> tab-names: [@tr("General"), @tr("Sites"), @tr("Transfers"), @tr("Security"), @tr("Publish"), @tr("Advanced")];
+    property <[image]> tab-icons: [Icons.gear, Icons.globe, Icons.updown, Icons.lock, Icons.send, Icons.chip];
+
+    // The tab shown. The window title is its name.
+    in-out property <int> current-tab: 2;
+
+    // The Transfers form, as the user sees it. The app sets these when it opens the window and
+    // when Restore Defaults has been pressed; they change as the user edits. Retries, protocol,
+    // timeout and proxy are positions in their drop-down; the conflict choices are positions in
+    // the upload and download lists, which are in different orders.
+    in-out property <int> simultaneous: 32;
+    in-out property <bool> adaptive: true;
+    in-out property <int> retries-index: 0;
+    in-out property <bool> bandwidth-on: false;
+    in-out property <string> bandwidth-mb: "10";
+    in-out property <int> protocol-index: 0;
+    in-out property <bool> keep-alive: true;
+    in-out property <int> timeout-index: 0;
+    in-out property <int> proxy-index: 0;
+    in-out property <string> proxy-url;
+    in-out property <bool> verify: true;
+    in-out property <int> upload-conflicts-index: 0;
+    in-out property <int> download-conflicts-index: 0;
+    // What is wrong with the bandwidth limit or the proxy address, empty for nothing. Set by the
+    // app after it checks the form.
+    in-out property <string> bandwidth-error;
+    in-out property <string> proxy-error;
+
+    // Something in the form was edited (every edit applies at once, the window has no OK button).
+    // A text field reports its edit as it is typed, except the proxy address, which is reported
+    // when it is finished (Return, or leaving the field): a half-typed address must not be applied.
+    callback changed();
+    callback restore-defaults();
+
+    title: root.tab-names[root.current-tab];
+    default-font-family: Theme.font-family;
+    default-font-size: Theme.font-body;
+    background: Theme.win;
+    preferred-width: 760px;
+    preferred-height: 720px;
+    min-width: 620px;
+    min-height: 420px;
+
+    VerticalLayout {
+        // The title bar's second half: the tabs.
+        Rectangle {
+            background: Theme.chrome;
+            height: 66px;
+            accessible-role: tab-list;
+            accessible-label: @tr("Settings sections");
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 2px;
+                padding-bottom: 10px;
+                spacing: 4px;
+                alignment: center;
+
+                for name[index] in root.tab-names: TabButton {
+                    text: name;
+                    icon: root.tab-icons[index];
+                    selected: index == root.current-tab;
+                    clicked => { root.current-tab = index; }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.sep;
+            }
+        }
+
+        if root.current-tab != 2: Rectangle {
+            vertical-stretch: 1;
+            accessible-role: tab-panel;
+            accessible-label: root.tab-names[root.current-tab];
+
+            Text {
+                text: @tr("These settings arrive in a later version.");
+                color: Theme.label2;
+                font-size: Theme.font-body;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.current-tab == 2: TransfersTab {
+            vertical-stretch: 1;
+            accessible-role: tab-panel;
+            accessible-label: root.tab-names[2];
+            simultaneous <=> root.simultaneous;
+            adaptive <=> root.adaptive;
+            retries-index <=> root.retries-index;
+            bandwidth-on <=> root.bandwidth-on;
+            bandwidth-mb <=> root.bandwidth-mb;
+            protocol-index <=> root.protocol-index;
+            keep-alive <=> root.keep-alive;
+            timeout-index <=> root.timeout-index;
+            proxy-index <=> root.proxy-index;
+            proxy-url <=> root.proxy-url;
+            verify <=> root.verify;
+            upload-conflicts-index <=> root.upload-conflicts-index;
+            download-conflicts-index <=> root.download-conflicts-index;
+            bandwidth-error: root.bandwidth-error;
+            proxy-error: root.proxy-error;
+            edited => { root.changed(); }
+            restore-defaults => { root.restore-defaults(); }
+        }
+    }
+}

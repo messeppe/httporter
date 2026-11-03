@@ -21,6 +21,7 @@ mod format;
 mod local_fs;
 mod selection;
 mod session;
+mod settings_view;
 mod sheets_view;
 mod sort;
 mod viewmodel;
