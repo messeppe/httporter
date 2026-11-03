@@ -47,6 +47,7 @@ Every probe works in its own `probe-<time>-<name>/` folder and deletes it at the
 
 ## Deletes
 
+- **A listing can lag a delete.** In one of five runs, the listing of `gone/` taken right after its only file's `DELETE` had answered still showed that file; in the other four it was `[]`. Listings are not guaranteed to reflect a delete at once, so nothing should treat "not listed yet" as a failed delete, or a listing right after a delete as proof.
 - **A missing file or folder:** `DELETE` answers `404 {"HttpCode":404,"Message":"Object Not Found"}`; the client says `NotFound`. A `GET` of a missing file is the same 404.
 - **A folder `DELETE` is recursive and answers only when the whole subtree is gone:** `200 {"HttpCode":200,"Message":"Directory deleted successfully."}`. It is slow: 1,050 small files took **128 s** (about 8 files/s).
 - **Bunny goes on deleting after the client gives up.** With a 10 s client timeout, the folder held 924, then 840, then 594 files at 0, 10 and 20 s afterwards; a second `DELETE` finished the rest in 65 s.

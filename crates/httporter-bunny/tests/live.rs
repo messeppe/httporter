@@ -412,6 +412,25 @@ impl Answer {
         format!("{} {}", self.status.as_u16(), self.text())
     }
 
+    /// A listing answer as its status and the names in it, never the objects themselves (they
+    /// carry `UserId`, which names the account). Anything that is not a JSON array is shown as
+    /// [`Self::summary`] does.
+    fn listing_summary(&self) -> String {
+        match self.json() {
+            Some(Value::Array(objects)) => format!(
+                "{} array of {} [{}]",
+                self.status.as_u16(),
+                objects.len(),
+                objects
+                    .iter()
+                    .map(|object| object["ObjectName"].as_str().unwrap_or("?"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => self.summary(),
+        }
+    }
+
     fn json(&self) -> Option<Value> {
         serde_json::from_slice(&self.body).ok()
     }
@@ -581,7 +600,10 @@ async fn b1_put_folder_with_trailing_slash() {
         let inside = live.storage.list(&empty).await;
         live.observe("B1 listing the new folder", live.listed(&inside));
         let raw_inside = live.raw_listing(&empty).await;
-        live.observe("B1 raw listing of the new folder", raw_inside.summary());
+        live.observe(
+            "B1 raw listing of the new folder",
+            raw_inside.listing_summary(),
+        );
 
         // Several levels at once.
         let nested = live.path("n1/n2");
@@ -676,7 +698,7 @@ async fn missing_folder_404_or_empty_array() {
         let never = live.raw_listing(&live.path("never")).await;
         live.observe(
             "missing: listing a folder whose parent is missing too",
-            never.summary(),
+            never.listing_summary(),
         );
         let client = live.storage.list(&live.path("never")).await;
         live.observe("missing: the client says", live.listed(&client));
@@ -685,7 +707,11 @@ async fn missing_folder_404_or_empty_array() {
         let nope = live.raw_listing(&live.path("nope")).await;
         live.observe(
             "missing: listing a missing folder in an existing one",
-            format!("{} [headers: {}]", nope.summary(), nope.header_names()),
+            format!(
+                "{} [headers: {}]",
+                nope.listing_summary(),
+                nope.header_names()
+            ),
         );
         let client = live.storage.list(&live.path("nope")).await;
         live.observe("missing: the client says", live.listed(&client));
@@ -693,7 +719,7 @@ async fn missing_folder_404_or_empty_array() {
         let file_as_folder = live.raw_listing(&live.path("f.txt")).await;
         live.observe(
             "missing: listing a file as a folder",
-            file_as_folder.summary(),
+            file_as_folder.listing_summary(),
         );
 
         // A folder whose last file goes.
@@ -708,7 +734,7 @@ async fn missing_folder_404_or_empty_array() {
         let emptied = live.raw_listing(&live.path("gone")).await;
         live.observe(
             "missing: raw listing of the emptied folder",
-            emptied.summary(),
+            emptied.listing_summary(),
         );
 
         // The shape of a listing that has something in it.
