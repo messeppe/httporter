@@ -272,6 +272,14 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets the setting stored under `key`. Removing a key that is not stored is not an
+    /// error.
+    pub fn remove_setting(&self, key: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     /// Inserts an account. Fails if an account with the same id already exists.
     pub fn add_account(&self, account: &AccountRecord) -> Result<(), StoreError> {
         self.conn.execute(

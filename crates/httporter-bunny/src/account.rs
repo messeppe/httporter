@@ -14,7 +14,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use httporter_core::{ProviderError, ProxyMode};
+use httporter_core::{HttpProtocol, ProviderError, ProxyMode, TransferSettings};
 use reqwest::header::{ACCEPT, HeaderValue};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -30,6 +30,16 @@ const API_BASE: &str = "https://api.bunny.net";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// A pull zone's `OriginType` when its origin is a storage zone.
 const ORIGIN_TYPE_STORAGE_ZONE: i64 = 2;
+
+/// HTTP/2 when offered, kept-alive connections and the Windows proxy: how [`BunnyAccount::new`]
+/// connects.
+fn system_connections() -> Connections {
+    Connections {
+        http1_only: false,
+        keep_alive: true,
+        proxy: ProxyMode::System,
+    }
+}
 
 /// A client for the Bunny account API.
 pub struct BunnyAccount {
@@ -47,16 +57,39 @@ impl BunnyAccount {
         Self::build(api_key, None, REQUEST_TIMEOUT)
     }
 
+    /// A client for `https://api.bunny.net` that connects as the user's Transfers settings say:
+    /// their proxy (Ruling Q41), protocol and keep-alive. Whitespace around the key is ignored,
+    /// as for [`Self::new`].
+    pub fn with_settings(api_key: String, s: &TransferSettings) -> Result<Self, ProviderError> {
+        let connections = Connections {
+            http1_only: s.protocol == HttpProtocol::Http1Only,
+            keep_alive: s.keep_alive,
+            proxy: s.proxy.clone(),
+        };
+        Self::build_with(api_key, None, REQUEST_TIMEOUT, connections)
+    }
+
     /// A client for another endpoint, for tests and local servers. Such an endpoint is never
     /// reached through the Windows proxy (Ruling P15).
     pub fn with_base_url(api_key: String, base_url: String) -> Result<Self, ProviderError> {
         Self::build(api_key, Some(base_url), REQUEST_TIMEOUT)
     }
 
+    /// A client that connects as [`Self::new`] does (the Windows proxy, unless `base_url` is
+    /// given).
     fn build(
         api_key: String,
         base_url: Option<String>,
         timeout: Duration,
+    ) -> Result<Self, ProviderError> {
+        Self::build_with(api_key, base_url, timeout, system_connections())
+    }
+
+    fn build_with(
+        api_key: String,
+        base_url: Option<String>,
+        timeout: Duration,
+        connections: Connections,
     ) -> Result<Self, ProviderError> {
         // The message must not repeat the key.
         let mut api_key = HeaderValue::from_str(api_key.trim()).map_err(|_| {
@@ -65,9 +98,8 @@ impl BunnyAccount {
         api_key.set_sensitive(true);
 
         let connections = Connections {
-            http1_only: false,
-            keep_alive: true,
-            proxy: effective_proxy(&ProxyMode::System, base_url.as_deref()),
+            proxy: effective_proxy(&connections.proxy, base_url.as_deref()),
+            ..connections
         };
         // Two requests, one after the other, to one host.
         let client = build_client(&connections, 2, Some(timeout))?;

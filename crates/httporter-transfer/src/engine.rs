@@ -543,6 +543,58 @@ impl Engine {
         self.inner.poke();
     }
 
+    /// Whether `site` is stopped by an auth failure (its jobs wait for [`Self::resume_site`]).
+    pub fn is_auth_stopped(&self, site: &SiteId) -> bool {
+        let st = self.inner.lock();
+        st.lane_of
+            .get(site)
+            .is_some_and(|&lane| st.lanes[lane].state == LaneState::AuthStopped)
+    }
+
+    /// The site the sign-in banner is about: the first one stopped by an auth failure that still
+    /// has work (the one [`EngineState::AuthStopped`] names).
+    pub fn auth_stopped_site(&self) -> Option<SiteId> {
+        let st = self.inner.lock();
+        let lane = st
+            .lanes
+            .iter()
+            .position(|lane| lane.state == LaneState::AuthStopped && lane.has_work())?;
+        st.lane_of
+            .iter()
+            .find(|&(_, &index)| index == lane)
+            .map(|(site, _)| site.clone())
+    }
+
+    /// Cancels everything of `site` not yet done: its queued, paused, running and failed jobs
+    /// (the site is being removed). The other sites carry on.
+    pub fn cancel_site(&self, site: &SiteId) {
+        {
+            let mut guard = self.inner.lock();
+            let st = &mut *guard;
+            let Some(&lane) = st.lane_of.get(site) else {
+                return;
+            };
+            let queued: Vec<JobId> = st.lanes[lane].queue.drain(..).collect();
+            st.lanes[lane].paused = 0;
+            for id in queued {
+                st.mark_cancelled(id, &self.inner.writer);
+            }
+            let failed: Vec<JobId> = st
+                .failed
+                .iter()
+                .copied()
+                .filter(|&id| st.jobs.get(id).is_some_and(|entry| entry.lane == lane))
+                .collect();
+            for id in failed {
+                st.mark_cancelled(id, &self.inner.writer);
+            }
+            for (&unit, active) in &st.lanes[lane].units {
+                interrupt(&mut st.jobs, unit, active, Stop::Cancel);
+            }
+        }
+        self.inner.poke();
+    }
+
     /// What the drawer shows now. Costs the same however many jobs there are: the lists are
     /// windows of at most [`WINDOW`] jobs and the totals are kept as jobs change.
     pub fn snapshot(&self) -> EngineSnapshot {
