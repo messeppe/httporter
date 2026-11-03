@@ -928,6 +928,12 @@ async fn discard_journal_clears_unfinished() {
         .unwrap();
     assert_eq!(engine.unfinished_count(), 2);
     engine.discard_journal(&only_site(mock.clone()));
+    // Those go through the journal writer, in chunks, which closing waits for (review N2).
+    assert!(engine.pending_writes() > 0);
+    wait_for(&engine, "the discards to be written", |_| {
+        engine.pending_writes() == 0
+    })
+    .await;
     assert_eq!(engine.unfinished_count(), 0);
     let unfinished = journal.unfinished().unwrap();
     assert_eq!(unfinished.len(), 2);

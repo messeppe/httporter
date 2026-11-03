@@ -820,22 +820,34 @@ impl Transfers {
 
     /// `site` is being removed (Ruling Q23): its transfers are cancelled, and its records leave
     /// the journal (the unfinished ones a crash left too). The uploads it had left in parts are
-    /// given up with its client (ruling Q49), so this runs before its password goes. The resume
-    /// banner then counts what is left. Blocks (the journal, the site's client): call it off the
-    /// UI thread.
+    /// given up with its client (ruling Q49), so this runs before its password goes. Blocks (the
+    /// journal, the site's client): call it off the UI thread.
+    ///
+    /// It returns as soon as the cancels are queued for the engine's journal writer, which
+    /// closing waits for (review N2), so the site leaves the sidebar at once. Once the site's
+    /// transfers have stopped and the journal has their cancels, the cancelled records go and
+    /// the resume banner counts what is left.
     pub fn forget_site(self: &Arc<Self>, site: &SiteId) {
         let provider = self.engine.site_provider(site).or_else(|| {
             let record = self.session.site(site)?;
             self.session.hub().provider(&record).ok()
         });
         self.engine.forget_site(site, provider);
-        // The cancelled records go, with the other finished ones (as at every start).
-        let _ = self.journal.clear_finished();
-        let again = self.clone();
-        let _ = self
-            .link
-            .ui()
-            .upgrade_in_event_loop(move |ui| again.offer_resume(&ui));
+        let this = self.clone();
+        let site = site.clone();
+        self.link.rt().spawn_blocking(move || {
+            let deadline = Instant::now() + SETTLE_FOR;
+            wait_until(deadline, || !this.engine.site_has_work(&site));
+            let mark = this.engine.journal_mark();
+            wait_until(deadline, || this.engine.journal_reached(mark));
+            // The cancelled records go, with the other finished ones (as at every start).
+            let _ = this.journal.clear_finished();
+            let again = this.clone();
+            let _ = this
+                .link
+                .ui()
+                .upgrade_in_event_loop(move |ui| again.offer_resume(&ui));
+        });
     }
 
     /// Discard on the resume banner. The uploads left in parts are given up on their sites

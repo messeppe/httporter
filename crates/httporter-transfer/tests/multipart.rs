@@ -15,8 +15,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use httporter_core::{
     ByteStream, Capabilities, EngineSnapshot, FileStamp, Job, JobRecord, JobState, Journal,
-    Listing, MemoryJournal, MockProvider, MultipartProgress, ProviderError, RemotePath, SiteId,
-    StorageProvider, TransferSettings, UploadOptions, UploadSource,
+    JournalError, JournalUpdate, Listing, MemoryJournal, MockProvider, MultipartProgress,
+    ProviderError, RemotePath, SiteId, StorageProvider, TransferSettings, UploadOptions,
+    UploadSource,
 };
 use httporter_transfer::{Batch, Engine, SiteInfo};
 use tokio::time::Instant;
@@ -451,6 +452,95 @@ async fn forgetting_a_site_aborts_the_uploads_left_for_it() {
     wait_idle(&b).await;
     assert_eq!(service.aborted(), [(p(OBJECT), "u-1".to_owned())]);
     assert_eq!(journal.records()[0].state, JobState::Cancelled);
+    assert_eq!(b.unfinished_count(), 0);
+}
+
+/// A journal over `records` that counts the Cancelled states written for each record, one at a
+/// time or together.
+struct CountingCancels {
+    records: Arc<MemoryJournal>,
+    cancels: Mutex<HashMap<i64, usize>>,
+}
+
+impl CountingCancels {
+    fn new(records: Arc<MemoryJournal>) -> Arc<Self> {
+        Arc::new(Self {
+            records,
+            cancels: Mutex::default(),
+        })
+    }
+
+    fn note(&self, id: i64, state: JobState) {
+        if state == JobState::Cancelled {
+            *self.cancels.lock().unwrap().entry(id).or_default() += 1;
+        }
+    }
+
+    fn cancels(&self, id: i64) -> usize {
+        self.cancels.lock().unwrap().get(&id).copied().unwrap_or(0)
+    }
+}
+
+impl Journal for CountingCancels {
+    fn insert(&self, records: &mut [JobRecord]) -> Result<(), JournalError> {
+        self.records.insert(records)
+    }
+    fn set_state(&self, id: i64, state: JobState, error: Option<&str>) -> Result<(), JournalError> {
+        self.note(id, state);
+        self.records.set_state(id, state, error)
+    }
+    fn set_multipart(&self, id: i64, mp: Option<&MultipartProgress>) -> Result<(), JournalError> {
+        self.records.set_multipart(id, mp)
+    }
+    fn apply(&self, updates: &[JournalUpdate]) -> Result<(), JournalError> {
+        for update in updates {
+            if let JournalUpdate::State { id, state, .. } = update {
+                self.note(*id, *state);
+            }
+        }
+        self.records.apply(updates)
+    }
+    fn unfinished(&self) -> Result<Vec<JobRecord>, JournalError> {
+        self.records.unfinished()
+    }
+    fn clear_finished(&self) -> Result<(), JournalError> {
+        self.records.clear_finished()
+    }
+    fn discard_unfinished(&self) -> Result<(), JournalError> {
+        self.records.discard_unfinished()
+    }
+}
+
+/// Review N2: removing a site whose upload the engine holds (resumed, waiting in the queue)
+/// gives it up once and writes its cancel once. The engine's own cancel does both; the site's
+/// records it doesn't hold are the only ones `forget_site` writes and gives up itself.
+#[tokio::test(start_paused = true)]
+async fn forgetting_a_site_gives_up_a_held_upload_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, job) = big_file(dir.path());
+    let journal = Arc::new(MemoryJournal::new());
+    let service = PartsSite::new();
+    crash_after(&journal, &service, job, 3).await;
+
+    let counting = CountingCancels::new(journal.clone());
+    let b = engine_on(counting.clone());
+    b.pause_all();
+    assert_eq!(b.resume_from_journal(&only_site(service.clone())), 1);
+    let storage: Arc<dyn StorageProvider> = service.clone();
+    b.forget_site(&site(), Some(storage));
+    let mark = b.journal_mark();
+    assert!(!b.journal_reached(mark), "the cancel is on its way");
+    wait_idle(&b).await;
+    assert!(b.journal_reached(mark));
+    assert!(!b.site_has_work(&site()));
+    assert_eq!(
+        service.aborted(),
+        [(p(OBJECT), "u-1".to_owned())],
+        "given up once"
+    );
+    let record = journal.records()[0].clone();
+    assert_eq!(record.state, JobState::Cancelled);
+    assert_eq!(counting.cancels(record.id), 1, "written once");
     assert_eq!(b.unfinished_count(), 0);
 }
 

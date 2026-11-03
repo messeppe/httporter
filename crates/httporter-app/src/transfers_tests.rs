@@ -768,14 +768,15 @@ fn removing_a_site_cancels_its_transfers() {
     wait_for("its transfers to stop", || {
         (!b.t.engine.is_busy()).then_some(())
     });
+    // They are cancelled through the journal writer, then cleared (review N2).
     wait_for("its journal records to go", || {
-        b.journal.unfinished().unwrap().is_empty().then_some(())
+        b.journal
+            .records()
+            .iter()
+            .all(|record| record.site != site)
+            .then_some(())
     });
-    assert!(
-        b.journal.records().iter().all(|record| record.site != site),
-        "{:?}",
-        b.journal.records()
-    );
+    assert!(b.journal.unfinished().unwrap().is_empty());
     assert_eq!(b.t.engine.unfinished_count(), 0);
     assert_eq!(b.stored("big.bin"), None, "nothing reached the storage");
     let secret = httporter_platform::CredentialStore::get(
@@ -1226,6 +1227,60 @@ fn cancel_and_quit_leaves_nothing_in_a_real_journal() {
     b.t.finish();
     assert!(!b.t.engine.is_busy());
     assert_eq!(journal.unfinished().unwrap().len(), 0, "nothing to resume");
+    assert_eq!(
+        b.mock.calls(MockOp::DeleteBatch) + b.mock.calls(MockOp::DeleteFile),
+        0
+    );
+}
+
+/// Review N2: removing a site that a crash left 10,000 transfers for, on the real journal,
+/// returns at once, so the site leaves the sidebar at once: its records are cancelled through
+/// the engine's writer, in chunks of one transaction each (which closing waits for), not with a
+/// disk sync each (about 9 s for 13,793). They all reach the journal; another site's stay.
+#[test]
+fn forgetting_a_site_with_a_big_journal_returns_at_once() {
+    let data = tempfile::tempdir().unwrap();
+    let journal =
+        Arc::new(httporter_platform::SqliteJournal::open(&data.path().join("journal.db")).unwrap());
+    let crashed: BeforeInstall<'_, httporter_platform::SqliteJournal> = &|sites, _, journal| {
+        let record = |site: &SiteRecord, name: String| JobRecord {
+            id: 0,
+            batch: "left-by-a-crash".into(),
+            site: site.id.clone(),
+            job: Job::Delete {
+                remote: rp(&name),
+                folder: false,
+            },
+            state: JobState::Queued,
+            error: None,
+            multipart: None,
+        };
+        let mut records: Vec<JobRecord> = (0..10_000)
+            .map(|i| record(&sites[0], format!("f{i}.txt")))
+            .collect();
+        records.push(record(&sites[1], "kept.txt".into()));
+        journal.insert(&mut records).unwrap();
+    };
+    let b = bed_on(
+        MockProvider::new(bunny_like()),
+        &["testzone", "zone-b"],
+        crashed,
+        journal.clone(),
+    );
+    assert_eq!(b.t.engine.unfinished_count(), 10_001);
+
+    let started = Instant::now();
+    b.t.forget_site(&b.sites[0].id);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(1), "took {took:?}");
+
+    wait_for("the cancels to reach the journal", || {
+        (b.t.engine.pending_writes() == 0).then_some(())
+    });
+    let left = journal.unfinished().unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].site, b.sites[1].id);
+    assert_eq!(b.t.engine.unfinished_count(), 1);
     assert_eq!(
         b.mock.calls(MockOp::DeleteBatch) + b.mock.calls(MockOp::DeleteFile),
         0

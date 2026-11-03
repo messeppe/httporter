@@ -20,7 +20,7 @@
 //! ([`StorageProvider::abort_multipart`]) by a task the app waits for as it closes
 //! ([`Engine::pending_aborts`]), so its stored parts aren't left to be billed.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -269,6 +269,19 @@ impl Slab {
         let slot = self.index.remove(&id)?;
         self.free.push(slot);
         self.slots[slot].take()
+    }
+
+    /// The ids of every job on `lane`, whatever its status.
+    fn on_lane(&self, lane: usize) -> HashSet<JobId> {
+        self.index
+            .iter()
+            .filter(|&(_, &slot)| {
+                self.slots[slot]
+                    .as_ref()
+                    .is_some_and(|entry| entry.lane == lane)
+            })
+            .map(|(&id, _)| id)
+            .collect()
     }
 }
 
@@ -724,12 +737,19 @@ impl Engine {
     /// Cancels everything of `site` not yet done: its queued, paused, running and failed jobs
     /// (the site is being removed). The other sites carry on.
     pub fn cancel_site(&self, site: &SiteId) {
-        {
+        self.cancel_site_held(site);
+    }
+
+    /// As [`Self::cancel_site`]; returns the ids of every job of the site the engine held, done
+    /// ones included: their records are the engine's to write.
+    fn cancel_site_held(&self, site: &SiteId) -> HashSet<JobId> {
+        let held = {
             let mut guard = self.inner.lock();
             let st = &mut *guard;
             let Some(&lane) = st.lane_of.get(site) else {
-                return;
+                return HashSet::new();
             };
+            let held = st.jobs.on_lane(lane);
             let queued: Vec<JobId> = st.lanes[lane].queue.drain(..).collect();
             st.lanes[lane].paused = 0;
             for id in queued {
@@ -747,17 +767,24 @@ impl Engine {
             for (&unit, active) in &st.lanes[lane].units {
                 interrupt(&mut st.jobs, unit, active, Stop::Cancel);
             }
-        }
+            held
+        };
         self.inner.poke();
+        held
     }
 
     /// The site is being removed: cancels everything of it (as [`Self::cancel_site`]), and marks
-    /// every unfinished journal record of it Cancelled at once, those a crash left included. The
-    /// multipart uploads of those left by a crash are given up through `provider` when there is
-    /// one (ruling Q49; the engine's own are given up as they are cancelled). Reads and writes
-    /// the journal: call it off the UI thread.
+    /// every other unfinished journal record of it Cancelled, those a crash left. The multipart
+    /// uploads among those are given up through `provider` when there is one (ruling Q49).
+    ///
+    /// The jobs the engine held are left to its own cancel, which writes each record once and
+    /// gives up each upload once (review N2). The others are written through the journal writer
+    /// too, in chunks of one transaction each, so this returns at once however many there are
+    /// (one disk sync per record took about 9 s for 13,793), and closing waits for them
+    /// ([`Self::pending_writes`]), as for the aborts ([`Self::pending_aborts`]). Reads the
+    /// journal: call it off the UI thread.
     pub fn forget_site(&self, site: &SiteId, provider: Option<Arc<dyn StorageProvider>>) {
-        self.cancel_site(site);
+        let held = self.cancel_site_held(site);
         let records = match self.inner.journal.unfinished() {
             Ok(records) => records,
             Err(_) => {
@@ -766,30 +793,21 @@ impl Engine {
                 return;
             }
         };
-        let left: Vec<(JobRecord, bool)> = {
+        {
             let st = self.inner.lock();
-            records
-                .into_iter()
-                .filter(|record| record.site == *site)
-                .map(|record| {
-                    let held = job_id(record.id).is_some_and(|id| st.jobs.get(id).is_some());
-                    (record, held)
-                })
-                .collect()
-        };
-        for (record, held) in &left {
-            if let (Some(provider), false) = (&provider, held) {
-                self.inner
-                    .aborts
-                    .give_up(provider, &record.job, record.multipart.as_ref());
-            }
-            if self
-                .inner
-                .journal
-                .set_state(record.id, JobState::Cancelled, None)
-                .is_err()
-            {
-                self.inner.writer.count_error();
+            for record in records.iter().filter(|record| record.site == *site) {
+                let Some(id) = job_id(record.id) else {
+                    continue;
+                };
+                if held.contains(&id) || st.jobs.get(id).is_some() {
+                    continue;
+                }
+                if let Some(provider) = &provider {
+                    self.inner
+                        .aborts
+                        .give_up(provider, &record.job, record.multipart.as_ref());
+                }
+                self.inner.writer.set_state(id, JobState::Cancelled, None);
             }
         }
         self.inner.bump();
@@ -980,6 +998,10 @@ impl Engine {
     /// resume them. The jobs this engine holds stay journalled. The multipart uploads among the
     /// dropped ones are given up on their sites, through the clients `lookup` gives (ruling
     /// Q49); a site it doesn't know keeps them.
+    ///
+    /// While the engine holds unfinished jobs, the others are marked Cancelled through the
+    /// journal writer, in chunks (review N2), which closing waits for; otherwise every
+    /// unfinished record goes in one statement.
     pub fn discard_journal(&self, lookup: SiteLookup<'_>) {
         let holds_unfinished = {
             let st = self.inner.lock();
@@ -1016,17 +1038,37 @@ impl Engine {
                     .give_up(provider, &record.job, record.multipart.as_ref());
             }
         }
-        let result = if holds_unfinished {
-            others
-                .iter()
-                .try_for_each(|record| journal.set_state(record.id, JobState::Cancelled, None))
-        } else {
-            journal.discard_unfinished()
-        };
-        if result.is_err() {
+        if holds_unfinished {
+            let st = self.inner.lock();
+            for id in others.iter().filter_map(|record| job_id(record.id)) {
+                if st.jobs.get(id).is_none() {
+                    self.inner.writer.set_state(id, JobState::Cancelled, None);
+                }
+            }
+        } else if journal.discard_unfinished().is_err() {
             self.inner.writer.count_error();
         }
         self.inner.bump();
+    }
+
+    /// Whether `site` has transfers queued (paused ones too) or running.
+    pub fn site_has_work(&self, site: &SiteId) -> bool {
+        let st = self.inner.lock();
+        st.lane_of
+            .get(site)
+            .is_some_and(|&lane| st.lanes[lane].has_work())
+    }
+
+    /// A mark for the journal updates queued so far, for [`Self::journal_reached`].
+    pub fn journal_mark(&self) -> u64 {
+        self.inner.writer.queued()
+    }
+
+    /// Whether every journal update queued before `mark` was taken has been written, or has
+    /// failed (counted in the snapshot's `journal_errors`): the journal then shows the changes
+    /// made until then (review N2: what the resume banner counts after a site is removed).
+    pub fn journal_reached(&self, mark: u64) -> bool {
+        self.inner.writer.dealt_with() >= mark
     }
 }
 
@@ -2102,6 +2144,11 @@ struct JournalWriter {
     tx: mpsc::UnboundedSender<JournalUpdate>,
     pending: Arc<AtomicUsize>,
     errors: Arc<AtomicU64>,
+    /// Updates queued since the engine started, and how many of them the task has dealt with
+    /// (written, or counted as failed). They are dealt with in the order they were queued, so a
+    /// mark taken from the first is reached once the second gets to it.
+    queued: AtomicU64,
+    dealt_with: Arc<AtomicU64>,
 }
 
 impl JournalWriter {
@@ -2109,17 +2156,21 @@ impl JournalWriter {
         let (tx, rx) = mpsc::unbounded_channel();
         let pending = Arc::new(AtomicUsize::new(0));
         let errors = Arc::new(AtomicU64::new(0));
+        let dealt_with = Arc::new(AtomicU64::new(0));
         rt.spawn(write_journal(
             rx,
             journal,
             pending.clone(),
             errors.clone(),
+            dealt_with.clone(),
             changes,
         ));
         Self {
             tx,
             pending,
             errors,
+            queued: AtomicU64::new(0),
+            dealt_with,
         }
     }
 
@@ -2142,9 +2193,11 @@ impl JournalWriter {
     }
 
     fn send(&self, write: JournalUpdate) {
+        self.queued.fetch_add(1, Ordering::SeqCst);
         self.pending.fetch_add(1, Ordering::SeqCst);
         if self.tx.send(write).is_err() {
             self.pending.fetch_sub(1, Ordering::SeqCst);
+            self.dealt_with.fetch_add(1, Ordering::SeqCst);
             self.count_error();
         }
     }
@@ -2152,6 +2205,16 @@ impl JournalWriter {
     /// Updates queued and not yet written.
     fn pending(&self) -> usize {
         self.pending.load(Ordering::SeqCst)
+    }
+
+    /// Updates queued since the engine started.
+    fn queued(&self) -> u64 {
+        self.queued.load(Ordering::SeqCst)
+    }
+
+    /// Updates written, or failed, since the engine started.
+    fn dealt_with(&self) -> u64 {
+        self.dealt_with.load(Ordering::SeqCst)
     }
 
     /// A journal read or write failed.
@@ -2178,6 +2241,7 @@ async fn write_journal(
     journal: Arc<dyn Journal>,
     pending: Arc<AtomicUsize>,
     errors: Arc<AtomicU64>,
+    dealt_with: Arc<AtomicU64>,
     changes: Arc<watch::Sender<u64>>,
 ) {
     while let Some(first) = rx.recv().await {
@@ -2196,6 +2260,7 @@ async fn write_journal(
         if !written {
             errors.fetch_add(n as u64, Ordering::SeqCst);
         }
+        dealt_with.fetch_add(n as u64, Ordering::SeqCst);
         pending.fetch_sub(n, Ordering::SeqCst);
         changes.send_modify(|n| *n = n.wrapping_add(1));
     }
