@@ -283,7 +283,10 @@ export component AddSiteSheet inherits Rectangle {
     in property <bool> v2-ready: false;
     // The sheet changes a saved site: Edit Site and Save, and a secret left empty is kept.
     in property <bool> editing: false;
-    // What the fields start with (editing or duplicating a site).
+    // Import found the secret (a .env file's password, an AWS profile's secret key): the app holds
+    // it, and uses it when the secret field is left empty.
+    in property <bool> secret-imported: false;
+    // What the fields start with (editing a site, or what Import found).
     in property <SiteDraft> draft;
 
     // The zones of the account after Find Zones, which of them are ticked (one entry per zone) and
@@ -678,7 +681,7 @@ export component AddSiteSheet inherits Rectangle {
                                 label: @tr("Password");
                                 show-label: @tr("Show password");
                                 hide-label: @tr("Hide password");
-                                placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : "";
+                                placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : (root.secret-imported ? @tr("Imported. Leave empty to use it.") : "");
                                 error: root.password-error;
                                 edited => {
                                     root.password-error = "";
@@ -1013,7 +1016,7 @@ export component AddSiteSheet inherits Rectangle {
                                     label: @tr("Secret access key");
                                     show-label: @tr("Show secret access key");
                                     hide-label: @tr("Hide secret access key");
-                                    placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : "";
+                                    placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : (root.secret-imported ? @tr("Imported. Leave empty to use it.") : "");
                                     error: root.s3-errors.secret;
                                     edited => {
                                         root.s3-errors.secret = "";

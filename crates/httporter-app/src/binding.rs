@@ -17,26 +17,34 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use httporter_bunny::REGIONS;
+use httporter_bunny::{REGIONS, ZoneList};
 use httporter_core::{Journal, RemotePath, S3Preset, SiteId, SiteRecord};
+use httporter_platform::win;
 use httporter_transfer::Engine;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
-use crate::add_site::{AddSiteForm, ValidSite, show_field_error};
+#[cfg(test)]
+use crate::add_site::ValidSite;
+use crate::add_site::{
+    SiteForm, draft_for, field_blamed, show_buckets, show_form_errors, show_zones, validate,
+};
 use crate::copy;
+use crate::import::{AwsProfile, aws_draft, env_draft, read_aws_profiles, read_env_file};
 use crate::selection::{ActivePane, Selection, ToolbarInputs, ToolbarState, toolbar_state};
 use crate::session::{
-    LocalView, RemoteView, Session, SiteItemData, SiteProvider, Ticket, endpoint_preview,
+    LocalView, RemoteView, Session, SiteItemData, SiteProvider, TestResult, Ticket,
+    endpoint_preview,
 };
+use crate::sheets_view;
 use crate::sort::SortKey;
 use crate::transfers::Transfers;
 use crate::viewmodel::{RowData, sort_key_for_column, to_slint_rows};
-use crate::{AppWindow, FileRow, ProviderTile, SiteItem};
+use crate::{AppWindow, FileRow, ProviderTile, SiteDraft, SiteItem};
 
 /// What a view changes: a new listing replaces the rows; a refresh replaces them with the same
 /// folder's (so the selected row stays, found by name); a new sort only reorders them; a loading
@@ -233,12 +241,47 @@ struct Ctx {
     /// The site the cloud pane is opening, while it is on its way.
     opening: Slot,
     sheet: Slot,
+    /// Choose…'s bucket listing, which a newer one replaces.
+    buckets: Slot,
     /// Counts the sheet's tests and saves, and its cancels. A result is shown only while its run
     /// is the latest, so a test that finishes after a cancel (or after the sheet reopened) is
     /// dropped.
     sheet_run: Arc<AtomicU64>,
+    /// What the sheets know that the window does not show (see [`SheetState`]).
+    sheet_state: Arc<Mutex<SheetState>>,
+    /// The `.env` file picker is open (it has no owner window: a second click is ignored).
+    picking_env: Arc<AtomicBool>,
     /// The transfer engine and what it is waiting for; `None` in the window's tests.
     transfers: Option<Arc<Transfers>>,
+}
+
+/// What the Add Site and Import sheets and the Remove Site alert work with that the window does
+/// not hold: secrets above all, which never go into a window property. Kept only while a sheet
+/// needs them, and dropped when it closes.
+#[derive(Default)]
+struct SheetState {
+    /// Edit Site: the site the sheet changes.
+    editing: Option<SiteId>,
+    /// The secret Import found (a `.env` password, an AWS profile's secret access key): used when
+    /// the sheet's secret field is left empty.
+    imported: Option<String>,
+    /// What the last Find Zones found, and the account key it used.
+    zones: Option<ZoneList>,
+    account_key: Option<String>,
+    /// The AWS profiles the Import sheet lists, in its order.
+    profiles: Vec<AwsProfile>,
+    /// The site the Remove Site alert asks about.
+    removing: Option<SiteId>,
+}
+
+impl SheetState {
+    /// The sheet closed: what it knew is let go.
+    fn forget_sheet(&mut self) {
+        self.editing = None;
+        self.imported = None;
+        self.zones = None;
+        self.account_key = None;
+    }
 }
 
 /// What the tasks need to show their results: the window, the panes' bookkeeping and the session.
@@ -498,11 +541,34 @@ impl Ctx {
         self.sheet_run.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    fn test_site(&self, form: AddSiteForm) {
-        let Some(ui) = self.ui.upgrade() else { return };
-        let Some(site) = validated(&ui, &form) else {
-            return;
+    /// The sheet's form with the secret Import found in its empty secret field, and the site it
+    /// edits.
+    fn complete(&self, form: SiteForm) -> (SiteForm, Option<SiteId>) {
+        let state = lock(&self.sheet_state);
+        let form = match &state.imported {
+            Some(secret) => form.or_secret(secret),
+            None => form,
         };
+        (form, state.editing.clone())
+    }
+
+    /// Checks the sheet's form: shows every problem under its field (and returns false) or
+    /// clears them. While editing, a secret left empty is no problem: the saved one is kept.
+    fn checked(&self, ui: &AppWindow, form: &SiteForm, editing: bool) -> bool {
+        let problems = validate(form, editing).err().unwrap_or_default();
+        show_form_errors(ui, matches!(form, SiteForm::S3 { .. }), &problems);
+        problems.is_empty()
+    }
+
+    /// Test Connection, for a Bunny zone or an S3 bucket: lists the root the form describes,
+    /// signed in with its secret (the saved one while editing, if left empty).
+    fn test_form(&self, form: SiteForm, name: String) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let (form, editing) = self.complete(form);
+        if !self.checked(&ui, &form, editing.is_some()) {
+            return;
+        }
+        let s3 = matches!(form, SiteForm::S3 { .. });
         let run = self.begin_sheet_run(&ui);
         let (session, runs, weak) = (
             self.session.clone(),
@@ -510,73 +576,265 @@ impl Ctx {
             self.ui.clone(),
         );
         let task = self.rt.spawn(async move {
-            let result = session.test_connection(&site).await;
+            let result = match session.prepare(form, editing, name).await {
+                Ok(prepared) => session.test_prepared(&prepared).await,
+                Err(text) => TestResult { ok: false, text },
+            };
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 if runs.load(Ordering::SeqCst) == run {
                     ui.set_add_site_busy(false);
-                    ui.set_add_site_result(result.text.into());
-                    ui.set_add_site_result_ok(result.ok);
+                    show_result(&ui, s3, result.ok, result.text);
                 }
             });
         });
         self.sheet.replace(task);
     }
 
-    /// Add Site (also Return in a field of the sheet): tests the connection, and saves the site
-    /// only if that works. The sheet stays busy meanwhile. Cancel gives the test up; once the
-    /// test has passed, the save is a task of its own that Cancel does not reach, so a site whose
-    /// password is being written is always saved, listed and shown (see [`show_added`]).
-    fn save_site(&self, form: AddSiteForm) {
+    /// Add Site, or Save on Edit Site (also Return in a field of the sheet): tests the connection,
+    /// and saves the site only if that works. The sheet stays busy meanwhile. Cancel gives the
+    /// test up; once the test has passed, the save is a task of its own that Cancel does not
+    /// reach, so a site whose secret is being written is always saved, listed and shown (see
+    /// [`show_added`]). A changed site gets a new client, and its transfers stopped by a failed
+    /// sign-in go on with it.
+    fn save_form(&self, form: SiteForm, name: String) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let Some(site) = validated(&ui, &form) else {
+        let (form, editing) = self.complete(form);
+        if !self.checked(&ui, &form, editing.is_some()) {
             return;
-        };
-        let run = self.begin_sheet_run(&ui);
-        let (session, runs, weak, rt) = (
+        }
+        let edited = editing.is_some();
+        let done = self.sheet_done(&ui, matches!(form, SiteForm::S3 { .. }));
+        let (session, rt, transfers) = (
             self.session.clone(),
-            self.sheet_run.clone(),
-            self.ui.clone(),
             self.rt.clone(),
+            self.transfers.clone(),
         );
         let task = self.rt.spawn(async move {
-            let tested = session.test_connection(&site).await;
+            let prepared = match session.prepare(form, editing, name).await {
+                Ok(prepared) => prepared,
+                Err(text) => return done.post(Err(text)),
+            };
+            let tested = session.test_prepared(&prepared).await;
             if !tested.ok {
-                post_added(&weak, &runs, run, &session, Err(tested.text));
-                return;
+                return done.post(Err(tested.text));
             }
             rt.spawn(async move {
-                let added = session.save_site(&site).await;
-                post_added(&weak, &runs, run, &session, added);
+                let saved = session.store_prepared(prepared).await;
+                if let (true, Ok(record), Some(transfers)) = (edited, &saved, &transfers) {
+                    transfers.site_edited(record).await;
+                }
+                done.post(saved);
             });
         });
         self.sheet.replace(task);
     }
 
-    /// The sheet was cancelled: give up its test (a save that has begun is not given up) and let it
-    /// be used again.
+    /// Starts a run of the sheet whose outcome is a saved site (see [`SheetRun`]).
+    fn sheet_done(&self, ui: &AppWindow, s3: bool) -> SheetRun {
+        SheetRun {
+            run: self.begin_sheet_run(ui),
+            ui: self.ui.clone(),
+            runs: self.sheet_run.clone(),
+            session: self.session.clone(),
+            state: self.sheet_state.clone(),
+            s3,
+        }
+    }
+
+    /// Find Zones: lists the zones of the Bunny account whose key is `key` (through the user's
+    /// proxy), the usable ones ticked and the others greyed out with their reason (Ruling Q42).
+    fn find_zones(&self, key: String) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let form = SiteForm::BunnyAccount { key };
+        if !self.checked(&ui, &form, false) {
+            return;
+        }
+        let SiteForm::BunnyAccount { key } = form else {
+            return;
+        };
+        {
+            let mut state = lock(&self.sheet_state);
+            state.zones = None;
+            state.account_key = None;
+        }
+        show_zones(&ui, &ZoneList::default());
+        let run = self.begin_sheet_run(&ui);
+        let (session, runs, weak, state) = (
+            self.session.clone(),
+            self.sheet_run.clone(),
+            self.ui.clone(),
+            self.sheet_state.clone(),
+        );
+        let task = self.rt.spawn(async move {
+            let found = session.find_zones(key.clone()).await;
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                if runs.load(Ordering::SeqCst) != run {
+                    return;
+                }
+                ui.set_add_site_busy(false);
+                match found {
+                    Ok(list) => {
+                        show_zones(&ui, &list);
+                        if list.zones.is_empty() {
+                            ui.set_add_site_result(copy::NO_ZONES.into());
+                            ui.set_add_site_result_ok(false);
+                        }
+                        let mut state = lock(&state);
+                        state.zones = Some(list);
+                        state.account_key = Some(key);
+                    }
+                    Err(text) => {
+                        ui.set_add_site_result(text.into());
+                        ui.set_add_site_result_ok(false);
+                    }
+                }
+            });
+        });
+        self.sheet.replace(task);
+    }
+
+    /// Add n Sites: the ticked zones (only usable ones can be ticked) become sites, each with its
+    /// password in the credential store; the account key is kept only with "Keep it…" (`keep`).
+    /// Like a save, it is not given up by Cancel once begun.
+    fn add_zones(&self, checked: &ModelRc<bool>, keep: bool) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let (zones, key) = {
+            let state = lock(&self.sheet_state);
+            let Some(list) = &state.zones else { return };
+            let zones: Vec<_> = list
+                .zones
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| checked.row_data(*i).unwrap_or(false))
+                .map(|(_, zone)| zone.clone())
+                .collect();
+            let key = if keep {
+                state.account_key.clone()
+            } else {
+                None
+            };
+            (zones, key)
+        };
+        if zones.is_empty() {
+            return;
+        }
+        let done = self.sheet_done(&ui, false);
+        let session = self.session.clone();
+        self.rt.spawn(async move {
+            let added = session.add_zones(zones, key).await;
+            done.post_many(added);
+        });
+    }
+
+    /// Choose…: lists the buckets the sheet's S3 key can see (the saved secret while editing, if
+    /// the field is left empty).
+    fn list_buckets(&self, draft: &SiteDraft, secret: &str) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let Some(form) = SiteForm::from_s3_draft(draft, secret) else {
+            return;
+        };
+        let (form, editing) = self.complete(form);
+        show_buckets(&ui, &[]);
+        ui.set_add_site_buckets_error(SharedString::new());
+        ui.set_add_site_buckets_busy(true);
+        let (session, weak) = (self.session.clone(), self.ui.clone());
+        let task = self.rt.spawn(async move {
+            let listed = session.list_buckets(form, editing).await;
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                ui.set_add_site_buckets_busy(false);
+                match listed {
+                    Ok(names) => show_buckets(&ui, &names),
+                    Err(text) => ui.set_add_site_buckets_error(text.into()),
+                }
+            });
+        });
+        self.buckets.replace(task);
+    }
+
+    /// Another provider or way to sign in was chosen: what Import found belongs to the one before.
+    fn forget_import(&self) {
+        lock(&self.sheet_state).imported = None;
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_add_site_secret_imported(false);
+        }
+    }
+
+    /// The sheet was cancelled: give up its test (a save that has begun is not given up), forget
+    /// what it knew, and let it be used again.
     fn cancel_sheet(&self) {
         self.sheet_run.fetch_add(1, Ordering::SeqCst);
         self.sheet.abort();
+        self.buckets.abort();
+        lock(&self.sheet_state).forget_sheet();
         if let Some(ui) = self.ui.upgrade() {
             ui.set_add_site_busy(false);
+            ui.set_add_site_editing(false);
+            ui.set_add_site_secret_imported(false);
         }
     }
 }
 
-/// Hands what became of Add Site to the window (from a task). Whether the run is still the
-/// latest is decided when the window gets to it.
-fn post_added(
-    ui: &Weak<AppWindow>,
-    runs: &Arc<AtomicU64>,
+/// Where a run of the sheet that saves sites reports to, from a task. Whether the run is still
+/// the latest is decided when the window gets to it.
+struct SheetRun {
+    ui: Weak<AppWindow>,
+    runs: Arc<AtomicU64>,
     run: u64,
-    session: &Arc<Session>,
-    added: Result<SiteRecord, String>,
-) {
-    let (runs, session) = (runs.clone(), session.clone());
-    let _ = ui.upgrade_in_event_loop(move |ui| {
-        let latest = runs.load(Ordering::SeqCst) == run;
-        show_added(&ui, &session, latest, added);
-    });
+    session: Arc<Session>,
+    state: Arc<Mutex<SheetState>>,
+    /// The form was an S3 one (a failed sign-in's words then go under the field they blame).
+    s3: bool,
+}
+
+impl SheetRun {
+    /// Hands what became of Add Site or Save to the window.
+    fn post(self, added: Result<SiteRecord, String>) {
+        let ui = self.ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            let latest = self.runs.load(Ordering::SeqCst) == self.run;
+            match &added {
+                Ok(_) if latest => {
+                    lock(&self.state).forget_sheet();
+                    ui.set_add_site_editing(false);
+                    ui.set_add_site_secret_imported(false);
+                }
+                Err(text) if latest && self.s3 => {
+                    if let Some(field) = field_blamed(text) {
+                        show_form_errors(&ui, true, &[(field, text.clone())]);
+                    }
+                }
+                _ => {}
+            }
+            show_added(&ui, &self.session, latest, added);
+        });
+    }
+
+    /// As [`Self::post`], for the zones of a Bunny account: the first one added opens. When one
+    /// fails, those added before it stay, and join the sidebar.
+    fn post_many(self, added: Result<Vec<SiteRecord>, String>) {
+        let first = match added {
+            Ok(records) => records
+                .into_iter()
+                .next()
+                .ok_or_else(|| copy::NO_ZONES.to_owned()),
+            Err(text) => {
+                let (ui, session) = (self.ui.clone(), self.session.clone());
+                let _ = ui.upgrade_in_event_loop(move |ui| sync_sites(&ui, &session.site_items()));
+                Err(text)
+            }
+        };
+        self.post(first);
+    }
+}
+
+/// Shows a test's outcome in the result box; a failed S3 sign-in's words also go under the field
+/// they blame.
+fn show_result(ui: &AppWindow, s3: bool, ok: bool, text: String) {
+    if let (false, true, Some(field)) = (ok, s3, field_blamed(&text)) {
+        show_form_errors(ui, true, &[(field, text.clone())]);
+    }
+    ui.set_add_site_result(text.into());
+    ui.set_add_site_result_ok(ok);
 }
 
 /// Shows what became of Add Site. `latest` is false when the sheet has been cancelled or
@@ -593,15 +851,7 @@ fn show_added(ui: &AppWindow, session: &Session, latest: bool, added: Result<Sit
                 ui.set_add_site_busy(false);
                 ui.set_add_site_open(false);
             }
-            let index = session
-                .sites()
-                .iter()
-                .position(|s| s.id == record.id)
-                .and_then(|i| i32::try_from(i).ok());
-            if let Some(index) = index {
-                ui.set_selected_site(index);
-                ui.invoke_site_selected(index);
-            }
+            open_site(ui, session, &record.id);
         }
         Err(message) => {
             if latest {
@@ -613,18 +863,249 @@ fn show_added(ui: &AppWindow, session: &Session, latest: bool, added: Result<Sit
     }
 }
 
-/// Checks the sheet: shows the first problem under its field (and returns `None`) or clears them.
-fn validated(ui: &AppWindow, form: &AddSiteForm) -> Option<ValidSite> {
-    match form.validate(&REGIONS.map(|(code, _)| code)) {
-        Ok(site) => {
-            show_field_error(ui, None);
-            Some(site)
+/// Selects the saved site `id` in the sidebar and opens it (again, if it is open: a changed site
+/// is listed with its new client).
+fn open_site(ui: &AppWindow, session: &Session, id: &SiteId) {
+    let index = session
+        .sites()
+        .iter()
+        .position(|site| site.id == *id)
+        .and_then(|i| i32::try_from(i).ok());
+    if let Some(index) = index {
+        ui.set_selected_site(index);
+        ui.invoke_site_selected(index);
+    }
+}
+
+/// A fresh sheet's lists: no zones, no buckets.
+fn clear_sheet_lists(ui: &AppWindow) {
+    show_zones(ui, &ZoneList::default());
+    show_buckets(ui, &[]);
+    ui.set_add_site_buckets_error(SharedString::new());
+    ui.set_add_site_buckets_busy(false);
+}
+
+/// Add Site from the sidebar or the Welcome screen, which open the sheet themselves: a blank
+/// form, adding a site.
+fn reset_sheet(ui: &AppWindow, state: &Mutex<SheetState>) {
+    lock(state).forget_sheet();
+    ui.set_add_site_editing(false);
+    ui.set_add_site_secret_imported(false);
+    ui.set_add_site_draft(SiteDraft::default());
+    clear_sheet_lists(ui);
+}
+
+/// Opens the Add Site sheet with its fields starting from `draft`: as Edit Site for `editing`,
+/// and with `imported` as the secret Import found (used when the secret field is left empty).
+fn open_sheet(
+    ui: &AppWindow,
+    state: &Mutex<SheetState>,
+    draft: SiteDraft,
+    editing: Option<SiteId>,
+    imported: Option<String>,
+) {
+    ui.set_add_site_editing(editing.is_some());
+    ui.set_add_site_secret_imported(imported.is_some());
+    {
+        let mut state = lock(state);
+        state.forget_sheet();
+        state.editing = editing;
+        state.imported = imported;
+    }
+    ui.set_add_site_draft(draft);
+    clear_sheet_lists(ui);
+    ui.set_add_site_busy(false);
+    ui.set_add_site_open(true);
+}
+
+/// Edit… on a site's menu, and Edit Site… on the banners: the Add Site sheet as Edit Site,
+/// starting from what is saved. An S3 site's access key ID is read from the credential store
+/// first, off the UI thread; no secret is put in the sheet.
+fn edit_site(ctx: &Ctx, index: usize) {
+    let Some(site) = ctx.session.sites().get(index).cloned() else {
+        return;
+    };
+    let (session, weak, state) = (ctx.session.clone(), ctx.ui.clone(), ctx.sheet_state.clone());
+    ctx.rt.spawn_blocking(move || {
+        let key_id = match site.s3 {
+            Some(_) => session.saved_key_id(&site),
+            None => String::new(),
+        };
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let draft = draft_for(&site, &key_id);
+            open_sheet(&ui, &state, draft, Some(site.id), None);
+        });
+    });
+}
+
+/// Duplicate on a site's menu: a copy of the site and its secret under a new id, named "{name}
+/// copy", which opens.
+fn duplicate_site(ctx: &Ctx, index: usize) {
+    let Some(site) = ctx.session.sites().get(index).cloned() else {
+        return;
+    };
+    let (session, weak) = (ctx.session.clone(), ctx.ui.clone());
+    ctx.rt.spawn_blocking(move || {
+        let copied = session.duplicate_site(&site.id);
+        let _ = weak.upgrade_in_event_loop(move |ui| match copied {
+            Ok(record) => {
+                sync_sites(&ui, &session.site_items());
+                open_site(&ui, &session, &record.id);
+            }
+            Err(text) => ui.set_status_message(text.into()),
+        });
+    });
+}
+
+/// Remove… on a site's menu (and on the banner): asks with the Remove Site alert first.
+fn ask_remove_site(ctx: &Ctx, index: usize) {
+    let Some(ui) = ctx.ui.upgrade() else { return };
+    let Some(site) = ctx.session.sites().get(index).cloned() else {
+        return;
+    };
+    lock(&ctx.sheet_state).removing = Some(site.id.clone());
+    let alert = sheets_view::remove_site_alert(&site.name, SiteProvider::of(&site).label());
+    sheets_view::show_remove_site_alert(&ui, &alert);
+}
+
+/// Remove on the Remove Site alert (Ruling Q23): the site's transfers are cancelled and its
+/// journal records dropped, then its secret, its row and its remembered choices are deleted, off
+/// the UI thread. Files on the storage are never touched.
+fn remove_site(ctx: &Ctx) {
+    let Some(id) = lock(&ctx.sheet_state).removing.take() else {
+        return;
+    };
+    if let Some(transfers) = &ctx.transfers {
+        transfers.forget_site(&id);
+    }
+    let selected = ctx.ui.upgrade().and_then(|ui| {
+        let index = usize::try_from(ui.get_selected_site()).ok()?;
+        ctx.session.sites().get(index).map(|site| site.id.clone())
+    });
+    let link = ctx.link();
+    ctx.rt.spawn_blocking(move || {
+        let removed = link.session.remove_site(&id);
+        let ui = link.ui.clone();
+        let _ =
+            ui.upgrade_in_event_loop(move |ui| show_removed(&ui, &link, &id, selected, removed));
+    });
+}
+
+/// Shows that site `id` is gone: the sidebar without it, and the cloud pane on another site (the
+/// first one) if it showed this one, or on none (the Welcome screen) if it was the last.
+fn show_removed(
+    ui: &AppWindow,
+    link: &Link,
+    id: &SiteId,
+    selected: Option<SiteId>,
+    removed: Result<(), String>,
+) {
+    if let Err(text) = removed {
+        ui.set_status_message(text.into());
+        return;
+    }
+    let session = &link.session;
+    sync_sites(ui, &session.site_items());
+    let sites = session.sites();
+    match selected {
+        Some(selected) if selected == *id => {
+            if sites.is_empty() {
+                ui.set_selected_site(-1);
+                start_opening_site(ui, &link.shown, session.notice());
+                spawn_remote(link, RemoteOp::Select(usize::MAX));
+            } else {
+                ui.set_selected_site(0);
+                ui.invoke_site_selected(0);
+            }
         }
-        Err(error) => {
-            show_field_error(ui, Some(&error));
-            None
+        // The site on show stays; its row may have moved.
+        selected => {
+            let index = selected
+                .and_then(|selected| sites.iter().position(|site| site.id == selected))
+                .and_then(|i| i32::try_from(i).ok())
+                .unwrap_or(-1);
+            ui.set_selected_site(index);
         }
     }
+}
+
+/// Import on the Welcome screen: the Import sheet, listing the AWS CLI profiles on this PC (read
+/// off the UI thread; their keys stay here, never in the window).
+fn start_import(ctx: &Ctx) {
+    let (weak, state) = (ctx.ui.clone(), ctx.sheet_state.clone());
+    ctx.rt.spawn_blocking(move || {
+        let profiles = read_aws_profiles();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let labels: Vec<SharedString> = profiles
+                .iter()
+                .map(|profile| copy::aws_profile_label(&profile.name, profile.region.as_deref()))
+                .map(SharedString::from)
+                .collect();
+            lock(&state).profiles = profiles;
+            ui.set_import_profiles(ModelRc::new(VecModel::from(labels)));
+            ui.set_import_error(SharedString::new());
+            ui.set_import_open(true);
+        });
+    });
+}
+
+/// Use Profile on the Import sheet: the Add Site sheet for Amazon S3, with the profile's region
+/// and access key ID, and its secret held here.
+fn import_profile(ctx: &Ctx, index: usize) {
+    let Some(ui) = ctx.ui.upgrade() else { return };
+    let profile = {
+        let mut state = lock(&ctx.sheet_state);
+        let profile = state.profiles.get(index).cloned();
+        state.profiles.clear();
+        profile
+    };
+    ui.set_import_profiles(ModelRc::default());
+    if let Some(profile) = profile {
+        open_sheet(
+            &ui,
+            &ctx.sheet_state,
+            aws_draft(&profile),
+            None,
+            Some(profile.secret),
+        );
+    }
+}
+
+/// Marks the `.env` picker closed when dropped (also if the picker panicked).
+struct PickerOpen(Arc<AtomicBool>);
+
+impl Drop for PickerOpen {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Choose .env File… on the Import sheet: the file picker, then the Add Site sheet for Bunny
+/// Storage with the file's zone and region, and its password held here (tested when the site is
+/// saved). A file that has no zone says why on the Import sheet.
+fn import_env(ctx: &Ctx) {
+    if ctx.picking_env.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let open = PickerOpen(ctx.picking_env.clone());
+    let (weak, state) = (ctx.ui.clone(), ctx.sheet_state.clone());
+    ctx.rt.spawn_blocking(move || {
+        let filters: [(&str, &[&str]); 2] =
+            [(copy::ENV_FILES, &["env"]), (copy::ALL_FILES, &["*"])];
+        let picked = win::pick_file(copy::PICK_ENV_TITLE, &filters);
+        drop(open);
+        let Some(path) = picked else { return };
+        let read = read_env_file(&path);
+        let _ = weak.upgrade_in_event_loop(move |ui| match read {
+            Ok(import) => {
+                lock(&state).profiles.clear();
+                ui.set_import_open(false);
+                ui.set_import_profiles(ModelRc::default());
+                open_sheet(&ui, &state, env_draft(&import), None, Some(import.password));
+            }
+            Err(text) => ui.set_import_error(text.into()),
+        });
+    });
 }
 
 /// Wires every callback of `ui` to `session`, fills the window with the session's starting state
@@ -696,7 +1177,10 @@ fn install_with(
         shown,
         opening: Slot::default(),
         sheet: Slot::default(),
+        buckets: Slot::default(),
         sheet_run: Arc::new(AtomicU64::new(0)),
+        sheet_state: Arc::default(),
+        picking_env: Arc::default(),
         transfers: transfers.clone(),
     });
     let row = |index: i32| usize::try_from(index).ok();
@@ -853,16 +1337,62 @@ fn install_with(
             }
         }
     });
+    // The sheet's arguments for a Bunny zone come in this order: site name, zone, region index,
+    // password.
     ui.on_add_site_test({
         let ctx = ctx.clone();
         move |name, zone, region, password| {
-            ctx.test_site(AddSiteForm::from_sheet(&name, &zone, region, &password));
+            ctx.test_form(SiteForm::bunny(&zone, region, &password), name.into());
         }
     });
     ui.on_add_site_save({
         let ctx = ctx.clone();
         move |name, zone, region, password| {
-            ctx.save_site(AddSiteForm::from_sheet(&name, &zone, region, &password));
+            ctx.save_form(SiteForm::bunny(&zone, region, &password), name.into());
+        }
+    });
+    ui.on_add_site_test_s3({
+        let ctx = ctx.clone();
+        move |draft, secret| {
+            if let Some(form) = SiteForm::from_s3_draft(&draft, &secret) {
+                ctx.test_form(form, draft.name.into());
+            }
+        }
+    });
+    ui.on_add_site_save_s3({
+        let ctx = ctx.clone();
+        move |draft, secret| {
+            if let Some(form) = SiteForm::from_s3_draft(&draft, &secret) {
+                ctx.save_form(form, draft.name.into());
+            }
+        }
+    });
+    ui.on_add_site_find_zones({
+        let ctx = ctx.clone();
+        move |key| ctx.find_zones(key.into())
+    });
+    ui.on_add_site_zones_chosen({
+        let ctx = ctx.clone();
+        move |checked, keep| ctx.add_zones(&checked, keep)
+    });
+    ui.on_add_site_list_buckets({
+        let ctx = ctx.clone();
+        move |draft, secret| ctx.list_buckets(&draft, &secret)
+    });
+    ui.on_add_site_provider({
+        let ctx = ctx.clone();
+        move |_| ctx.forget_import()
+    });
+    ui.on_add_site_sign_in_mode({
+        let ctx = ctx.clone();
+        move |_| ctx.forget_import()
+    });
+    ui.on_add_site({
+        let ctx = ctx.clone();
+        move || {
+            if let Some(ui) = ctx.ui.upgrade() {
+                reset_sheet(&ui, &ctx.sheet_state);
+            }
         }
     });
     ui.on_add_site_cancel({
@@ -870,7 +1400,63 @@ fn install_with(
         move || ctx.cancel_sheet()
     });
 
-    // The Add Site sheet's S3 address preview; the rest of its new callbacks wait for Task 24.
+    // The sidebar's site menu, the Remove Site alert and the banners' Edit Site….
+    ui.on_site_edit({
+        let ctx = ctx.clone();
+        move |index| {
+            if let Some(index) = row(index) {
+                edit_site(&ctx, index);
+            }
+        }
+    });
+    ui.on_site_duplicate({
+        let ctx = ctx.clone();
+        move |index| {
+            if let Some(index) = row(index) {
+                duplicate_site(&ctx, index);
+            }
+        }
+    });
+    ui.on_site_remove({
+        let ctx = ctx.clone();
+        move |index| {
+            if let Some(index) = row(index) {
+                ask_remove_site(&ctx, index);
+            }
+        }
+    });
+    ui.on_remove_site_confirm({
+        let ctx = ctx.clone();
+        move || remove_site(&ctx)
+    });
+    ui.on_remove_site_cancel({
+        let ctx = ctx.clone();
+        move || lock(&ctx.sheet_state).removing = None
+    });
+
+    // Import on the Welcome screen.
+    ui.on_welcome_import({
+        let ctx = ctx.clone();
+        move || start_import(&ctx)
+    });
+    ui.on_import_profile({
+        let ctx = ctx.clone();
+        move |index| {
+            if let Some(index) = row(index) {
+                import_profile(&ctx, index);
+            }
+        }
+    });
+    ui.on_import_env({
+        let ctx = ctx.clone();
+        move || import_env(&ctx)
+    });
+    ui.on_import_cancel({
+        let ctx = ctx.clone();
+        move || lock(&ctx.sheet_state).profiles.clear()
+    });
+
+    // The Add Site sheet's S3 address preview.
     crate::add_site::install(ui);
 
     // The transfer drawer: its idle state, and callbacks that do nothing without an engine.
@@ -883,6 +1469,22 @@ fn install_with(
     if let Some(transfers) = &transfers {
         crate::transfers::install(ui, transfers);
     }
+
+    // Edit Site… on the sign-in banner: the site whose transfers a failed sign-in stopped.
+    ui.on_auth_banner_edit_site({
+        let ctx = ctx.clone();
+        move || {
+            let Some(id) = ctx.transfers.as_ref().and_then(|t| t.auth_stopped_site()) else {
+                return;
+            };
+            if let Some(index) = ctx.session.sites().iter().position(|site| site.id == id) {
+                edit_site(&ctx, index);
+            }
+        }
+    });
+
+    // Every control of the second round of Add Site (Ruling Q10) is wired now.
+    ui.set_sites_v2_ready(true);
 
     if !sites.is_empty() {
         ui.set_selected_site(0);
@@ -925,6 +1527,7 @@ fn show_remote(
     ui.set_error_text(shown.banner(session.notice()).into());
     refresh_toolbar(ui, &shown);
     drop(shown);
+    ui.set_remote_offer_edit(session.remote_offers_edit());
     sync_sites(ui, &session.site_items());
 }
 
@@ -969,6 +1572,7 @@ fn start_opening_site(ui: &AppWindow, shown: &Mutex<Shown>, notice: Option<Strin
     ui.set_remote_rows(ModelRc::default());
     ui.set_remote_crumbs(ModelRc::default());
     ui.set_remote_selected(-1);
+    ui.set_remote_offer_edit(false);
     ui.set_remote_selection_text(SharedString::new());
     let mut shown = lock(shown);
     shown.remote_error = None;

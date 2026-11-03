@@ -19,7 +19,7 @@ use std::fmt::Display;
 use std::path::Path;
 use std::time::Duration;
 
-use httporter_core::{ProviderError, RemotePath};
+use httporter_core::{AuthHint, ProviderError, RemotePath};
 
 use crate::drop_hook::{DropBatch, PaneSide};
 use crate::format::format_size;
@@ -61,8 +61,39 @@ pub enum Attempt<'a> {
 const DETAIL_MAX: usize = 120;
 
 /// What to say when the PC's clock is too far off for a request to be signed.
-const CLOCK_OFF: &str =
+pub const CLOCK_OFF: &str =
     "Your PC's clock is off. Turn on “Set time automatically” in Windows Settings.";
+
+/// An S3 service did not recognise the access key ID.
+pub const S3_ACCESS_KEY_UNKNOWN: &str = "The access key ID wasn't recognized.";
+/// An S3 service found the signature wrong: the secret is not the access key ID's.
+pub const S3_SECRET_WRONG: &str = "The secret access key doesn't match the access key ID.";
+/// An S3 service wanted the request signed for another region.
+pub const S3_REGION_WRONG: &str = "The region doesn't match the bucket. Check the region.";
+
+/// What to tell the user about a failed attempt to talk to a site's `container` (a Bunny zone or
+/// an S3 bucket) on `host`: [`describe`], with S3's sign-in failures named by the field that is
+/// likely wrong (the access key ID, the secret or the region).
+pub fn describe_for(
+    provider: ProviderKind,
+    error: &ProviderError,
+    container: &str,
+    host: &str,
+    attempt: Attempt<'_>,
+) -> String {
+    match (provider, error) {
+        (ProviderKind::S3, ProviderError::Auth { hint }) => match hint {
+            AuthHint::AccessKey => S3_ACCESS_KEY_UNKNOWN.to_owned(),
+            AuthHint::Secret => S3_SECRET_WRONG.to_owned(),
+            AuthHint::Region => S3_REGION_WRONG.to_owned(),
+            AuthHint::Unknown => format!(
+                "Couldn't sign in to {container}. Check the access key ID, the secret access key \
+                 and the bucket."
+            ),
+        },
+        _ => describe(error, container, host, attempt),
+    }
+}
 
 /// What to tell the user about a failed attempt to talk to `zone` on `host`: plain words for each
 /// kind of error, without the labels the errors carry for the code ("network error: …", "server
@@ -71,7 +102,8 @@ const CLOCK_OFF: &str =
 /// to go on.
 pub fn describe(error: &ProviderError, zone: &str, host: &str, attempt: Attempt<'_>) -> String {
     match (error, attempt) {
-        // Bunny never says which part was wrong; S3's hints get their own words later.
+        // Bunny never says which part was wrong; S3's hints have their own words
+        // ([`describe_for`]).
         (ProviderError::Auth { .. }, _) => {
             format!("Couldn't sign in to {zone}. Check the password, zone name and region.")
         }
@@ -241,9 +273,10 @@ pub fn status_right(http_version: &str, host: &str, ready: Option<usize>) -> Str
     }
 }
 
-/// Opening a site needs its password, and none is saved.
+/// Opening a site needs its password, and none is saved. Edit… on the site's menu (or Remove…)
+/// is the way out.
 pub fn no_password_saved(site: &str) -> String {
-    format!("No password saved for {site}. Remove this site and add it again.")
+    format!("No password saved for {site}. Edit the site to enter it again.")
 }
 
 /// Opening a site needs its password, and the credential store would not give it.
@@ -251,8 +284,115 @@ pub fn password_unreadable(site: &str, reason: impl Display) -> String {
     format!("Couldn't read the password for {site} from Windows Credential Manager: {reason}")
 }
 
-/// Opening an S3 site, which nothing can save yet.
-pub const S3_LATER: &str = "Opening S3 sites arrives later in this build.";
+/// Why a saved secret can't be used: it is not the kind the site's service signs in with (read
+/// after [`password_unreadable`]'s colon).
+pub const SECRET_MISMATCH: &str = "it isn't the kind of key this site needs";
+/// An S3 site saved without its S3 details (the database refuses such a site, so only a damaged
+/// one has none).
+pub const S3_DETAILS_MISSING: &str = "the site's S3 details are missing";
+/// An S3 site whose saved address can't be read back.
+pub const S3_ADDRESS_UNREADABLE: &str = "the site's saved address can't be read";
+
+/// The sidebar's second line for an S3 site: the service and the region ("Cloudflare R2 ·
+/// auto"), or the service alone when the site has no region.
+pub fn s3_subtitle(service: &str, region: &str) -> String {
+    if region.trim().is_empty() {
+        service.to_owned()
+    } else {
+        site_subtitle(service, region)
+    }
+}
+
+/// The banner when rows of the site database could not be read: "1 saved site couldn't be
+/// read." (Ruling Q23).
+pub fn sites_skipped(n: usize) -> String {
+    if n == 1 {
+        "1 saved site couldn't be read.".to_owned()
+    } else {
+        format!("{n} saved sites couldn't be read.")
+    }
+}
+
+// ---- Editing, duplicating and removing a site ----
+
+/// The name a duplicated site gets: "example-shop.com copy".
+pub fn duplicate_name(name: &str) -> String {
+    format!("{name} copy")
+}
+
+/// The site database refused the changed site, so nothing was changed.
+pub fn site_not_updated(reason: impl Display) -> String {
+    format!("Couldn't save the changes: {reason}")
+}
+
+/// The site could not be removed from the site database.
+pub fn site_not_removed(reason: impl Display) -> String {
+    format!("Couldn't remove the site: {reason}")
+}
+
+/// The site's secret could not be read to copy it, so the site was not duplicated.
+pub fn site_not_duplicated(reason: impl Display) -> String {
+    format!("Couldn't duplicate the site: {reason}")
+}
+
+/// The site to edit, duplicate or remove is no longer saved.
+pub const SITE_GONE: &str = "That site is no longer saved.";
+
+// ---- The Bunny account key and the S3 bucket list ----
+
+/// The name a kept Bunny account key is saved under.
+pub const BUNNY_ACCOUNT_NAME: &str = "Bunny account";
+/// The host the Bunny account API answers on, for messages.
+const BUNNY_API_HOST: &str = "api.bunny.net";
+/// Find Zones found nothing that can be added.
+pub const NO_ZONES: &str = "This account has no storage zones that can be added.";
+/// An S3 key that may not list the buckets: the user types the name instead.
+pub const BUCKETS_NOT_ALLOWED: &str = "This key can't list buckets. Type the bucket name instead.";
+
+/// Find Zones failed: why, in plain words.
+pub fn account_failed(error: &ProviderError) -> String {
+    match error {
+        ProviderError::Auth { .. } => "Bunny didn't accept that account key. Copy it again from \
+             the Bunny dashboard → Account settings → API key."
+            .to_owned(),
+        other => describe(other, BUNNY_API_HOST, BUNNY_API_HOST, Attempt::Setup),
+    }
+}
+
+/// The account key could not be kept in the credential store. The zones were added.
+pub fn account_key_not_saved(reason: impl Display) -> String {
+    format!("The sites were added, but the account key couldn't be kept: {reason}")
+}
+
+/// Choose… could not list the buckets: why, naming the field that is likely wrong.
+pub fn buckets_failed(error: &ProviderError, host: &str) -> String {
+    match error {
+        ProviderError::Auth {
+            hint: AuthHint::Unknown,
+        } => BUCKETS_NOT_ALLOWED.to_owned(),
+        other => describe_for(ProviderKind::S3, other, host, host, Attempt::Setup),
+    }
+}
+
+// ---- Import ----
+
+/// The title of the file picker Import opens.
+pub const PICK_ENV_TITLE: &str = "Choose a .env file to import";
+/// The picker's file types: `.env` files, and anything.
+pub const ENV_FILES: &str = "Environment files";
+pub const ALL_FILES: &str = "All files";
+/// The `.env` file could not be read.
+pub fn env_unreadable(reason: impl Display) -> String {
+    format!("Couldn't read the file: {reason}")
+}
+
+/// An AWS CLI profile in Import's list: "default · eu-west-1", or the name alone.
+pub fn aws_profile_label(name: &str, region: Option<&str>) -> String {
+    match region {
+        Some(region) => format!("{name} · {region}"),
+        None => name.to_owned(),
+    }
+}
 
 // ---- Selection, the toolbar and the context menus ----
 
@@ -1088,13 +1228,12 @@ mod tests {
         );
         assert_eq!(
             no_password_saved("example-shop.com"),
-            "No password saved for example-shop.com. Remove this site and add it again."
+            "No password saved for example-shop.com. Edit the site to enter it again."
         );
         assert_eq!(
             password_unreadable("example-shop.com", "locked"),
             "Couldn't read the password for example-shop.com from Windows Credential Manager: locked"
         );
-        assert_eq!(S3_LATER, "Opening S3 sites arrives later in this build.");
         assert_eq!(
             local_open_failed(THIS_PC, "access denied"),
             "Couldn't open This PC: access denied"

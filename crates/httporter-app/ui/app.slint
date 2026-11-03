@@ -17,7 +17,7 @@ import { WelcomeView } from "components/welcome.slint";
 import { TransferRow } from "types.slint";
 import { TransferDrawer } from "components/drawer.slint";
 import { ConflictContents, ConflictRow } from "types.slint";
-import { Banner, ConflictSheet, DeleteAlert, NewFolderSheet, QuitAlert, RemoveSiteAlert } from "components/sheets.slint";
+import { Banner, ConflictSheet, DeleteAlert, ImportSheet, NewFolderSheet, QuitAlert, RemoveSiteAlert } from "components/sheets.slint";
 import { CapsuleButton } from "components/buttons.slint";
 import { SettingsWindow } from "components/settings_window.slint";
 
@@ -26,9 +26,13 @@ export { TransferRow }
 export { ConflictContents, ConflictRow }
 export { SettingsWindow }
 
-// Error message shown above the panes.
+// Error message shown above the panes. When the open site's error is one editing the site fixes
+// (no password saved, a sign-in that failed), it offers Edit Site… and Remove Site….
 component ErrorBanner inherits Rectangle {
     in property <string> text;
+    in property <bool> offer-edit: false;
+    callback edit();
+    callback remove();
 
     background: Theme.red-soft;
     border-radius: Theme.radius-sm;
@@ -47,11 +51,20 @@ component ErrorBanner inherits Rectangle {
             height: 16px;
         }
         Text {
+            horizontal-stretch: 1;
             text: root.text;
             color: Theme.red;
             font-size: Theme.font-body;
             wrap: word-wrap;
             vertical-alignment: center;
+        }
+        if root.offer-edit: CapsuleButton {
+            text: @tr("Edit Site…");
+            clicked => { root.edit(); }
+        }
+        if root.offer-edit: CapsuleButton {
+            text: @tr("Remove Site…");
+            clicked => { root.remove(); }
         }
     }
 }
@@ -88,6 +101,8 @@ export component AppWindow inherits Window {
     out property <string> status-left: root.status-message != "" ? root.status-message : (root.local-pane-active ? (root.local-selection-text != "" ? root.local-selection-text : root.local-status) : (root.remote-selection-text != "" ? root.remote-selection-text : root.remote-status));
     in property <string> status-right;
     in property <string> error-text;
+    // The open site's error is one Edit Site fixes: the banner offers Edit Site… and Remove Site….
+    in property <bool> remote-offer-edit: false;
     in property <[FileRow]> local-rows;
     in property <[FileRow]> remote-rows;
     in property <[string]> local-crumbs;
@@ -136,14 +151,16 @@ export component AppWindow inherits Window {
     in property <int> add-site-error-serial;
 
     // ---- Add Site, round 2: the S3 services, the Bunny account key, editing, Welcome ----
-    // Ruling Q10: the S3 tiles, the "Bunny account key" sign-in, Import and what only they reach
-    // are turned off, with the note "Arrives later in this build.", until Task 24 wires them and
-    // sets this.
+    // Ruling Q10: the S3 tiles, the "Bunny account key" sign-in, Import, the site menu and what
+    // only they reach are turned off, with the note "Arrives later in this build.", until the app
+    // has wired them and sets this.
     in property <bool> sites-v2-ready: false;
     // The sheet changes a saved site: Edit Site and Save, and an empty secret is kept. `draft` is
     // what its fields start with (the provider tile too); it is read when the sheet opens.
     in property <bool> add-site-editing: false;
     in property <SiteDraft> add-site-draft;
+    // Import found the secret, which the app holds: an empty secret field uses it.
+    in property <bool> add-site-secret-imported: false;
     // The message under the account key, and under the S3 fields.
     in-out property <string> add-site-key-error;
     in-out property <S3Errors> add-site-s3-errors;
@@ -210,6 +227,11 @@ export component AppWindow inherits Window {
 
     callback site-selected(int);
     callback add-site();
+    // The site menu of a sidebar row: Edit… (the Add Site sheet as Edit Site), Duplicate and
+    // Remove… (the Remove Site alert first).
+    callback site-edit(int);
+    callback site-duplicate(int);
+    callback site-remove(int);
     // The sidebar's gear opens the Settings window; it is turned off (and says why) until the app
     // sets this.
     in property <bool> settings-available: false;
@@ -261,6 +283,16 @@ export component AppWindow inherits Window {
     callback welcome-add();
     callback welcome-import();
 
+    // The Import sheet the app opens for `welcome-import`: the AWS CLI profiles found ("default ·
+    // eu-west-1"), and why the last .env file could not be used. The sheet closes itself before
+    // it says what was chosen.
+    in-out property <bool> import-open: false;
+    in property <[string]> import-profiles;
+    in-out property <string> import-error;
+    callback import-profile(int);
+    callback import-env();
+    callback import-cancel();
+
     // ---- The transfer drawer (see components/drawer.slint) ----
     // The drawer is expanded, and which tab it shows (0 Active, 1 Queued, 2 Failed, 3 Done). The
     // Show / Hide Transfers button flips `transfers-open` itself and tells the app through
@@ -300,7 +332,7 @@ export component AppWindow inherits Window {
     // ---- Sheets, alerts and banners (see components/sheets.slint and src/sheets_view.rs) ----
     // Each one opens when the app sets its `-open` flag (after filling in its texts), and closes
     // itself when the user answers, before the callback below is called. The transfer engine opens
-    // them (Remove Site: Task 24).
+    // them (Remove Site: the sidebar's site menu).
 
     // The conflict sheet. The texts come from `ConflictSheetView`; the rows' `action` is each
     // row's choice (0 Replace, 1 Skip, 2 Keep both) and is read back when Continue is pressed.
@@ -526,10 +558,14 @@ export component AppWindow inherits Window {
                     selected-site: root.selected-site;
                     sheet-open: root.add-site-open;
                     settings-available: root.settings-available;
+                    site-menu-available: root.sites-v2-ready;
                     site-selected(index) => {
                         root.selected-site = index;
                         root.site-selected(index);
                     }
+                    edit-site(index) => { root.site-edit(index); }
+                    duplicate-site(index) => { root.site-duplicate(index); }
+                    remove-site(index) => { root.site-remove(index); }
                     add-site => {
                         root.add-site-open = true;
                         root.add-site();
@@ -576,7 +612,7 @@ export component AppWindow inherits Window {
                                 icon: Icons.lock;
                                 fg: Theme.red;
                                 bg: Theme.red-soft;
-                                // Editing a site arrives with the rest of `sites-v2-ready` (Ruling Q10).
+                                // Opens the site the banner names in Edit Site (off until `sites-v2-ready`, Ruling Q10).
                                 CapsuleButton {
                                     text: @tr("Edit Site…");
                                     enabled: root.sites-v2-ready;
@@ -594,7 +630,12 @@ export component AppWindow inherits Window {
                                     clicked => { root.disk-banner-resume(); }
                                 }
                             }
-                            if root.error-text != "": ErrorBanner { text: root.error-text; }
+                            if root.error-text != "": ErrorBanner {
+                                text: root.error-text;
+                                offer-edit: root.remote-offer-edit && root.sites-v2-ready && root.has-selection;
+                                edit => { root.site-edit(root.selected-site); }
+                                remove => { root.site-remove(root.selected-site); }
+                            }
 
                             // Side by side when each pane can have the mockup's 420 px, stacked otherwise
                             // (mockup `.panes`: a wrapping row). The panes are placed by hand rather than in a
@@ -785,6 +826,7 @@ export component AppWindow inherits Window {
         error-serial: root.add-site-error-serial;
         v2-ready: root.sites-v2-ready;
         editing: root.add-site-editing;
+        secret-imported: root.add-site-secret-imported;
         draft: root.add-site-draft;
         zones: root.add-site-zones;
         zone-checked <=> root.add-site-zone-checked;
@@ -880,6 +922,23 @@ export component AppWindow inherits Window {
         cancelled => {
             root.remove-site-open = false;
             root.remove-site-cancel();
+        }
+    }
+    if root.import-open: ImportSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        profiles: root.import-profiles;
+        error <=> root.import-error;
+        profile-chosen(index) => {
+            root.import-open = false;
+            root.import-profile(index);
+        }
+        env-file => { root.import-env(); }
+        cancelled => {
+            root.import-open = false;
+            root.import-cancel();
         }
     }
     if root.quit-open: QuitAlert {

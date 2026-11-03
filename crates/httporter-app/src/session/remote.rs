@@ -8,10 +8,10 @@ use httporter_core::{
     Entry, Listing, ProviderError, RemotePath, RequestInfo, SiteId, SiteRecord, StorageProvider,
 };
 
-use super::sites::SiteProvider;
-use super::{History, Session, Step, Ticket, lock};
+use super::sites::{SiteProvider, hub_error_text};
+use super::{History, Session, Step, Ticket, blocking, lock};
 use crate::copy::{self, Attempt};
-use crate::site_hub::list_interactive;
+use crate::site_hub::{HubError, list_interactive};
 use crate::sort::SortKey;
 use crate::viewmodel::{RowData, remote_crumbs, rows_from_remote_sorted, sort_remote_entries};
 
@@ -94,6 +94,10 @@ pub(super) struct Remote {
     /// failed connection.
     info: Option<RequestInfo>,
     error: Option<String>,
+    /// The error is one Edit Site can fix (no secret saved, one that can't be read, or a sign-in
+    /// that failed): the banner offers Edit Site… and Remove Site… (see
+    /// [`Session::remote_offers_edit`]).
+    offer_edit: bool,
     /// Folders made with New Folder that the storage doesn't show yet (Bunny Storage keeps no
     /// empty folder): shown in their folder, with a note, until a listing has them.
     virtual_folders: BTreeSet<RemotePath>,
@@ -108,6 +112,7 @@ impl Remote {
             entries: Vec::new(),
             info: None,
             error: None,
+            offer_edit: false,
             virtual_folders: BTreeSet::new(),
         }
     }
@@ -195,7 +200,10 @@ impl Session {
         };
         switched(switch);
         // No lock is held while the password is read and the client is made.
-        let connected = self.connect(&site).await;
+        let connected = {
+            let (hub, record) = (self.hub.clone(), site.clone());
+            blocking(move || hub.provider(&record)).await
+        };
         let provider = {
             let mut pane = lock(&self.remote);
             let current = pane.latest == ticket;
@@ -207,8 +215,10 @@ impl Session {
                     remote.provider = Some(provider.clone());
                     provider
                 }
-                Err(message) => {
-                    remote.error = Some(message);
+                Err(error) => {
+                    remote.offer_edit =
+                        matches!(error, HubError::MissingSecret | HubError::Credential(_));
+                    remote.error = Some(hub_error_text(&error, &site));
                     pane.loading = false;
                     pane.version += 1;
                     return self.remote_view_of(&pane);
@@ -391,6 +401,7 @@ impl Session {
                 return self.remote_view_of(&pane);
             };
             let mut left = None;
+            remote.offer_edit = matches!(result, Err(ProviderError::Auth { .. }));
             match result {
                 Ok(listing) => {
                     if remote.dir != dir {
@@ -403,7 +414,8 @@ impl Session {
                     remote.error = None;
                 }
                 Err(ProviderError::NotFound) => {
-                    remote.error = Some(copy::describe(
+                    remote.error = Some(copy::describe_for(
+                        remote.site.provider,
                         &ProviderError::NotFound,
                         &remote.site.container,
                         &remote.site.host,
@@ -412,7 +424,8 @@ impl Session {
                 }
                 Err(error) => {
                     remote.info = None;
-                    remote.error = Some(copy::describe(
+                    remote.error = Some(copy::describe_for(
+                        remote.site.provider,
                         &error,
                         &remote.site.container,
                         &remote.site.host,
@@ -501,6 +514,15 @@ impl Session {
         self.remote_view_of(&pane)
     }
 
+    /// The open site's error is one editing the site fixes: no secret saved, one that can't be
+    /// read, or a sign-in that failed. The banner then offers Edit Site… and Remove Site….
+    pub fn remote_offers_edit(&self) -> bool {
+        lock(&self.remote)
+            .open
+            .as_ref()
+            .is_some_and(|remote| remote.offer_edit && remote.error.is_some())
+    }
+
     pub(super) fn remote_view_of(&self, pane: &RemotePane) -> RemoteView {
         let Some(remote) = &pane.open else {
             return RemoteView {
@@ -510,10 +532,7 @@ impl Session {
         };
         let (key, ascending) = pane.sort;
         let site = &remote.site;
-        let service = match SiteProvider::of(site) {
-            SiteProvider::Bunny => copy::BUNNY_STORAGE,
-            SiteProvider::S3(preset) => preset.label(),
-        };
+        let service = SiteProvider::of(site).label();
         // The connections a transfer to the site may open at once.
         let ready = remote.provider.as_ref().map(|provider| {
             self.hub

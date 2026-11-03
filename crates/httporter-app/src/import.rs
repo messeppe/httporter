@@ -2,19 +2,21 @@
 //! AWS CLI's `credentials` and `config` files. The Import button on the Welcome screen turns
 //! what they hold into an Add Site form.
 //!
-//! Both parsers take the text of the file, never a path: this module reads nothing from disk.
-//! The caller (the Import flow, Task 24) reads the file the user picked and hands the text over.
+//! Both parsers take the text of a file, never a path. Only [`read_env_file`] (the file the user
+//! picked) and [`read_aws_profiles`] (the AWS CLI's own files) read from disk, and only when the
+//! user asks to import; nothing they read is logged.
 //!
 //! The password and the secret access key pass through here and nowhere else: the `Debug` output
 //! of both result types leaves them out, and no error quotes a line of the file.
 
-// The Import flow that calls these arrives with Task 24 (Ruling Q10).
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
+use crate::SiteDraft;
+use crate::add_site::{bunny_region_index, tile_for};
 use crate::copy;
+use httporter_core::S3Preset;
 
 /// The Bunny storage zone a `.env` file describes.
 #[derive(Clone, PartialEq, Eq)]
@@ -199,4 +201,46 @@ fn ini_sections(text: &str) -> Vec<(String, HashMap<String, String>)> {
         }
     }
     sections
+}
+
+/// Reads the `.env` file the user picked and finds the Bunny zone in it. The error is a sentence
+/// for the user; it never quotes the file.
+pub fn read_env_file(path: &Path) -> Result<EnvImport, String> {
+    let text = std::fs::read_to_string(path).map_err(copy::env_unreadable)?;
+    parse_env(&text)
+}
+
+/// The profiles of the AWS CLI on this PC that have an access key: `%USERPROFILE%\.aws\credentials`,
+/// with the regions of `%USERPROFILE%\.aws\config`. A file that is missing or can't be read counts
+/// as empty.
+pub fn read_aws_profiles() -> Vec<AwsProfile> {
+    let Some(dir) = std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".aws"))
+    else {
+        return Vec::new();
+    };
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+    parse_aws_profiles(&read("credentials"), &read("config"))
+}
+
+/// The Add Site fields a `.env` file fills: Bunny, its zone and region. Its password is kept by
+/// the window, not in the draft.
+pub fn env_draft(import: &EnvImport) -> SiteDraft {
+    SiteDraft {
+        provider: 0,
+        zone: import.zone.as_str().into(),
+        region_index: bunny_region_index(&import.region),
+        ..SiteDraft::default()
+    }
+}
+
+/// The Add Site fields an AWS profile fills: Amazon S3, its region and access key ID. Its secret
+/// is kept by the window, not in the draft.
+pub fn aws_draft(profile: &AwsProfile) -> SiteDraft {
+    SiteDraft {
+        provider: tile_for(S3Preset::AwsS3),
+        region: profile.region.as_deref().unwrap_or_default().into(),
+        key_id: profile.key_id.as_str().into(),
+        region_index: -1,
+        ..SiteDraft::default()
+    }
 }

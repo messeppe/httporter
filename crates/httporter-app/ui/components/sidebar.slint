@@ -25,12 +25,14 @@ component SectionTitle inherits Rectangle {
 }
 
 // One site: provider tile, name over subtitle, health dot (mockup `.sb-item` with `.sb-two`).
-// Reachable with Tab, selected with Space or Return.
+// Reachable with Tab, selected with Space or Return. A right click, the Menu key or Shift+F10
+// asks for its context menu, at a point of the window.
 component SiteRow inherits Rectangle {
     in property <SiteItem> site;
     in property <bool> selected;
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
+    callback context-pressed(Point);
 
     min-height: Theme.sidebar-item-height;
     border-radius: Theme.radius-sm;
@@ -85,12 +87,28 @@ component SiteRow inherits Rectangle {
                 root.clicked();
                 return accept;
             }
+            // The Menu key and Shift+F10: the row's context menu, at its left.
+            if (event.text == Key.Menu || (event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && event.text == Key.F10)) {
+                root.context-pressed({
+                    x: root.absolute-position.x + 32px,
+                    y: root.absolute-position.y + root.height / 2,
+                });
+                return accept;
+            }
             return reject;
         }
     }
 
     area := TouchArea {
         clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                root.context-pressed({
+                    x: self.absolute-position.x + self.mouse-x,
+                    y: self.absolute-position.y + self.mouse-y,
+                });
+            }
+        }
     }
 }
 
@@ -103,9 +121,24 @@ export component Sidebar inherits Rectangle {
     // There is no Settings window yet: until there is, the button is shown turned off and says
     // why, rather than doing nothing when pressed.
     in property <bool> settings-available: false;
+    // The site menu's commands can be used (Ruling Q10: off, with a note, until they are wired).
+    in property <bool> site-menu-available: false;
     callback site-selected(int);
     callback add-site();
     callback open-settings();
+    // The site menu of row `int`: Edit…, Duplicate, Remove….
+    callback edit-site(int);
+    callback duplicate-site(int);
+    callback remove-site(int);
+
+    // The row the site menu was opened on.
+    property <int> menu-site: -1;
+
+    // Opens the site menu of row `index` at `point`, a point of the window.
+    function show-site-menu(index: int, point: Point) {
+        root.menu-site = index;
+        site-menu.show({ x: point.x - root.absolute-position.x, y: point.y - root.absolute-position.y });
+    }
 
     background: Theme.sidebar;
     border-radius: Theme.radius-lg;
@@ -115,6 +148,30 @@ export component Sidebar inherits Rectangle {
     changed sheet-open => {
         if (!root.sheet-open) {
             add-button.focus();
+        }
+    }
+
+    // Opened only through `show-site-menu` (a right click on a row, the Menu key), so the native
+    // trigger is off.
+    site-menu := ContextMenuArea {
+        enabled: false;
+        Menu {
+            MenuItem {
+                title: @tr("Edit…");
+                enabled: root.site-menu-available;
+                activated => { root.edit-site(root.menu-site); }
+            }
+            MenuItem {
+                title: @tr("Duplicate");
+                enabled: root.site-menu-available;
+                activated => { root.duplicate-site(root.menu-site); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: @tr("Remove…");
+                enabled: root.site-menu-available;
+                activated => { root.remove-site(root.menu-site); }
+            }
         }
     }
 
@@ -145,6 +202,7 @@ export component Sidebar inherits Rectangle {
                     site: site;
                     selected: i == root.selected-site;
                     clicked => { root.site-selected(i); }
+                    context-pressed(point) => { root.show-site-menu(i, point); }
                 }
                 if root.sites.length == 0: SectionTitle { text: @tr("Publish"); }
                 if root.sites.length == 0: HorizontalLayout {

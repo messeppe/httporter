@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use httporter_core::{
-    Checksum, Direction, EngineSnapshot, EngineState, Entry, Job, JobId, Journal, ProviderError,
-    ProviderKind, RemotePath, Resolution, RetryPolicy, SiteId, SiteRecord, StorageProvider,
-    TransferSettings, with_retry,
+    Checksum, Direction, EngineSnapshot, EngineState, Entry, Job, JobId, JobState, Journal,
+    ProviderError, ProviderKind, RemotePath, Resolution, RetryPolicy, SiteId, SiteRecord,
+    StorageProvider, TransferSettings, with_retry,
 };
 use httporter_platform::win::{self, TaskbarProgress, TaskbarState};
 use httporter_transfer::{
@@ -305,7 +305,13 @@ impl Transfers {
         let plan = match plan_upload(&planner, &sources, &dir).await {
             Ok(plan) => plan,
             Err(e) => {
-                let text = copy::describe(&e, &site.container, &site.host, Attempt::List(&dir));
+                let text = copy::describe_for(
+                    site.provider,
+                    &e,
+                    &site.container,
+                    &site.host,
+                    Attempt::List(&dir),
+                );
                 self.link.status(text);
                 return;
             }
@@ -367,7 +373,13 @@ impl Transfers {
         let plan = match plan_download(&planner, &entries, &dir).await {
             Ok(plan) => plan,
             Err(e) => {
-                let text = copy::describe(&e, &site.container, &site.host, Attempt::List(&from));
+                let text = copy::describe_for(
+                    site.provider,
+                    &e,
+                    &site.container,
+                    &site.host,
+                    Attempt::List(&from),
+                );
                 self.link.status(text);
                 return;
             }
@@ -485,7 +497,13 @@ impl Transfers {
             let plan = match plan_delete(&planner, &entries).await {
                 Ok(plan) => plan,
                 Err(e) => {
-                    let text = copy::describe(&e, &site.container, &site.host, Attempt::List(&dir));
+                    let text = copy::describe_for(
+                        site.provider,
+                        &e,
+                        &site.container,
+                        &site.host,
+                        Attempt::List(&dir),
+                    );
                     this.link.status(text);
                     return;
                 }
@@ -654,6 +672,47 @@ impl Transfers {
             }
             let lookup = |id: &SiteId| sites.get(id).cloned().flatten();
             this.engine.resume_from_journal(&lookup);
+        });
+    }
+
+    // ---- Sites that change or go ----
+
+    /// The site the sign-in banner is about (for its Edit Site…).
+    pub fn auth_stopped_site(&self) -> Option<SiteId> {
+        self.engine.auth_stopped_site()
+    }
+
+    /// `site` was edited and saved (the hub has dropped its old client). If a failed sign-in had
+    /// stopped its transfers, they go on with the new client.
+    pub async fn site_edited(&self, site: &SiteRecord) {
+        if !self.engine.is_auth_stopped(&site.id) {
+            return;
+        }
+        if let Ok(provider) = self.session.connect(site).await {
+            self.engine.resume_site(&site.id, provider);
+        }
+    }
+
+    /// `site` is being removed (Ruling Q23): its transfers are cancelled, and its records leave
+    /// the journal (the unfinished ones a crash left too), off the UI thread. The resume banner
+    /// then counts what is left.
+    pub fn forget_site(self: &Arc<Self>, site: &SiteId) {
+        self.engine.cancel_site(site);
+        let (this, site) = (self.clone(), site.clone());
+        self.link.rt().spawn_blocking(move || {
+            let journal = &this.journal;
+            if let Ok(records) = journal.unfinished() {
+                for record in records.iter().filter(|record| record.site == site) {
+                    let _ = journal.set_state(record.id, JobState::Cancelled, None);
+                }
+            }
+            // The cancelled records go, with the other finished ones (as at every start).
+            let _ = journal.clear_finished();
+            let again = this.clone();
+            let _ = this
+                .link
+                .ui()
+                .upgrade_in_event_loop(move |ui| again.offer_resume(&ui));
         });
     }
 
@@ -976,9 +1035,8 @@ fn install_sheets(ui: &AppWindow, transfers: &Arc<Transfers>) {
         let engine = transfers.engine.clone();
         move || engine.resume_all()
     });
-    // Edit Site… is turned off until editing a site arrives (Task 24, with `sites-v2-ready`);
-    // then it opens the site in the Add Site sheet, and saving calls `Engine::resume_site`.
-    ui.on_auth_banner_edit_site(|| {});
+    // Edit Site… opens the site in Edit Site, which is `binding.rs`'s; saving it calls
+    // `Transfers::site_edited`.
 }
 
 /// The Settings window, made the first time the gear is pressed and kept (hidden) after.

@@ -10,7 +10,8 @@
 //! nothing opens a sheet or an alert and the banners stay empty, so they do nothing, except
 //! choosing a default action on the conflict sheet, which sets its rows, and Create on the New
 //! Folder sheet, which checks the name against the cloud pane's listing. With an engine,
-//! `transfers.rs` replaces them (Remove Site waits for Task 24).
+//! `transfers.rs` replaces them; the Remove Site alert and Edit Site… are `binding.rs`'s (they
+//! act on the saved sites).
 
 use std::collections::HashSet;
 
@@ -255,7 +256,6 @@ pub fn delete_alert(
 
 /// The Remove Site alert: title and text. `provider_label` is the service's name ("Bunny
 /// Storage").
-#[allow(dead_code)] // The sidebar's Remove Site asks through it (Task 24).
 pub fn remove_site_alert(site: &str, provider_label: &str) -> (String, String) {
     (
         copy::remove_site_title(site),
@@ -375,7 +375,6 @@ pub fn show_delete_alert(ui: &AppWindow, (title, body, button): &(String, String
 }
 
 /// Opens the Remove Site alert for `alert` (see [`remove_site_alert`]).
-#[allow(dead_code)] // The sidebar's Remove Site asks through it (Task 24).
 pub fn show_remove_site_alert(ui: &AppWindow, (title, body): &(String, String)) {
     ui.set_remove_site_title(title.as_str().into());
     ui.set_remove_site_body(body.as_str().into());
@@ -389,8 +388,8 @@ pub fn show_quit_alert(ui: &AppWindow, (title, body): &(String, String)) {
     ui.set_quit_open(true);
 }
 
-/// Wires the callbacks of the sheets, alerts and banners. Task 23 replaces each stub below with a
-/// call into the engine (Task 24 the Remove Site ones); until then nothing opens them.
+/// Wires the callbacks of the sheets, alerts and banners. `transfers.rs` and `binding.rs` replace
+/// each stub below with a call into the engine or the session; without them nothing opens them.
 pub fn install(ui: &AppWindow) {
     ui.set_new_folder_name(copy::NEW_FOLDER_NAME.into());
 
@@ -421,15 +420,11 @@ pub fn install(ui: &AppWindow) {
     });
     ui.on_new_folder_cancel(|| {});
 
-    ui.on_remove_site_confirm(|| {});
-    ui.on_remove_site_cancel(|| {});
-
     ui.on_quit_pause(|| {});
     ui.on_quit_cancel_all(|| {});
     ui.on_quit_keep_running(|| {});
 
     ui.on_resume_banner_resume(|| {});
     ui.on_resume_banner_discard(|| {});
-    ui.on_auth_banner_edit_site(|| {});
     ui.on_disk_banner_resume(|| {});
 }

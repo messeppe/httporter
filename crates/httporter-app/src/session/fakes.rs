@@ -7,14 +7,15 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::ThreadId;
 
 use chrono::{NaiveDate, NaiveDateTime};
-use httporter_bunny::BunnyConfig;
+use httporter_bunny::{BunnyConfig, ZoneList};
 use httporter_core::{
     ByteStream, Capabilities, Listing, MockProvider, ProviderError, RemotePath, StorageProvider,
-    UploadOptions, UploadSource,
+    TransferSettings, UploadOptions, UploadSource,
 };
 use httporter_platform::{CredError, CredentialKey, CredentialStore, MemoryStore, Store};
+use httporter_s3::S3Config;
 
-use super::{ProviderFactory, Session, lock};
+use super::{Answer, ProviderFactory, Session, lock};
 
 /// Hands out storages by zone (a default one for every other zone) and remembers the
 /// configurations it was given.
@@ -135,6 +136,25 @@ impl ProviderFactory for FakeFactory {
             .unwrap_or_else(|| self.provider.clone());
         lock(&self.configs).push(cfg);
         Ok(provider)
+    }
+
+    /// Hands out the storage served for the bucket (the default one otherwise).
+    fn s3(&self, cfg: S3Config) -> Result<Arc<dyn StorageProvider>, ProviderError> {
+        lock(&self.threads).push(std::thread::current().id());
+        Ok(lock(&self.by_zone)
+            .get(&cfg.bucket)
+            .cloned()
+            .unwrap_or_else(|| self.provider.clone()))
+    }
+
+    /// No buckets: the tests of Choose… script their own.
+    fn s3_buckets(&self, _cfg: S3Config) -> Answer<Vec<String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// No zones: the tests of the account key script their own.
+    fn bunny_zones(&self, _key: String, _settings: &TransferSettings) -> Answer<ZoneList> {
+        Box::pin(async { Ok(ZoneList::default()) })
     }
 }
 

@@ -363,7 +363,7 @@ async fn a_missing_password_is_reported_without_a_request() {
     let view = select(&s, 0).await;
     assert_eq!(
         view.error.as_deref(),
-        Some("No password saved for testzone. Remove this site and add it again.")
+        Some("No password saved for testzone. Edit the site to enter it again.")
     );
     assert!(view.rows.is_empty());
     assert!(!view.loading, "nothing is on its way");

@@ -17,7 +17,7 @@ import { ConflictContents, ConflictRow } from "../types.slint";
 import { CapsuleButton } from "buttons.slint";
 import { Chip } from "chips.slint";
 import { KindStyle } from "drawer.slint";
-import { ErrorLine, Field, FormRow, RegionPicker } from "form_controls.slint";
+import { ErrorLine, Field, FormRow, RadioList, RegionPicker } from "form_controls.slint";
 import { VCenter } from "layout.slint";
 
 // The column widths of the conflict table, shared by its header and its rows.
@@ -951,6 +951,140 @@ export component RemoveSiteAlert inherits Rectangle {
                     text: @tr("Cancel");
                     primary: true;
                     clicked => { root.cancelled(); }
+                }
+            }
+        }
+    }
+}
+
+// Import (the Welcome screen's second button): an AWS CLI profile found on this PC, or a .env
+// file. Use Profile fills the Add Site sheet for Amazon S3 with the chosen profile; Choose .env
+// File… opens the file picker, and the file fills it for Bunny Storage. The profiles are shown by
+// name and region only: their keys stay with the app. With no profile, the .env button is the
+// default.
+export component ImportSheet inherits Rectangle {
+    // "default · eu-west-1", one per profile.
+    in property <[string]> profiles;
+    // Why the last file could not be imported; cleared when the sheet opens.
+    in-out property <string> error;
+    callback profile-chosen(int);
+    callback env-file();
+    callback cancelled();
+
+    property <bool> has-profiles: root.profiles.length > 0;
+
+    function submit() {
+        if (root.has-profiles) {
+            root.profile-chosen(profile-list.current);
+        } else {
+            root.env-file();
+        }
+    }
+
+    function focus-first() {
+        if (root.has-profiles) {
+            profile-list.focus();
+        } else {
+            env-button.focus();
+        }
+    }
+
+    function focus-last() {
+        if (root.has-profiles) {
+            use-button.focus();
+        } else {
+            cancel-button.focus();
+        }
+    }
+
+    init => { root.focus-first(); }
+
+    Modal {
+        at-first-stop: root.has-profiles ? profile-list.has-focus : env-button.has-focus;
+        at-last-stop: root.has-profiles ? use-button.has-focus : cancel-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.submit(); }
+        focus-first => { root.focus-first(); }
+        focus-last => { root.focus-last(); }
+
+        AttachedSheet {
+            sheet-width: 500px;
+            label: @tr("Import a Site");
+
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 20px;
+
+                Text {
+                    text: @tr("Import a Site");
+                    color: Theme.label;
+                    font-size: 17px;
+                    font-weight: Theme.weight-semibold;
+                    accessible-role: none;
+                }
+            }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 8px;
+                padding-bottom: 14px;
+                spacing: 12px;
+
+                Text {
+                    text: @tr("Fill in Add Site from an AWS CLI profile on this PC, or from a .env file with BUNNY_ZONE and BUNNY_KEY. Keys go to Windows Credential Manager once the site is saved.");
+                    color: Theme.label2;
+                    font-size: Theme.font-body;
+                    wrap: word-wrap;
+                }
+                Rectangle {
+                    height: root.has-profiles ? profile-row.preferred-height : 0px;
+                    visible: root.has-profiles;
+
+                    profile-row := FormRow {
+                        width: parent.width;
+                        height: parent.height;
+                        label: @tr("AWS profile");
+                        profile-list := RadioList {
+                            label: @tr("AWS profile");
+                            options: root.profiles;
+                        }
+                    }
+                }
+                if !root.has-profiles: Text {
+                    text: @tr("No AWS CLI profile with an access key was found on this PC.");
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                }
+                if root.error != "": ErrorLine { text: root.error; }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.sep;
+            }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+
+                env-button := CapsuleButton {
+                    text: @tr("Choose .env File…");
+                    primary: !root.has-profiles;
+                    clicked => { root.env-file(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                cancel-button := CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                use-button := CapsuleButton {
+                    text: @tr("Use Profile");
+                    primary: true;
+                    enabled: root.has-profiles;
+                    clicked => { root.profile-chosen(profile-list.current); }
                 }
             }
         }

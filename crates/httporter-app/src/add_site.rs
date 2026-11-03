@@ -1,29 +1,30 @@
 //! The Add Site form: what the sheet collects and the checks made before a connection is tried.
 //!
-//! The sheet itself only gathers text; it hands the four values to the app through
-//! `add-site-test` and `add-site-save`, and the app calls [`AddSiteForm::validate`]. A failure
-//! comes back as one [`FieldError`], which [`show_field_error`] puts under the field it names.
+//! The sheet has three kinds of form: a Bunny storage zone and its password, a Bunny account key
+//! (which lists the account's zones to add) and the S3 services. They are described by
+//! [`SiteForm`], checked by [`validate`] (whose problems [`show_form_errors`] puts under their
+//! fields) and, for S3, previewed by [`s3_endpoint_preview`]. Editing a site starts the sheet from
+//! [`draft_for`]; Import starts it from what a `.env` file or an AWS profile holds.
 //!
-//! The password passes through here but is never logged, printed or stored: the `Debug` output of
-//! the form types leaves it out.
+//! The first release's Bunny-only form ([`AddSiteForm`], checked into a [`ValidSite`] with one
+//! [`FieldError`]) is kept for its tests; the window goes through [`SiteForm`].
 //!
-//! Besides the Bunny zone password form above, the sheet has two more kinds of form: signing in
-//! with a Bunny account key (which lists the account's zones to add) and the S3 services. They are
-//! described by [`SiteForm`], checked by [`validate`] and, for S3, previewed by
-//! [`s3_endpoint_preview`]. The sheet's controls for them are turned off in this build, behind the
-//! window's `sites-v2-ready` flag (Ruling Q10), until Task 24 saves what they collect.
+//! Secrets pass through here but are never logged, printed or stored: the `Debug` output of the
+//! form types leaves them out.
 
 use std::fmt;
 
 use httporter_bunny::{REGIONS, ZoneList};
-use httporter_core::S3Preset;
+use httporter_core::{S3Preset, SiteRecord};
+use httporter_s3::Url;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::copy;
-use crate::{AppWindow, SiteDraft, ZoneChoice};
+use crate::{AppWindow, S3Errors, SiteDraft, ZoneChoice};
 
 /// What the user typed, exactly as the sheet reports it.
 #[derive(Clone, PartialEq, Eq, Default)]
+#[cfg_attr(not(test), allow(dead_code))] // The I1 form, kept for its tests (see the module docs).
 pub struct AddSiteForm {
     /// Site name; empty means "same as the zone".
     pub name: String,
@@ -35,6 +36,7 @@ pub struct AddSiteForm {
 
 /// A form that passed [`AddSiteForm::validate`]: trimmed, with the region as its code.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct ValidSite {
     pub name: String,
     pub zone: String,
@@ -44,12 +46,14 @@ pub struct ValidSite {
 
 /// The first problem found, with the text to show under the field it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum FieldError {
     Zone(String),
     Region(String),
     Password(String),
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl FieldError {
     /// The text to show under the field.
     pub fn message(&self) -> &str {
@@ -88,6 +92,7 @@ impl fmt::Debug for ValidSite {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl AddSiteForm {
     /// The form from the arguments of the sheet's `add-site-test` and `add-site-save` callbacks,
     /// which come in this order: site name, zone, region index, password. Both buttons go through
@@ -158,7 +163,6 @@ pub mod field {
 /// What the Add Site sheet collected, by kind of sign-in. Its `Debug` output leaves out the
 /// password, the account key and the secret access key.
 #[derive(Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Saving a site of any kind is wired in Task 24 (Ruling Q10).
 pub enum SiteForm {
     /// A Bunny storage zone and its password.
     BunnyPassword {
@@ -243,7 +247,6 @@ impl SiteForm {
     /// The S3 form behind the sheet's `add-site-test-s3` and `add-site-save-s3` callbacks (the
     /// draft of the visible fields, and the secret access key); `None` when the draft's provider
     /// is Bunny.
-    #[allow(dead_code)] // Saving an S3 site is wired in Task 24 (Ruling Q10).
     pub fn from_s3_draft(draft: &SiteDraft, secret: &str) -> Option<Self> {
         Some(Self::S3 {
             preset: preset_for_tile(draft.provider)?,
@@ -263,7 +266,6 @@ impl SiteForm {
 /// site: a secret left empty then means "keep the saved one".
 ///
 /// S3 addresses are checked by `httporter_s3::endpoint`, whose own sentences are the messages.
-#[allow(dead_code)] // Saving a site of any kind is wired in Task 24 (Ruling Q10).
 pub fn validate(form: &SiteForm, editing: bool) -> Result<(), Vec<(&'static str, String)>> {
     let mut problems: Vec<(&'static str, String)> = Vec::new();
     let mut flag = |name: &'static str, message: &str| problems.push((name, message.to_owned()));
@@ -324,7 +326,6 @@ pub fn validate(form: &SiteForm, editing: bool) -> Result<(), Vec<(&'static str,
 }
 
 /// The field an error of `httporter_s3::endpoint` is about.
-#[allow(dead_code)] // Used by `validate`.
 fn endpoint_error_field(
     preset: S3Preset,
     account_id: &str,
@@ -386,7 +387,6 @@ fn preview_of(draft: &SiteDraft) -> String {
 /// added, each starting checked, then the ones that can't, greyed out with their reason. Row `i`
 /// of the sheet is `list.zones[i]` for `i < list.zones.len()`, which is how the `[bool]` of
 /// `add-site-zones-chosen` is read.
-#[allow(dead_code)] // Find Zones is answered with it in Task 24 (Ruling Q10).
 pub fn show_zones(ui: &AppWindow, list: &ZoneList) {
     let usable = list.zones.iter().map(|zone| {
         let hostnames: Vec<&str> = zone
@@ -417,14 +417,12 @@ pub fn show_zones(ui: &AppWindow, list: &ZoneList) {
 }
 
 /// Puts the bucket names the service listed in the sheet's bucket list.
-#[allow(dead_code)] // The Choose… button is answered with it in Task 24 (Ruling Q10).
 pub fn show_buckets(ui: &AppWindow, names: &[String]) {
     let names: Vec<SharedString> = names.iter().map(|name| name.as_str().into()).collect();
     ui.set_add_site_buckets(ModelRc::new(VecModel::from(names)));
 }
 
 /// The city a Bunny region code stands for ("Singapore"); the code itself when it is not known.
-#[allow(dead_code)] // Used by `show_zones`.
 fn region_city(code: &str) -> &str {
     REGIONS
         .iter()
@@ -433,9 +431,7 @@ fn region_city(code: &str) -> &str {
 }
 
 /// Wires the callbacks of the sheet that need no session: the address preview of an S3 service.
-/// The rest (Find Zones, the zone and bucket lists, Import, saving an S3 site) are answered in
-/// Task 24; until then the controls that raise them are turned off by `sites-v2-ready`
-/// (Ruling Q10).
+/// The rest (saving, Find Zones, the zone and bucket lists, Import) are answered in `binding.rs`.
 pub fn install(ui: &AppWindow) {
     ui.on_add_site_s3_changed({
         let weak = ui.as_weak();
@@ -447,8 +443,159 @@ pub fn install(ui: &AppWindow) {
     });
 }
 
+impl SiteForm {
+    /// The Bunny password form behind the sheet's `add-site-test` and `add-site-save` callbacks.
+    pub fn bunny(zone: &str, region_index: i32, password: &str) -> Self {
+        Self::BunnyPassword {
+            zone: zone.to_owned(),
+            region_index,
+            password: password.to_owned(),
+        }
+    }
+
+    /// The secret field (password, account key or secret access key) was left empty.
+    pub fn secret_is_empty(&self) -> bool {
+        match self {
+            Self::BunnyPassword { password, .. } => password.is_empty(),
+            Self::BunnyAccount { key } => key.is_empty(),
+            Self::S3 { secret, .. } => secret.is_empty(),
+        }
+    }
+
+    /// The form with `given` in its secret field if that was left empty: the secret Import found,
+    /// which the sheet does not show.
+    pub fn or_secret(mut self, given: &str) -> Self {
+        if self.secret_is_empty() {
+            match &mut self {
+                Self::BunnyPassword { password, .. } => given.clone_into(password),
+                Self::BunnyAccount { key } => given.clone_into(key),
+                Self::S3 { secret, .. } => given.clone_into(secret),
+            }
+        }
+        self
+    }
+}
+
+/// `host[:port]` of an S3 address: what a site's `host` holds and the cloud pane's chip shows.
+pub fn s3_host(base: &Url) -> String {
+    let host = base.host_str().unwrap_or_default();
+    match base.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    }
+}
+
+/// The provider grid's tile for an S3 preset (the inverse of [`preset_for_tile`]).
+pub fn tile_for(preset: S3Preset) -> i32 {
+    match preset {
+        S3Preset::AwsS3 => 1,
+        S3Preset::CloudflareR2 => 2,
+        S3Preset::BackblazeB2 => 3,
+        S3Preset::Wasabi => 4,
+        S3Preset::DigitalOceanSpaces => 5,
+        S3Preset::Minio => 6,
+        S3Preset::Other => 7,
+    }
+}
+
+/// The index into `REGIONS` of a Bunny region written as its code (`sg`) or its city
+/// (`Singapore`), either case; -1 (nothing chosen) for one that is not known.
+pub fn bunny_region_index(region: &str) -> i32 {
+    let region = region.trim();
+    REGIONS
+        .iter()
+        .position(|(code, city)| {
+            code.eq_ignore_ascii_case(region) || city.eq_ignore_ascii_case(region)
+        })
+        .and_then(|i| i32::try_from(i).ok())
+        .unwrap_or(-1)
+}
+
+/// The fields Edit Site starts from for a saved site: everything but the secret, which is left
+/// empty (and kept if it stays so). `key_id` is the access key ID saved for an S3 site.
+pub fn draft_for(site: &SiteRecord, key_id: &str) -> SiteDraft {
+    let mut draft = SiteDraft {
+        name: site.name.as_str().into(),
+        ..SiteDraft::default()
+    };
+    match &site.s3 {
+        None => {
+            draft.zone = site.container.as_str().into();
+            draft.region_index = bunny_region_index(&site.region);
+        }
+        Some(s3) => {
+            draft.provider = tile_for(s3.preset);
+            draft.bucket = site.container.as_str().into();
+            draft.key_id = key_id.into();
+            match s3.preset {
+                S3Preset::CloudflareR2 => {
+                    let account = site.host.split('.').next().unwrap_or_default();
+                    draft.account_id = account.into();
+                }
+                S3Preset::Minio => draft.endpoint = s3.endpoint.as_str().into(),
+                S3Preset::Other => {
+                    draft.endpoint = s3.endpoint.as_str().into();
+                    draft.region = site.region.as_str().into();
+                    draft.path_style = s3.path_style;
+                }
+                S3Preset::AwsS3
+                | S3Preset::BackblazeB2
+                | S3Preset::Wasabi
+                | S3Preset::DigitalOceanSpaces => draft.region = site.region.as_str().into(),
+            }
+        }
+    }
+    draft
+}
+
+/// Puts each of `problems` (from [`validate`]) under its field on the open sheet and clears the
+/// other fields' messages; with any, the keyboard focus goes to the first field that has one.
+/// `s3` says which form they belong to (the Bunny region is a picker, the S3 one a text field).
+pub fn show_form_errors(ui: &AppWindow, s3: bool, problems: &[(&'static str, String)]) {
+    let message = |name: &str| -> SharedString {
+        problems
+            .iter()
+            .find(|(field, _)| *field == name)
+            .map(|(_, message)| message.as_str().into())
+            .unwrap_or_default()
+    };
+    let (bunny, none) = (!s3, SharedString::new());
+    ui.set_add_site_zone_error(message(field::ZONE));
+    ui.set_add_site_region_error(if bunny {
+        message(field::REGION)
+    } else {
+        none.clone()
+    });
+    ui.set_add_site_password_error(message(field::PASSWORD));
+    ui.set_add_site_key_error(message(field::ACCOUNT_KEY));
+    ui.set_add_site_s3_errors(S3Errors {
+        region: if s3 { message(field::REGION) } else { none },
+        account_id: message(field::ACCOUNT_ID),
+        endpoint: message(field::ENDPOINT),
+        bucket: message(field::BUCKET),
+        key_id: message(field::KEY_ID),
+        secret: message(field::SECRET),
+    });
+    if !problems.is_empty() {
+        // Every error moves the keyboard focus to its field, also a repeat of the same one.
+        ui.set_add_site_error_serial(ui.get_add_site_error_serial().wrapping_add(1));
+    }
+}
+
+/// The S3 field a failed test's words blame (the access key ID, the secret or the region), so
+/// the message also goes under it.
+pub fn field_blamed(text: &str) -> Option<&'static str> {
+    match text {
+        copy::S3_ACCESS_KEY_UNKNOWN => Some(field::KEY_ID),
+        copy::S3_SECRET_WRONG => Some(field::SECRET),
+        copy::S3_REGION_WRONG => Some(field::REGION),
+        _ => None,
+    }
+}
+
 /// Shows `error` under its field on the open sheet and clears the other two; `None` clears all.
 /// Showing an error also puts the keyboard focus in that field.
+#[cfg_attr(not(test), allow(dead_code))] // The I1 form's errors (see the module docs).
 pub fn show_field_error(ui: &AppWindow, error: Option<&FieldError>) {
     let message_if = |wanted: bool| -> SharedString {
         match error {

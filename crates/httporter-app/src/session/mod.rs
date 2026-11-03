@@ -27,18 +27,23 @@
 //! client) runs on tokio's blocking threads ([`blocking`]), so that a slow call holds up no task.
 //!
 //! The parts, one file each:
-//! - [`sites`]: the saved sites, adding one, and opening one's storage client;
+//! - [`sites`]: the saved sites, adding, editing, duplicating and removing one, the Bunny account
+//!   key and the S3 bucket list, and opening a site's storage client;
 //! - [`remote`]: the cloud pane;
 //! - [`local`]: the This PC pane;
+//! - [`store`]: the settings kept in the site database;
 //! - `fakes` (tests only): a storage factory and storages that can be held back.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::NaiveDateTime;
-use httporter_bunny::{BunnyConfig, BunnyStorage};
+use httporter_bunny::{BunnyAccount, BunnyConfig, BunnyStorage, ZoneList};
 use httporter_core::{ProviderError, StorageProvider, TransferSettings};
 use httporter_platform::{CredentialStore, SETTINGS_TRANSFERS, Store};
+use httporter_s3::{S3Config, S3Storage};
 
 use crate::site_hub::SiteHub;
 use crate::sort::SortKey;
@@ -50,23 +55,51 @@ mod store;
 
 pub use local::LocalView;
 pub use remote::{RemotePlace, RemoteView};
-pub use sites::{SiteItemData, SiteProvider, endpoint_preview, hub_error_text};
+pub use sites::{SiteItemData, SiteProvider, TestResult, endpoint_preview, hub_error_text};
 
 use local::LocalPane;
 use remote::RemotePane;
 use sites::Book;
 
-/// Builds the storage client for a site. The app uses [`RealFactory`]; tests hand out mocks.
+/// What a provider call that is not a storage operation hands back: the account's zones or the
+/// buckets a key can see. Boxed, so that [`ProviderFactory`] stays usable as a trait object.
+pub type Answer<T> = Pin<Box<dyn Future<Output = Result<T, ProviderError>> + Send>>;
+
+/// Builds the storage client for a site, and makes the two calls the Add Site sheet needs before
+/// there is a site: the zones of a Bunny account and the buckets of an S3 key. The app uses
+/// [`RealFactory`]; tests hand out mocks.
 pub trait ProviderFactory: Send + Sync {
     fn bunny(&self, cfg: BunnyConfig) -> Result<Arc<dyn StorageProvider>, ProviderError>;
+    /// The client of an S3 site (Ruling Q9).
+    fn s3(&self, cfg: S3Config) -> Result<Arc<dyn StorageProvider>, ProviderError>;
+    /// The buckets the key in `cfg` can see (its bucket is ignored).
+    fn s3_buckets(&self, cfg: S3Config) -> Answer<Vec<String>>;
+    /// The storage zones of the Bunny account whose API key is `key`, reached as `settings` say
+    /// (their proxy, Ruling Q41).
+    fn bunny_zones(&self, key: String, settings: &TransferSettings) -> Answer<ZoneList>;
 }
 
-/// Talks to the real Bunny Storage API.
+/// Talks to the real Bunny Storage, Bunny account and S3 APIs.
 pub struct RealFactory;
 
 impl ProviderFactory for RealFactory {
     fn bunny(&self, cfg: BunnyConfig) -> Result<Arc<dyn StorageProvider>, ProviderError> {
         Ok(Arc::new(BunnyStorage::new(cfg)?))
+    }
+
+    fn s3(&self, cfg: S3Config) -> Result<Arc<dyn StorageProvider>, ProviderError> {
+        Ok(Arc::new(S3Storage::new(cfg)?))
+    }
+
+    fn s3_buckets(&self, cfg: S3Config) -> Answer<Vec<String>> {
+        // Made here, so that the TLS set-up runs where this is called (a blocking thread).
+        let storage = S3Storage::new(cfg);
+        Box::pin(async move { storage?.list_buckets().await })
+    }
+
+    fn bunny_zones(&self, key: String, settings: &TransferSettings) -> Answer<ZoneList> {
+        let account = BunnyAccount::with_settings(key, settings);
+        Box::pin(async move { account?.list_zones().await })
     }
 }
 
