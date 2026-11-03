@@ -367,10 +367,13 @@ pub fn resolve_downloads(
 /// Plans deleting `entries`, with the summary the delete alert shows. A selection that
 /// includes the site's top folder is refused before anything is listed.
 ///
-/// A folder goes in one `Delete { folder: true }`. On storage without `recursive_delete` the
-/// files inside it go first, one job each, and the folder's job comes last, after every file
-/// (ruling Q38): the engine runs it once the files are gone, and `delete_folder` then removes
-/// what is left (folder markers).
+/// The files inside a folder go first, one job each, and the folder's `Delete { folder: true }`
+/// comes last, after every file (ruling Q38): the engine runs it once the files are gone, and
+/// `delete_folder` then removes what is left (empty folders, folder markers). This holds with
+/// `recursive_delete` too (ruling Q54): Bunny deletes a folder in one request that answers only
+/// when the last file is gone, about 8 files/s (live probe, Task 7), so a big folder would
+/// outlast any request time limit. The files are listed for the summary anyway, and one job
+/// each shows progress, can be cancelled, and resumes after a crash.
 pub async fn plan_delete(
     provider: &dyn StorageProvider,
     entries: &[Entry],
@@ -389,7 +392,6 @@ pub async fn plan_delete(
             _ => None,
         },
     };
-    let recursive = provider.capabilities().recursive_delete;
     let mut files = BTreeSet::new();
     let mut folder_jobs = BTreeSet::new();
     for entry in outermost(entries) {
@@ -405,9 +407,7 @@ pub async fn plan_delete(
             }
             summary.total_files += 1;
             summary.total_bytes += inside.size;
-            if !recursive {
-                files.insert(inside.path);
-            }
+            files.insert(inside.path);
         }
         folder_jobs.insert(entry.path.clone());
     }

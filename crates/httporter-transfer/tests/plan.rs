@@ -768,8 +768,15 @@ async fn delete_summary_counts_recursively() {
             single: Some(("old-promo-2025".to_owned(), true)),
         }
     );
-    // Bunny deletes a whole folder in one request.
-    assert_eq!(plan.jobs, [delete("old-promo-2025", true)]);
+    // Even where one request could delete the whole folder, each file goes alone and the
+    // folder last (ruling Q54): Bunny's recursive delete outlasts any time limit on big ones.
+    assert_eq!(plan.jobs.len(), 49);
+    assert!(
+        plan.jobs[..48]
+            .iter()
+            .all(|job| matches!(job, Job::Delete { folder: false, .. }))
+    );
+    assert_eq!(plan.jobs[48], delete("old-promo-2025", true));
 
     // Several items: counts of what was picked, and of everything that goes.
     let picked = vec![
@@ -789,10 +796,10 @@ async fn delete_summary_counts_recursively() {
             single: None,
         }
     );
+    assert_eq!(plan.jobs.len(), 48 + 1 + 2 + 1 + 3);
     assert_eq!(
-        plan.jobs,
+        plan.jobs[52..],
         [
-            delete("index.html", false),
             delete("blog", true),
             delete("docs", true),
             delete("old-promo-2025", true),
@@ -931,7 +938,7 @@ async fn delete_without_recursive_capability_expands_to_files_and_markers() {
         .collect();
     assert_eq!(left, ["keep.txt"]);
 
-    // With recursive deletes, one request per folder.
+    // With recursive deletes too, each file alone and the folder last (ruling Q54).
     let recursive = MockProvider::new(Capabilities {
         recursive_delete: true,
         ..Capabilities::default()
@@ -944,7 +951,15 @@ async fn delete_without_recursive_capability_expands_to_files_and_markers() {
         listed(&recursive, "x.txt").await,
     ];
     let plan = plan_delete(&recursive, &picked).await.unwrap();
-    assert_eq!(plan.jobs, [delete("x.txt", false), delete("old", true)]);
+    assert_eq!(
+        plan.jobs,
+        [
+            delete("old/a.txt", false),
+            delete("old/sub/b.txt", false),
+            delete("x.txt", false),
+            delete("old", true),
+        ]
+    );
 }
 
 #[tokio::test]

@@ -466,12 +466,16 @@ fn delete_shows_counts_then_deletes() {
     assert_eq!(b.mock.calls(MockOp::DeleteFile), 0);
     assert_eq!(b.mock.calls(MockOp::DeleteFolder), 0);
 
-    // Delete: the folder goes whole, the file alone, the rest stays.
+    // Delete: each file alone, the folder's own job last (ruling Q54), the rest stays.
     b.t.delete(entries);
     let jobs = wait_for("the delete alert", || {
         lock(&b.t.state).delete.as_ref().map(|d| d.jobs.clone())
     });
-    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert_eq!(jobs.len(), 4, "{jobs:?}");
+    assert!(
+        matches!(jobs.last(), Some(Job::Delete { folder: true, .. })),
+        "{jobs:?}"
+    );
     b.ui.invoke_delete_confirm();
     wait_for("the files to go", || {
         (b.stored("index.html").is_none() && b.stored("old-promo-2025/a.jpg").is_none())
