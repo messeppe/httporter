@@ -587,7 +587,7 @@ fn the_pane_bounds_tell_which_pane_and_row_a_point_is_over() {
     }
 }
 
-fn crumb_names(names: &[&str]) -> ModelRc<SharedString> {
+pub(crate) fn crumb_names(names: &[&str]) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
         names
             .iter()
