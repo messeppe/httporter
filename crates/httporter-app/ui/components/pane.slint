@@ -12,13 +12,19 @@
 // the app decides what is selected and sets each row's `selected`. Dragging in the empty space
 // below the rows draws a rubber band over the rows it crosses. A right click on a row opens its
 // context menu (cloud or This PC rows have their own).
+//
+// Drag and drop: pressing a row and moving 4 px starts a drag of the pane's selection to the other
+// pane (the pane reports `drag-moved`, `drag-ended`, `drag-cancelled`; the window draws the ghost
+// and decides what is under it). Pressing a row that is already selected waits for the button to
+// come up before it narrows the selection, so that a whole selection can be dragged. Files from
+// Explorer, or from the other pane, over this one light it up (`drop-hover`), and a folder row
+// under them too (`drop-row`). Ctrl+V in the cloud pane asks to paste.
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { FileKind, FileRow } from "../types.slint";
+import { FileKind, FileRow, PaneBounds } from "../types.slint";
 import { Activation } from "buttons.slint";
-import { Chip } from "chips.slint";
 import { VCenter } from "layout.slint";
 
 // Sizes shared by the column headers and the rows (mockup `.cols, .row`: padding 0 12px, gap 8px).
@@ -187,6 +193,41 @@ component LoadingMark inherits Rectangle {
     }
 }
 
+// The pill that says what letting go of dragged files does (mockup `.chip`, filled with the accent).
+// A long folder name is cut with an ellipsis rather than overflowing the pane.
+component DropChip inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+
+    height: 24px;
+    background: Theme.accent;
+    border-radius: self.height / 2;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+        alignment: center;
+
+        VCenter {
+            Image {
+                source: root.icon;
+                colorize: Theme.on-accent;
+                width: 14px;
+                height: 14px;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.on-accent;
+            font-size: Theme.font-small;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
 // One file or folder (mockup `.row`): folder disclosure chevron, kind icon and name, then size and
 // modified date. Alternate rows get the `row-alt` background; the selected row fills with the
 // accent colour and white text.
@@ -195,19 +236,36 @@ component PaneRow inherits Rectangle {
     in property <int> index;
     in property <int> count;
     in property <bool> selected;
+    // The folder that files being dragged over the pane would go into: the row is outlined.
+    in property <bool> drop-target: false;
+    // A drag may start from the row (the pane has somewhere to send what it holds).
+    in property <bool> drag-ok: false;
     // The left button went down on the row, with the Ctrl and Shift keys as they were.
     callback pressed(bool /* ctrl */, bool /* shift */);
+    // The left button went down on a selected row, with neither Ctrl nor Shift: `pressed` waits
+    // until the button comes up without a drag, so that the whole selection can be dragged.
+    callback held();
     // The right button went down on the row, at this point of the window.
     callback context-pressed(Point);
     callback opened();
+    // A drag out of the row began (the pointer moved 4 px with the button down) and moved to this
+    // point of the window; the button came up there; or the pointer was taken away from the row.
+    callback drag-moved(Point);
+    callback drag-ended(Point);
+    callback drag-cancelled();
+
+    // Selected and not under a drop: the accent fill with white text.
+    property <bool> lit: root.selected && !root.drop-target;
 
     property <string> kind-label: root.item.kind == FileKind.code ? @tr("code file") : root.item.kind == FileKind.image ? @tr("image") : @tr("document");
     property <image> kind-icon: root.item.kind == FileKind.folder ? Icons.folder : root.item.kind == FileKind.code ? Icons.code : root.item.kind == FileKind.image ? Icons.image : Icons.doc;
-    property <color> kind-color: root.selected ? Theme.sel-text : root.item.kind == FileKind.folder ? Theme.folder : root.item.kind == FileKind.image ? Theme.green : Theme.label2;
-    property <color> detail-color: root.selected ? Theme.sel-text : Theme.label2;
+    property <color> kind-color: root.lit ? Theme.sel-text : root.item.kind == FileKind.folder ? Theme.folder : root.item.kind == FileKind.image ? Theme.green : Theme.label2;
+    property <color> detail-color: root.lit ? Theme.sel-text : Theme.label2;
 
     height: Theme.row-height;
-    background: root.selected ? Theme.sel : (Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent);
+    background: root.drop-target ? Theme.accent-soft : root.selected ? Theme.sel : (Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent);
+    border-width: root.drop-target ? 2px : 0px;
+    border-color: Theme.accent;
     accessible-role: list-item;
     accessible-label: root.item.folder ? @tr("{}, folder, modified {}", root.item.name, root.item.modified) : @tr("{}, {}, {}, modified {}", root.item.name, root.kind-label, root.item.size, root.item.modified);
     accessible-item-selectable: true;
@@ -230,7 +288,7 @@ component PaneRow inherits Rectangle {
                 VCenter {
                     Image {
                         source: Icons.chev-r;
-                        colorize: root.selected ? Theme.sel-text : Theme.label3;
+                        colorize: root.lit ? Theme.sel-text : Theme.label3;
                         opacity: root.item.folder ? 1 : 0;
                         width: 10px;
                         height: 10px;
@@ -248,7 +306,7 @@ component PaneRow inherits Rectangle {
                 }
                 Text {
                     text: root.item.name;
-                    color: root.selected ? Theme.sel-text : Theme.label;
+                    color: root.lit ? Theme.sel-text : Theme.label;
                     font-size: Theme.font-body;
                     vertical-alignment: center;
                     overflow: elide;
@@ -278,15 +336,73 @@ component PaneRow inherits Rectangle {
     }
 
     area := TouchArea {
+        // The left button is down on the row.
+        property <bool> armed: false;
+        // It has moved 4 px since: this is a drag, not a click.
+        property <bool> dragging: false;
+        // `pressed` is owed for when the button comes up (see `held`).
+        property <bool> owed: false;
+        // Where the button went down, in the window.
+        property <length> press-x;
+        property <length> press-y;
+
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 if (event.button == PointerEventButton.left) {
-                    root.pressed(event.modifiers.control, event.modifiers.shift);
+                    self.press-x = self.absolute-position.x + self.mouse-x;
+                    self.press-y = self.absolute-position.y + self.mouse-y;
+                    self.armed = true;
+                    self.dragging = false;
+                    if (root.selected && !event.modifiers.control && !event.modifiers.shift) {
+                        self.owed = true;
+                        root.held();
+                    } else {
+                        self.owed = false;
+                        root.pressed(event.modifiers.control, event.modifiers.shift);
+                    }
                 } else if (event.button == PointerEventButton.right) {
                     root.context-pressed({
                         x: area.absolute-position.x + area.mouse-x,
                         y: area.absolute-position.y + area.mouse-y,
                     });
+                }
+            } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                let was-dragging = self.dragging;
+                let was-owed = self.owed;
+                self.armed = false;
+                self.dragging = false;
+                self.owed = false;
+                if (was-dragging) {
+                    root.drag-ended({
+                        x: self.absolute-position.x + self.mouse-x,
+                        y: self.absolute-position.y + self.mouse-y,
+                    });
+                } else if (was-owed) {
+                    root.pressed(false, false);
+                }
+            } else if (event.kind == PointerEventKind.cancel) {
+                let was-dragging = self.dragging;
+                self.armed = false;
+                self.dragging = false;
+                self.owed = false;
+                if (was-dragging) {
+                    root.drag-cancelled();
+                }
+            }
+        }
+        moved => {
+            if (self.armed && root.drag-ok) {
+                let x = self.absolute-position.x + self.mouse-x;
+                let y = self.absolute-position.y + self.mouse-y;
+                if (!self.dragging) {
+                    let dx = (x - self.press-x) / 1px;
+                    let dy = (y - self.press-y) / 1px;
+                    if (Math.sqrt(dx * dx + dy * dy) >= 4) {
+                        self.dragging = true;
+                    }
+                }
+                if (self.dragging) {
+                    root.drag-moved({ x: x, y: y });
                 }
             }
         }
@@ -301,10 +417,14 @@ export component Pane inherits Rectangle {
     in property <[string]> crumbs;
     in property <[FileRow]> rows;
     in property <string> header-chip;
-    // Files dragged in from Explorer are over this pane: it shows the accent ring and a "Release to
-    // upload" chip. Slint's own drop events do not see files from other apps, so the window sets
-    // this from the OS drag events.
+    // Files are being dragged over this pane, from Explorer or from the other pane: it shows the
+    // accent ring and a chip that says what letting go does ("Release to upload" on the cloud
+    // pane, "Release to download" on This PC). Slint's own drop events do not see files from other
+    // apps, so the window sets this from the OS drag events (and from its own drag).
     in property <bool> drop-hover: false;
+    // The folder row (index into `rows`) that letting go would put the files into, shown while
+    // `drop-hover`; -1 for the folder the pane is showing.
+    in property <int> drop-row: -1;
     // A listing for this pane is on its way: the header says "Loading…" until it is in.
     in property <bool> loading: false;
     // The cloud pane (its rows and context menu), as opposed to This PC.
@@ -340,15 +460,51 @@ export component Pane inherits Rectangle {
     callback new-folder();
     callback delete();
     callback refresh();
+    // Ctrl+V in the cloud pane: upload the files on the clipboard into the folder shown.
+    callback paste();
+    // A drag out of a row of this pane: it moved to this point of the window (the first call is
+    // the start, 4 px from where the button went down), the button came up there, or the drag was
+    // taken away. Nothing is sent unless the pane has somewhere to send its rows (`can-drag`).
+    callback drag-moved(Point);
+    callback drag-ended(Point);
+    callback drag-cancelled();
     // The row (index into `rows`) that the menu was opened on.
     callback show-in-explorer(int);
     // A breadcrumb other than the last was pressed: the index into `crumbs`, 0 being the root.
     callback crumb-clicked(int);
     callback sort(int);
 
+    // Where the pane and its list are in the window, for hit-testing a dragged file's position
+    // (src/drop_hook.rs reads it for the files from Explorer, the window for its own drag).
+    out property <PaneBounds> bounds: {
+        x: root.absolute-position.x,
+        y: root.absolute-position.y,
+        width: root.width,
+        height: root.height,
+        list-top: list-area.absolute-position.y,
+        row-height: Theme.row-height,
+        scroll-y: -list.content-y,
+        rows: root.rows.length,
+    };
+
     property <bool> keyboard-focus: false;
     // The row the open context menu is for, or -1.
     property <int> context-row: -1;
+    // A drag out of a row may start: This PC can upload and the cloud pane can download, which the
+    // toolbar's rules (`can-upload`, `can-download`) already say.
+    property <bool> can-drag: root.cloud ? root.can-download : root.can-upload;
+
+    // Whether the point (x, y) of the window is inside the pane.
+    public pure function contains(x: length, y: length) -> bool {
+        return x >= root.absolute-position.x && x < root.absolute-position.x + root.width && y >= root.absolute-position.y && y < root.absolute-position.y + root.height;
+    }
+
+    // The folder row under the height y of the window, or -1 when that is over a file, the empty
+    // space below the rows, or not the list.
+    public pure function folder-at(y: length) -> int {
+        let row = Math.floor((y - list-area.absolute-position.y - list.content-y) / Theme.row-height);
+        return y >= list-area.absolute-position.y && row >= 0 && row < root.rows.length && root.rows[row].folder ? row : -1;
+    }
 
     forward-focus: key-focus;
     accessible-role: region;
@@ -457,6 +613,13 @@ export component Pane inherits Rectangle {
                     x: 48px,
                     y: root.selected < 0 ? 70px : Math.max(63px, Math.min(card.height - 4px, 63px + list.content-y + (root.selected + 0.5) * Theme.row-height)),
                 });
+                return accept;
+            }
+            // Ctrl+V in the cloud pane: paste the files on the clipboard (offered while Upload is).
+            if (root.cloud && event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift && (event.text == "v" || event.text == "V")) {
+                if (!event.repeat && root.can-upload) {
+                    root.paste();
+                }
                 return accept;
             }
             if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
@@ -743,7 +906,7 @@ export component Pane inherits Rectangle {
 
             // The list view insets its content by 2 px on every side; the list reaches out by that
             // much so that the rows, and the selection, run edge to edge as in the mockup.
-            Rectangle {
+            list-area := Rectangle {
                 vertical-stretch: 1;
                 clip: true;
 
@@ -760,7 +923,18 @@ export component Pane inherits Rectangle {
                         index: i;
                         count: root.rows.length;
                         selected: item.selected;
+                        drop-target: root.drop-hover && i == root.drop-row;
+                        drag-ok: root.can-drag;
                         pressed(ctrl, shift) => { root.pick(i, ctrl, shift); }
+                        held => {
+                            // The selection stays until the button comes up (it may be a drag),
+                            // but the pane takes the focus now.
+                            root.keyboard-focus = false;
+                            key-focus.focus();
+                        }
+                        drag-moved(point) => { root.drag-moved(point); }
+                        drag-ended(point) => { root.drag-ended(point); }
+                        drag-cancelled => { root.drag-cancelled(); }
                         context-pressed(point) => { root.row-menu(i, point); }
                         opened => {
                             root.pick(i, false, false);
@@ -836,27 +1010,28 @@ export component Pane inherits Rectangle {
             }
         }
 
-        // Files from Explorer are over the pane: a light accent wash, the accent ring and a chip
-        // that says what letting go does. Inside the card so that its rounded clip does not cut
-        // the ring.
+        // Files are over the pane: a light accent wash, the accent ring and a chip that says what
+        // letting go does. Over a folder row the wash goes (the row is outlined instead) and the
+        // chip moves to the bottom, out of the row's way. Inside the card so that its rounded clip
+        // does not cut the ring.
         if root.drop-hover: Rectangle {
-            background: Theme.accent-soft;
+            background: root.drop-row >= 0 ? transparent : Theme.accent-soft;
             border-radius: card.border-radius;
             border-width: 2px;
             border-color: Theme.accent;
 
             VerticalLayout {
-                alignment: center;
+                alignment: root.drop-row >= 0 ? end : center;
+                padding-bottom: root.drop-row >= 0 ? 12px : 0px;
+                padding-left: 12px;
+                padding-right: 12px;
 
                 HorizontalLayout {
                     alignment: center;
 
-                    Chip {
-                        text: @tr("Release to upload");
-                        icon: Icons.up;
-                        fg: Theme.on-accent;
-                        bg: Theme.accent;
-                        height: 24px;
+                    DropChip {
+                        text: root.cloud ? (root.drop-row >= 0 ? @tr("Release to upload to {}", root.rows[root.drop-row].name) : @tr("Release to upload")) : (root.drop-row >= 0 ? @tr("Release to download to {}", root.rows[root.drop-row].name) : @tr("Release to download"));
+                        icon: root.cloud ? Icons.up : Icons.down;
                     }
                 }
             }

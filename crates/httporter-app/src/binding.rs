@@ -915,9 +915,17 @@ fn show_summary(ui: &AppWindow, shown: &Shown, pane: ActivePane) {
         .filter_map(|i| rows.get(i))
         .collect();
     let text = SharedString::from(copy::selection_summary(&picked));
+    // What a drag of the selection carries (the ghost counts it).
+    let count = i32::try_from(picked.len()).unwrap_or(i32::MAX);
     match pane {
-        ActivePane::ThisPc => ui.set_local_selection_text(text),
-        ActivePane::Cloud => ui.set_remote_selection_text(text),
+        ActivePane::ThisPc => {
+            ui.set_local_selection_text(text);
+            ui.set_local_selected_count(count);
+        }
+        ActivePane::Cloud => {
+            ui.set_remote_selection_text(text);
+            ui.set_remote_selected_count(count);
+        }
     }
 }
 

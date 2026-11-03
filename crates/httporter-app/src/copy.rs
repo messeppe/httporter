@@ -280,21 +280,36 @@ pub fn local_open_failed(place: &str, reason: impl Display) -> String {
 
 // ---- The status line ----
 
-/// The status line for a drop on a pane, naming the selected site (placeholder text until uploads
-/// exist). With no site selected there is no cloud pane to point to, so the text says to add one.
-pub fn drop_status(batch: &DropBatch, site: Option<&str>) -> String {
+/// The status line for a drop on a pane, naming the selected site and, when the files landed on a
+/// folder row of the cloud pane, the folder (placeholder text until uploads exist). With no site
+/// selected there is no cloud pane to point to, so the text says to add one.
+pub fn drop_status(batch: &DropBatch, site: Option<&str>, folder: Option<&str>) -> String {
     let dropped = items(batch.paths.len());
-    match (batch.side, site) {
-        (PaneSide::Remote, Some(site)) => {
+    match (batch.side, site, folder) {
+        (PaneSide::Remote, Some(site), Some(folder)) => format!(
+            "Uploading arrives in the next build (I2): {dropped} dropped on the {folder} folder in {site}."
+        ),
+        (PaneSide::Remote, None, Some(folder)) => format!(
+            "Uploading arrives in the next build (I2): {dropped} dropped on the {folder} folder."
+        ),
+        (PaneSide::Remote, Some(site), None) => {
             format!("Uploading arrives in the next build (I2): {dropped} dropped on {site}.")
         }
-        (PaneSide::Remote, None) => {
+        (PaneSide::Remote, None, None) => {
             format!("Uploading arrives in the next build (I2): {dropped} dropped.")
         }
-        (PaneSide::Local, Some(site)) => format!("Drop files on the {site} pane to upload them."),
-        (PaneSide::Local, None) => "Add a site, then drop files on its pane to upload them.".into(),
+        (PaneSide::Local, Some(site), _) => {
+            format!("Drop files on the {site} pane to upload them.")
+        }
+        (PaneSide::Local, None, _) => {
+            "Add a site, then drop files on its pane to upload them.".into()
+        }
     }
 }
+
+/// The status line when files were dropped on the window but where they landed could not be told
+/// (the window or the system would not say where the cursor was). The files are ignored.
+pub const DROP_NOT_LOCATED: &str = "Couldn't tell where the files were dropped. Try again.";
 
 // ---- Starting up ----
 
@@ -323,6 +338,7 @@ mod tests {
     fn batch(side: PaneSide, n: usize) -> DropBatch {
         DropBatch {
             side,
+            row: None,
             paths: (0..n).map(|i| format!(r"C:\f{i}").into()).collect(),
         }
     }
@@ -340,15 +356,15 @@ mod tests {
     fn a_drop_on_the_cloud_pane_is_counted_and_one_on_this_pc_points_to_the_site() {
         let site = Some("example-shop.com");
         assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 1), site),
+            drop_status(&batch(PaneSide::Remote, 1), site, None),
             "Uploading arrives in the next build (I2): 1 item dropped on example-shop.com."
         );
         assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 3), site),
+            drop_status(&batch(PaneSide::Remote, 3), site, None),
             "Uploading arrives in the next build (I2): 3 items dropped on example-shop.com."
         );
         assert_eq!(
-            drop_status(&batch(PaneSide::Local, 3), site),
+            drop_status(&batch(PaneSide::Local, 3), site, None),
             "Drop files on the example-shop.com pane to upload them."
         );
     }
@@ -356,11 +372,11 @@ mod tests {
     #[test]
     fn with_no_site_the_drop_status_names_none() {
         assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 2), None),
+            drop_status(&batch(PaneSide::Remote, 2), None, None),
             "Uploading arrives in the next build (I2): 2 items dropped."
         );
         assert_eq!(
-            drop_status(&batch(PaneSide::Local, 2), None),
+            drop_status(&batch(PaneSide::Local, 2), None, None),
             "Add a site, then drop files on its pane to upload them."
         );
     }

@@ -24,3 +24,17 @@ export struct SiteItem {
     mono: string,
     healthy: bool,
 }
+
+// Where a pane is in the window, in logical pixels, for telling what a point is over (a dragged
+// file's position, see src/drop_hook.rs). `list-top` is the top edge of the list, where its first
+// row starts when it is not scrolled; `scroll-y` is how far it is scrolled down (0 or more).
+export struct PaneBounds {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    list-top: length,
+    row-height: length,
+    scroll-y: length,
+    rows: int,
+}
