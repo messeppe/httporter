@@ -221,6 +221,53 @@ mod tests {
         assert_eq!(start.elapsed(), ms(1500) - SLACK);
     }
 
+    /// Ruling Q37: a wait dropped before it ends (a cancelled transfer) gives its booking back.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_wait_gives_its_bytes_back() {
+        let bucket = TokenBucket::new(Some(1000));
+        // Books 5 s of the schedule, then gives up after 100 ms.
+        let gave_up = tokio::time::timeout(ms(100), bucket.take(5000)).await;
+        assert!(gave_up.is_err());
+        let start = Instant::now();
+        bucket.take(1000).await;
+        // Its own second less the slack, not 5 s more.
+        assert_eq!(start.elapsed(), ms(1000) - SLACK);
+    }
+
+    /// Ruling Q37: a new rate wakes the waits under way, which book again at it.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_rate_applies_to_waits_under_way() {
+        let bucket = TokenBucket::new(Some(1000));
+        let start = Instant::now();
+        let faster = async {
+            tokio::time::sleep(ms(1000)).await;
+            bucket.set_rate(Some(10_000));
+        };
+        // 10,000 bytes booked for 10 s; after 1 s they take 1 s at the new rate.
+        tokio::join!(bucket.take(10_000), faster);
+        assert_eq!(start.elapsed(), ms(2000));
+
+        // 1,000 bytes booked for 1 s; after 0.5 s they take 10 s at the new rate.
+        let bucket = TokenBucket::new(Some(1000));
+        let start = Instant::now();
+        let slower = async {
+            tokio::time::sleep(ms(500)).await;
+            bucket.set_rate(Some(100));
+        };
+        tokio::join!(bucket.take(1000), slower);
+        assert_eq!(start.elapsed(), ms(500) + ms(10_000));
+
+        // No limit any more: the wait ends at once.
+        let bucket = TokenBucket::new(Some(1000));
+        let start = Instant::now();
+        let lifted = async {
+            tokio::time::sleep(ms(500)).await;
+            bucket.set_rate(None);
+        };
+        tokio::join!(bucket.take(1000), lifted);
+        assert_eq!(start.elapsed(), ms(500));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn it_meters_upload_bodies() {
         let bucket = TokenBucket::new(Some(1000));

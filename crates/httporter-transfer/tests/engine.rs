@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use httporter_core::{
-    AuthHint, ByteStream, Capabilities, EmptyFolders, EngineSnapshot, EngineState, Job, JobId,
-    JobKind, JobRecord, JobState, Journal, JournalError, Listing, MemoryJournal, MockOp,
-    MockProvider, MultipartProgress, ProviderError, RemotePath, SiteId, StorageProvider,
-    TransferSettings, UploadOptions, UploadSource,
+    AuthHint, ByteStream, Capabilities, Checksum, ChecksumKind, EmptyFolders, EngineSnapshot,
+    EngineState, Job, JobId, JobKind, JobRecord, JobState, Journal, JournalError, Listing,
+    MemoryJournal, MockOp, MockProvider, MultipartProgress, ProviderError, RemotePath, SiteId,
+    StorageProvider, TransferSettings, UploadOptions, UploadSource,
 };
 use httporter_core::{Direction, JobView};
-use httporter_transfer::{AdaptiveLimiter, Batch, Engine, eta, hash_file};
+use httporter_transfer::{AdaptiveLimiter, Batch, Engine, WINDOW, eta, hash_file, messages};
 use md5::Md5;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -172,6 +172,9 @@ struct Recorder {
     journal: Arc<MemoryJournal>,
     uploads: Mutex<Vec<RemotePath>>,
     journal_at_first_upload: Mutex<Option<Vec<JobRecord>>>,
+    /// When set, the next upload cancels its own job through this engine, then answers that
+    /// the credentials were refused: a cancel and an auth failure meeting.
+    cancel_then_refuse: Mutex<Option<Engine>>,
 }
 
 impl Recorder {
@@ -181,6 +184,7 @@ impl Recorder {
             journal,
             uploads: Mutex::new(Vec::new()),
             journal_at_first_upload: Mutex::new(None),
+            cancel_then_refuse: Mutex::new(None),
         }
     }
 }
@@ -202,6 +206,12 @@ impl StorageProvider for Recorder {
         source: UploadSource,
         opts: &UploadOptions,
     ) -> Result<(), ProviderError> {
+        // Taken, so the engine and this client don't hold each other once it's used.
+        let canceller = self.cancel_then_refuse.lock().unwrap().take();
+        if let Some(engine) = canceller {
+            engine.cancel(active_id(&engine, path.as_str()));
+            return Err(refused());
+        }
         {
             let mut first = self.journal_at_first_upload.lock().unwrap();
             if first.is_none() {
@@ -455,8 +465,17 @@ async fn auth_failure_pauses_site_without_failing_items() {
     assert!(journal.unfinished().unwrap().is_empty());
 }
 
+fn offline() -> EngineState {
+    EngineState::Offline {
+        site: SITE_NAME.into(),
+    }
+}
+
+/// Was `network_errors_retry_then_fail_with_reason`. Ruling Q46: network errors no longer fail
+/// a job. They are retried; the third within 10 s takes the site's lane Offline and the job
+/// waits in the queue, its attempts unused, until the site answers a probe (every 5 s).
 #[tokio::test(start_paused = true)]
-async fn network_errors_retry_then_fail_with_reason() {
+async fn network_errors_retry_then_wait_offline_without_failing() {
     let dir = tempfile::tempdir().unwrap();
     let (engine, journal) = engine(TransferSettings::default());
     assert_eq!(TransferSettings::default().retries, 5);
@@ -466,22 +485,35 @@ async fn network_errors_retry_then_fail_with_reason() {
     engine
         .submit(batch(mock.clone(), upload_jobs(dir.path(), 1, 10)))
         .unwrap();
-    let s = wait_for(&engine, "the failure", |s| s.files_failed == 1).await;
-    assert_eq!(start.elapsed(), Duration::from_secs(1 + 2 + 4 + 8 + 10));
-    assert_eq!(mock.calls(MockOp::Upload), 6);
-    assert_eq!(s.failed.len(), 1);
-    assert_eq!(s.failed[0].error.as_deref(), Some("No connection"));
-    assert_eq!(s.failed[0].path, "up/f0.txt");
-    assert_eq!(s.files_done, 0);
 
-    wait_idle(&engine).await;
+    // Tries at 0, 1 and 3 s: the third error within 10 s takes the lane offline.
+    let s = wait_for(&engine, "the lane to go offline", |s| {
+        s.state == offline() && s.active.is_empty()
+    })
+    .await;
+    assert_eq!(start.elapsed(), Duration::from_secs(3));
+    assert_eq!(mock.calls(MockOp::Upload), 3);
+    assert_eq!((s.files_failed, s.queued_count), (0, 1), "{}", brief(&s));
+    assert!(s.failed.is_empty());
+    assert_eq!(count(&journal, JobState::Failed), 0);
+
+    // The probe at 8 s gets an answer; the next three tries (8, 9 and 11 s) fail again and
+    // the lane waits for the probe at 16 s; the upload after it goes through.
+    let s = wait_idle(&engine).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(16));
+    assert_eq!((s.files_done, s.files_failed), (1, 0), "{}", brief(&s));
+    assert_eq!(s.state, EngineState::Idle);
+    assert_eq!(mock.calls(MockOp::Upload), 7);
+    assert_eq!(mock.calls(MockOp::Reachable), 2);
     let record = &journal.records()[0];
-    assert_eq!(record.state, JobState::Failed);
-    assert_eq!(record.error.as_deref(), Some("No connection"));
+    assert_eq!(record.state, JobState::Done);
+    assert_eq!(record.error, None);
 }
 
+/// Was `zero_retries_fail_on_first_error`. Ruling Q46: with no retries, a job's first network
+/// error uses up its retries, which takes the lane offline instead of failing the job.
 #[tokio::test(start_paused = true)]
-async fn zero_retries_fail_on_first_error() {
+async fn zero_retries_go_offline_on_the_first_network_error() {
     let dir = tempfile::tempdir().unwrap();
     let (engine, _journal) = engine(TransferSettings {
         retries: 0,
@@ -493,10 +525,73 @@ async fn zero_retries_fail_on_first_error() {
     engine
         .submit(batch(mock.clone(), upload_jobs(dir.path(), 1, 10)))
         .unwrap();
-    let s = wait_for(&engine, "the failure", |s| s.files_failed == 1).await;
+    let s = wait_for(&engine, "the lane to go offline", |s| {
+        s.state == offline() && s.active.is_empty()
+    })
+    .await;
     assert_eq!(start.elapsed(), Duration::ZERO);
     assert_eq!(mock.calls(MockOp::Upload), 1);
-    assert_eq!(s.failed[0].error.as_deref(), Some("No connection"));
+    assert_eq!((s.files_failed, s.queued_count), (0, 1), "{}", brief(&s));
+
+    let s = wait_idle(&engine).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(5), "after one probe");
+    assert_eq!((s.files_done, s.files_failed), (1, 0), "{}", brief(&s));
+    assert_eq!(mock.calls(MockOp::Upload), 2);
+}
+
+/// Ruling Q46: only network errors take a lane offline. Any other error still fails the job,
+/// with the `describe` hook's words: a retryable one once the retries are used up, a permanent
+/// one at once.
+#[tokio::test(start_paused = true)]
+async fn non_network_errors_still_fail_with_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(TransferSettings::default());
+    let mock = Arc::new(MockProvider::new(Capabilities::default()));
+    let bad_gateway = ProviderError::Server {
+        status: 502,
+        detail: "bad gateway".into(),
+    };
+    mock.fail_next(MockOp::Upload, bad_gateway.clone(), 6);
+    let start = Instant::now();
+    engine
+        .submit(batch(mock.clone(), upload_jobs(dir.path(), 1, 10)))
+        .unwrap();
+    let s = wait_for(&engine, "the failure", |s| s.files_failed == 1).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(1 + 2 + 4 + 8 + 10));
+    assert_eq!(mock.calls(MockOp::Upload), 6);
+    assert_eq!(mock.calls(MockOp::Reachable), 0, "never offline");
+    assert_eq!(s.failed[0].path, "up/f0.txt");
+    assert_eq!(s.failed[0].error, Some(describe(&bad_gateway)));
+    let s = wait_idle(&engine).await;
+    assert_eq!(s.state, EngineState::Idle);
+    assert_eq!(journal.records()[0].state, JobState::Failed);
+    assert_eq!(journal.records()[0].error, Some(describe(&bad_gateway)));
+
+    let refused = ProviderError::Permanent("no space on the server".into());
+    mock.fail_next(MockOp::Upload, refused.clone(), 1);
+    let start = Instant::now();
+    let local = dir.path().join("second.txt");
+    std::fs::write(&local, b"second").unwrap();
+    engine
+        .submit(batch(
+            mock.clone(),
+            vec![Job::Upload {
+                local,
+                remote: p("up/second.txt"),
+                size: 6,
+            }],
+        ))
+        .unwrap();
+    let s = wait_for(&engine, "the second failure", |s| s.files_failed == 2).await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::ZERO,
+        "a permanent error is not retried"
+    );
+    assert_eq!(mock.calls(MockOp::Upload), 7);
+    assert_eq!(mock.calls(MockOp::Reachable), 0);
+    let second = s.failed.iter().find(|v| v.path == "up/second.txt").unwrap();
+    assert_eq!(second.error, Some(describe(&refused)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1350,4 +1445,415 @@ async fn a_retried_job_finishes_its_batch_again() {
         s.last_batch.as_ref().map(|b| (b.files, b.bytes)),
         Some((2, 20))
     );
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
+
+fn md5_hex(data: &[u8]) -> String {
+    hex::encode(Md5::digest(data))
+}
+
+fn download(remote: &str, local: PathBuf, size: u64) -> Job {
+    Job::Download {
+        remote: p(remote),
+        local,
+        size,
+    }
+}
+
+/// Ruling Q27: a download whose batch lists its SHA-256 or MD5 is checked as it arrives. A
+/// multipart ETag is no digest of the contents, so there is nothing to check.
+#[tokio::test(start_paused = true)]
+async fn download_verifies_expected_checksum() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path();
+    let (unverified, _journal) = engine(TransferSettings {
+        verify_checksums: false,
+        ..TransferSettings::default()
+    });
+    let (engine, journal) = engine(TransferSettings::default());
+    let mock = Arc::new(
+        MockProvider::new(Capabilities::default())
+            .with_file("a.bin", b"alpha")
+            .with_file("b.bin", b"bravo")
+            .with_file("c.bin", b"charlie"),
+    );
+    let checksums = HashMap::from([
+        (
+            p("a.bin"),
+            Checksum {
+                kind: ChecksumKind::Sha256,
+                hex: sha256_hex(b"alpha"),
+            },
+        ),
+        (
+            p("b.bin"),
+            Checksum {
+                kind: ChecksumKind::Md5,
+                // Hex digits in either case.
+                hex: md5_hex(b"bravo").to_uppercase(),
+            },
+        ),
+        (
+            p("c.bin"),
+            Checksum {
+                kind: ChecksumKind::MultipartEtag,
+                hex: "0123456789abcdef0123456789abcdef-2".into(),
+            },
+        ),
+    ]);
+    let jobs = vec![
+        download("a.bin", out.join("a.bin"), 5),
+        download("b.bin", out.join("b.bin"), 5),
+        download("c.bin", out.join("c.bin"), 7),
+    ];
+    engine
+        .submit(Batch {
+            checksums,
+            ..batch(mock.clone(), jobs)
+        })
+        .unwrap();
+    let s = wait_idle(&engine).await;
+    assert_eq!((s.files_done, s.files_failed), (3, 0), "{}", brief(&s));
+    assert_eq!(
+        mock.calls(MockOp::Download),
+        3,
+        "each arrived whole the first time"
+    );
+    assert_eq!(std::fs::read(out.join("a.bin")).unwrap(), b"alpha");
+    assert_eq!(std::fs::read(out.join("b.bin")).unwrap(), b"bravo");
+    assert_eq!(std::fs::read(out.join("c.bin")).unwrap(), b"charlie");
+    assert_eq!(count(&journal, JobState::Done), 3);
+
+    // With checksum verification off, a listed digest isn't checked (Task 13's reading of
+    // Q27: the setting covers downloads too).
+    let wrong = HashMap::from([(
+        p("a.bin"),
+        Checksum {
+            kind: ChecksumKind::Sha256,
+            hex: sha256_hex(b"something else"),
+        },
+    )]);
+    let unchecked = out.join("unchecked.bin");
+    unverified
+        .submit(Batch {
+            checksums: wrong,
+            ..batch(mock.clone(), vec![download("a.bin", unchecked.clone(), 5)])
+        })
+        .unwrap();
+    let s = wait_idle(&unverified).await;
+    assert_eq!((s.files_done, s.files_failed), (1, 0), "{}", brief(&s));
+    assert_eq!(std::fs::read(&unchecked).unwrap(), b"alpha");
+}
+
+/// Ruling Q27: contents that don't match the listed digest are fetched once more; a second
+/// mismatch fails the job as damaged twice, leaving neither the target nor a part file.
+#[tokio::test(start_paused = true)]
+async fn download_mismatch_retries_once_then_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(TransferSettings::default());
+    let mock = Arc::new(
+        MockProvider::new(Capabilities::default()).with_file("photo.jpg", b"what is stored"),
+    );
+    let target = dir.path().join("photo.jpg");
+    let checksums = HashMap::from([(
+        p("photo.jpg"),
+        Checksum {
+            kind: ChecksumKind::Sha256,
+            hex: sha256_hex(b"what the listing said"),
+        },
+    )]);
+    engine
+        .submit(Batch {
+            checksums,
+            ..batch(
+                mock.clone(),
+                vec![download("photo.jpg", target.clone(), 14)],
+            )
+        })
+        .unwrap();
+    let s = wait_idle(&engine).await;
+    assert_eq!((s.files_done, s.files_failed), (0, 1), "{}", brief(&s));
+    assert_eq!(
+        mock.calls(MockOp::Download),
+        2,
+        "fetched once more, then given up"
+    );
+    assert_eq!(s.failed[0].error.as_deref(), Some(messages::DAMAGED_TWICE));
+    assert!(!target.exists());
+    assert_eq!(part_files(dir.path()), Vec::<PathBuf>::new());
+    let record = &journal.records()[0];
+    assert_eq!(record.state, JobState::Failed);
+    assert_eq!(record.error.as_deref(), Some(messages::DAMAGED_TWICE));
+}
+
+/// Ruling Q29: a queued job held back with `pause` says so in its row.
+#[tokio::test(start_paused = true)]
+async fn a_paused_item_says_so_in_its_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, _journal) = engine(with(1));
+    let mock = slow_mock(Duration::from_secs(1));
+    engine
+        .submit(batch(mock.clone(), upload_jobs(dir.path(), 3, 10)))
+        .unwrap();
+    let rows = |engine: &Engine| -> Vec<(String, bool)> {
+        engine
+            .snapshot()
+            .queued
+            .iter()
+            .map(|view| (view.path.clone(), view.paused))
+            .collect()
+    };
+    let row = |path: &str, paused: bool| (path.to_owned(), paused);
+    let held = queued_id(&engine, "up/f2.txt");
+    engine.pause(held);
+    assert_eq!(
+        rows(&engine),
+        [
+            row("up/f0.txt", false),
+            row("up/f1.txt", false),
+            row("up/f2.txt", true)
+        ]
+    );
+
+    // Still paused once the others are done.
+    let s = wait_for(&engine, "the others", |s| s.files_done == 2).await;
+    assert_eq!(rows(&engine), [row("up/f2.txt", true)]);
+    assert!(s.done.iter().all(|view| !view.paused));
+
+    engine.resume(held);
+    assert_eq!(rows(&engine), [row("up/f2.txt", false)]);
+    let s = wait_idle(&engine).await;
+    assert_eq!(s.files_done, 3);
+}
+
+/// Ruling Q29: `active_count` counts every job in flight, not just the 200 the window shows.
+#[tokio::test(start_paused = true)]
+async fn active_count_counts_past_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, _journal) = engine(with(250));
+    let mock = Arc::new(MockProvider::new(Capabilities {
+        transfer_concurrency_max: 300,
+        ..Capabilities::default()
+    }));
+    mock.set_latency(MockOp::Upload, Duration::from_secs(1));
+    let local = dir.path().join("tiny.txt");
+    std::fs::write(&local, b"x").unwrap();
+    let jobs = (0..300)
+        .map(|i| Job::Upload {
+            local: local.clone(),
+            remote: p(&format!("many/f{i:03}.txt")),
+            size: 1,
+        })
+        .collect();
+    let start = Instant::now();
+    engine.submit(batch(mock.clone(), jobs)).unwrap();
+    tokio::time::sleep_until(start + secs(0.5)).await;
+    let s = engine.snapshot();
+    assert_eq!(s.active_count, 250, "{}", brief(&s));
+    assert_eq!(s.active.len(), WINDOW);
+    assert_eq!(s.active[0].path, "many/f000.txt");
+    assert_eq!(s.active[WINDOW - 1].path, "many/f199.txt");
+    assert_eq!(s.queued_count, 50);
+
+    let s = wait_idle(&engine).await;
+    assert_eq!((s.active_count, s.files_done), (0, 300));
+}
+
+/// Ruling Q37: a folder delete waits for a folder delete in flight above it, as well as for
+/// work in flight below it.
+#[tokio::test(start_paused = true)]
+async fn a_folder_delete_waits_for_a_folder_delete_above_it() {
+    let (engine, _journal) = engine(TransferSettings::default());
+    let mock = Arc::new(
+        MockProvider::new(Capabilities {
+            recursive_delete: true,
+            ..Capabilities::default()
+        })
+        .with_file("a/b/c.txt", b"c")
+        .with_file("a/d.txt", b"d"),
+    );
+    mock.set_latency(MockOp::DeleteFolder, Duration::from_secs(5));
+    let folder = |path: &str| Job::Delete {
+        remote: p(path),
+        folder: true,
+    };
+    let start = Instant::now();
+    engine
+        .submit(batch(mock.clone(), vec![folder("a")]))
+        .unwrap();
+    engine
+        .submit(batch(mock.clone(), vec![folder("a/b")]))
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let s = engine.snapshot();
+    let paths =
+        |views: &[JobView]| -> Vec<String> { views.iter().map(|v| v.path.clone()).collect() };
+    assert_eq!(paths(&s.active), ["a"]);
+    assert_eq!(paths(&s.queued), ["a/b"]);
+
+    let s = wait_idle(&engine).await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(10),
+        "one after the other"
+    );
+    // `a/b` went with `a`: its own delete finds nothing, which is done (ruling Q45).
+    assert_eq!((s.files_done, s.files_failed), (2, 0), "{}", brief(&s));
+    assert_eq!(mock.calls(MockOp::DeleteFolder), 2);
+    assert_eq!(mock.max_in_flight(MockOp::DeleteFolder), 1);
+}
+
+/// Ruling Q37: a `delete_batch` request is one success for the lane's limiter, however many
+/// paths it carried. After a slow-down halves the delete limit, it takes 20 successful
+/// requests, not 20 paths, to win a slot back.
+#[tokio::test(start_paused = true)]
+async fn one_delete_batch_counts_as_one_success() {
+    let (engine, _journal) = engine(TransferSettings::default());
+    let mut mock = MockProvider::new(Capabilities {
+        batch_delete_max: 10,
+        delete_concurrency: 2,
+        ..Capabilities::default()
+    });
+    for i in 0..240 {
+        mock = mock.with_file(&format!("old/f{i:03}.txt"), b"x");
+    }
+    let mock = Arc::new(mock);
+    mock.set_latency(MockOp::DeleteBatch, Duration::from_secs(1));
+    let deletes = |range: std::ops::Range<usize>| -> Vec<Job> {
+        range
+            .map(|i| Job::Delete {
+                remote: p(&format!("old/f{i:03}.txt")),
+                folder: false,
+            })
+            .collect()
+    };
+
+    // A request of ten paths is asked to slow down: the limit halves from 2 to 1. Sent again,
+    // the ten paths go: one success.
+    mock.fail_next(
+        MockOp::DeleteBatch,
+        ProviderError::RateLimited { retry_after: None },
+        1,
+    );
+    engine.submit(batch(mock.clone(), deletes(0..10))).unwrap();
+    let s = wait_idle(&engine).await;
+    assert_eq!((s.files_done, s.files_failed), (10, 0), "{}", brief(&s));
+    assert_eq!(mock.calls(MockOp::DeleteBatch), 2);
+
+    // Three more requests make four successes. Counted by path (40) the limit would be back
+    // at 2 after the first of them, and the other two would go together.
+    let start = Instant::now();
+    engine.submit(batch(mock.clone(), deletes(10..40))).unwrap();
+    wait_idle(&engine).await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(3),
+        "one request at a time"
+    );
+    assert_eq!(mock.max_in_flight(MockOp::DeleteBatch), 1);
+
+    // The 20th successful request (the 16th of these twenty) wins the slot back: the last
+    // four requests go two at a time.
+    let start = Instant::now();
+    engine
+        .submit(batch(mock.clone(), deletes(40..240)))
+        .unwrap();
+    let s = wait_idle(&engine).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(16 + 2));
+    assert_eq!(mock.max_in_flight(MockOp::DeleteBatch), 2);
+    assert_eq!((s.files_done, s.files_failed), (200, 0), "{}", brief(&s));
+}
+
+/// Ruling Q37: a job cancelled while its request was out stays cancelled, whatever the request
+/// answers, even an auth failure: the site isn't stopped and the job doesn't come back.
+#[tokio::test(start_paused = true)]
+async fn a_pending_cancel_beats_an_auth_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(with(1));
+    let recorder = Arc::new(Recorder::new(
+        MockProvider::new(Capabilities::default()),
+        journal.clone(),
+    ));
+    *recorder.cancel_then_refuse.lock().unwrap() = Some(engine.clone());
+    engine
+        .submit(batch(recorder.clone(), upload_jobs(dir.path(), 2, 10)))
+        .unwrap();
+    let s = wait_idle(&engine).await;
+    assert_eq!(s.state, EngineState::Idle);
+    assert!(!engine.is_auth_stopped(&site()));
+    assert_eq!(engine.auth_stopped_site(), None);
+    assert_eq!(
+        (s.files_done, s.files_total, s.files_failed),
+        (1, 1, 0),
+        "{}",
+        brief(&s)
+    );
+    assert_eq!(recorder.mock.contents(&p("up/f0.txt")), None);
+    assert!(recorder.mock.contents(&p("up/f1.txt")).is_some());
+    assert_eq!(states(&journal), [JobState::Cancelled, JobState::Done]);
+}
+
+/// Ruling Q37: a batch without jobs changes nothing; in particular it doesn't start a new run,
+/// which would clear the totals and the done list the drawer shows.
+#[tokio::test(start_paused = true)]
+async fn an_empty_batch_keeps_the_run_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(TransferSettings::default());
+    let mock = Arc::new(MockProvider::new(Capabilities::default()));
+    engine
+        .submit(batch(mock.clone(), upload_jobs(dir.path(), 3, 10)))
+        .unwrap();
+    let before = wait_idle(&engine).await;
+    assert_eq!((before.files_done, before.done.len()), (3, 3));
+
+    let id = engine.submit(batch(mock.clone(), Vec::new())).unwrap();
+    assert!(uuid_like(&id), "{id}");
+    let after = engine.snapshot();
+    assert_eq!(
+        (after.files_total, after.files_done, after.bytes_done),
+        (3, 3, 30)
+    );
+    assert_eq!(after.done, before.done);
+    assert_eq!(after.done_count, 3);
+    assert_eq!(after.last_batch, before.last_batch);
+    assert_eq!(journal.records().len(), 3, "nothing was journalled");
+    assert!(!engine.is_busy());
+}
+
+/// Ruling Q45: a folder delete that finds no folder is done. On S3 a folder vanishes with its
+/// last file, so the delete that follows the file deletes (ruling Q38) finds nothing.
+#[tokio::test(start_paused = true)]
+async fn a_folder_delete_that_finds_nothing_counts_as_done() {
+    for recursive_delete in [true, false] {
+        let (engine, journal) = engine(TransferSettings::default());
+        let mock = Arc::new(
+            MockProvider::new(Capabilities {
+                recursive_delete,
+                ..Capabilities::default()
+            })
+            .with_file("kept.txt", b"k"),
+        );
+        engine
+            .submit(batch(
+                mock.clone(),
+                vec![Job::Delete {
+                    remote: p("gone"),
+                    folder: true,
+                }],
+            ))
+            .unwrap();
+        let s = wait_idle(&engine).await;
+        assert_eq!(
+            (s.files_done, s.files_failed),
+            (1, 0),
+            "recursive_delete {recursive_delete}: {}",
+            brief(&s)
+        );
+        assert_eq!(mock.calls(MockOp::DeleteFolder), 1, "not retried");
+        assert_eq!(count(&journal, JobState::Done), 1);
+        assert!(mock.contents(&p("kept.txt")).is_some());
+    }
 }
