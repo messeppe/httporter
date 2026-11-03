@@ -404,6 +404,31 @@ mod tests {
         assert!(!rows[1].folder);
     }
 
+    /// Task 17: a row carries the file's size in bytes, for adding up a selection; a folder has none
+    /// (whatever size the listing gave it), and a new row is not selected.
+    #[test]
+    fn rows_carry_their_bytes_for_the_selection_summary() {
+        let entries = [
+            entry("index.html", false, 392_641, None),
+            entry("wp-content", true, 4096, None),
+            entry("empty.txt", false, 0, None),
+        ];
+        let rows = rows_from_remote(&entries, now());
+        let bytes: Vec<(&str, u64)> = rows.iter().map(|r| (r.name.as_str(), r.bytes)).collect();
+        assert_eq!(
+            bytes,
+            [("wp-content", 0), ("empty.txt", 0), ("index.html", 392_641)]
+        );
+        let local = [
+            local("a.bin", false, 1024, None),
+            local("dir", true, 77, None),
+        ];
+        let rows = rows_from_local(&local, now());
+        let bytes: Vec<u64> = rows.iter().map(|r| r.bytes).collect();
+        assert_eq!(bytes, [0, 1024]);
+        assert!(to_slint_rows(&rows).iter().all(|r| !r.selected));
+    }
+
     #[test]
     fn local_rows_format_and_order() {
         let modified = NaiveDate::from_ymd_opt(2026, 10, 29)

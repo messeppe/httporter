@@ -415,7 +415,7 @@ impl Session {
     /// that failed in its own way (a 5xx, Bunny's busy 400), has answered: the pane stays where
     /// it was, still connected if it had connected before. Any other failure leaves it there, not
     /// connected. A failed listing leaves the history as it was.
-    fn finish_listing(
+    pub(super) fn finish_listing(
         &self,
         ticket: Ticket,
         dir: RemotePath,

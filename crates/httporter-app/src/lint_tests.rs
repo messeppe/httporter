@@ -395,12 +395,20 @@ fn user_facing_strings_are_wrapped_in_tr() {
 // ---- Rule 2: Rust-built text lives in copy.rs ----
 
 /// The functions that make the app's words. They are defined in `copy.rs` and nowhere else.
-const COPY_FUNCTIONS: [&str; 6] = [
+const COPY_FUNCTIONS: [&str; 14] = [
     "items",
     "items_status",
     "describe",
+    "describe_for",
+    "describe_listing",
+    "zone_not_found",
+    "bucket_not_found",
     "describe_transfer_error",
     "drop_status",
+    "selection_summary",
+    "status_right",
+    "local_not_found",
+    "local_open_failed",
     "startup_error_text",
 ];
 
@@ -595,5 +603,105 @@ fn copy_strings_live_only_in_copy_rs() {
         offenders.is_empty(),
         "words written outside copy.rs:\n{}",
         offenders.join("\n")
+    );
+}
+
+// ---- Rule 1, for the context menus ----
+
+/// The title of every `MenuItem` of the context menu declared as `{name} := ContextMenuArea { … }`
+/// in `source` (Slint), in order, as written: `@tr("Download")` gives `Download`, and a title that
+/// is not a translated string is given as it is, with "NOT TRANSLATED: " in front.
+fn menu_titles(source: &str, name: &str) -> Vec<String> {
+    let masked = mask(source, Lang::Slint);
+    let start = masked
+        .find(&format!("{name} := ContextMenuArea"))
+        .unwrap_or_else(|| panic!("no context menu {name}"));
+    let open = start + masked[start..].find('{').unwrap();
+    let end = past_matching(&masked, open);
+    let mut titles = Vec::new();
+    for item in find_all(&masked[open..end], "MenuItem {") {
+        let from = open + item;
+        let after = &masked[from..end];
+        let Some(title) = after.find("title:") else {
+            continue;
+        };
+        let value_start = from + title + "title:".len();
+        let value_end = value_start + masked[value_start..].find(';').unwrap();
+        let value = source[value_start..value_end].trim();
+        match value
+            .strip_prefix("@tr(\"")
+            .and_then(|rest| rest.strip_suffix("\")"))
+        {
+            Some(text) if !text.contains('"') => titles.push(text.to_owned()),
+            _ => titles.push(format!("NOT TRANSLATED: {value}")),
+        }
+    }
+    titles
+}
+
+#[test]
+fn menu_title_scanner_reads_titles_and_flags_plain_strings() {
+    let source = r#"
+        Pane {
+            // MenuItem { title: "commented out"; }
+            first := ContextMenuArea {
+                Menu {
+                    MenuItem { title: @tr("Open"); activated => { root.open(); } }
+                    MenuSeparator { }
+                    MenuItem {
+                        title: @tr("Save as…");
+                        enabled: root.can-save;
+                    }
+                    MenuItem { title: "Plain"; }
+                    MenuItem { title: root.name; }
+                }
+            }
+            second := ContextMenuArea {
+                Menu { MenuItem { title: @tr("Other"); } }
+            }
+        }
+    "#;
+    assert_eq!(
+        menu_titles(source, "first"),
+        [
+            "Open",
+            "Save as…",
+            "NOT TRANSLATED: \"Plain\"",
+            "NOT TRANSLATED: root.name"
+        ]
+    );
+    assert_eq!(menu_titles(source, "second"), ["Other"]);
+}
+
+/// Task 17: the context menus carry the entries the brief lists, cloud rows: Download, Download
+/// to…, New Folder…, Delete…, Refresh; This PC rows: Upload, New Folder…, Show in Explorer,
+/// Refresh, and every title goes through `@tr()` (the headless test in `pane_tests.rs` opens the
+/// menus and reads what they show).
+#[test]
+fn context_menu_items_are_the_listed_ones_and_all_go_through_tr() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/components/pane.slint");
+    let source = std::fs::read_to_string(path).unwrap();
+    assert_eq!(
+        menu_titles(&source, "cloud-menu"),
+        [
+            "Download",
+            "Download to…",
+            "New Folder…",
+            "Delete…",
+            "Refresh"
+        ]
+    );
+    assert_eq!(
+        menu_titles(&source, "local-menu"),
+        ["Upload", "New Folder…", "Show in Explorer", "Refresh"]
+    );
+    // The sidebar's site menu is another context menu, and its titles go through `@tr()` too.
+    let sidebar = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/components/sidebar.slint");
+    let sidebar = std::fs::read_to_string(sidebar).unwrap();
+    let site_menu = menu_titles(&sidebar, "site-menu");
+    assert!(!site_menu.is_empty());
+    assert!(
+        site_menu.iter().all(|t| !t.starts_with("NOT TRANSLATED")),
+        "{site_menu:?}"
     );
 }

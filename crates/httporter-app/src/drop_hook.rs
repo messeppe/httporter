@@ -542,6 +542,185 @@ mod tests {
         assert_eq!(to_logical((-1700, 80), geometry), (100.0, 100.0));
     }
 
+    // ---- Where a point is: the pane, and the row of its list ----
+
+    /// Ledger 228: the cloud pane of `side_by_side()` covers x 640..1270 and y 60..660; its list
+    /// starts at y = 123 (a 63 px header and column titles) and has 28 px rows.
+    #[test]
+    fn hit_maps_rows_with_scroll() {
+        let layout = side_by_side();
+        let at = |y: f32| hit((900.0, y), &layout);
+        assert_eq!(at(123.0), Some((PaneSide::Remote, Some(0))));
+        assert_eq!(at(150.9), Some((PaneSide::Remote, Some(0))));
+        assert_eq!(at(151.0), Some((PaneSide::Remote, Some(1))));
+        assert_eq!(
+            at(402.9),
+            Some((PaneSide::Remote, Some(9))),
+            "the last of ten"
+        );
+        // The same rows in the other pane, by the x of the point.
+        assert_eq!(
+            hit((100.0, 151.0), &layout),
+            Some((PaneSide::Local, Some(1)))
+        );
+
+        // Above the list (the header and the column titles) it is the pane, not a row.
+        assert_eq!(at(60.0), Some((PaneSide::Remote, None)));
+        assert_eq!(at(96.0), Some((PaneSide::Remote, None)));
+        assert_eq!(at(122.9), Some((PaneSide::Remote, None)));
+
+        // Scrolled down two and a half rows (70 px) of a long list: the row under the top edge is
+        // the third, and the rows move on by one every 28 px.
+        let mut scrolled = layout;
+        scrolled.remote.scroll_y = 70.0;
+        scrolled.remote.rows = 100;
+        let at = |y: f32| hit((900.0, y), &scrolled);
+        assert_eq!(at(123.0), Some((PaneSide::Remote, Some(2))));
+        assert_eq!(at(136.9), Some((PaneSide::Remote, Some(2))));
+        assert_eq!(at(137.0), Some((PaneSide::Remote, Some(3))));
+        // The header is still the header, whatever the scroll.
+        assert_eq!(at(122.9), Some((PaneSide::Remote, None)));
+        // The other pane's scroll is its own.
+        assert_eq!(
+            hit((100.0, 123.0), &scrolled),
+            Some((PaneSide::Local, Some(0)))
+        );
+        // A list scrolled to its last rows.
+        scrolled.remote.scroll_y = 90.0 * 28.0;
+        assert_eq!(
+            hit((900.0, 123.0), &scrolled),
+            Some((PaneSide::Remote, Some(90)))
+        );
+    }
+
+    /// Ledger 228: a point outside both panes' rectangles hits nothing, so a drop on the toolbar,
+    /// the status bar or the transfer drawer is not taken for one on a pane.
+    #[test]
+    fn toolbar_and_status_bar_hit_nothing() {
+        let layout = side_by_side();
+        // The toolbar, above the panes (y < 60), over either pane's x range.
+        for x in [100.0, 900.0] {
+            assert_eq!(hit((x, 0.0), &layout), None);
+            assert_eq!(hit((x, 20.0), &layout), None);
+            assert_eq!(hit((x, 59.9), &layout), None);
+        }
+        // The status bar and the drawer, below them (the panes end at y = 660).
+        for x in [100.0, 900.0] {
+            assert_eq!(hit((x, 660.0), &layout), None);
+            assert_eq!(hit((x, 690.0), &layout), None);
+            assert_eq!(hit((x, 5000.0), &layout), None);
+        }
+        // The sidebar to the left, the gap between the panes and the margin to the right.
+        assert_eq!(hit((5.0, 300.0), &layout), None);
+        assert_eq!(hit((639.0, 300.0), &layout), None);
+        assert_eq!(hit((1270.0, 300.0), &layout), None);
+        // Nowhere at all.
+        assert_eq!(hit((-10.0, -10.0), &layout), None);
+        assert_eq!(hit((f32::NAN, 300.0), &layout), None);
+        assert_eq!(hit((100.0, f32::NAN), &layout), None);
+        assert_eq!(hit((f32::INFINITY, 300.0), &layout), None);
+        // The edges: the top left corner is in, the bottom right one is out.
+        assert_eq!(hit((8.0, 60.0), &layout), Some((PaneSide::Local, None)));
+        assert_eq!(hit((637.9, 659.9), &layout), Some((PaneSide::Local, None)));
+        assert_eq!(hit((638.0, 659.9), &layout), None);
+    }
+
+    #[test]
+    fn stacked_layout_hits() {
+        let layout = stacked();
+        // The local pane is above (y 60..660), the cloud pane below (y 700..1300), both at x 8.
+        assert_eq!(hit((300.0, 100.0), &layout), Some((PaneSide::Local, None)));
+        assert_eq!(
+            hit((300.0, 123.0), &layout),
+            Some((PaneSide::Local, Some(0)))
+        );
+        assert_eq!(hit((300.0, 659.9), &layout), Some((PaneSide::Local, None)));
+        // The gap between them is no pane.
+        assert_eq!(hit((300.0, 660.0), &layout), None);
+        assert_eq!(hit((300.0, 699.9), &layout), None);
+        // The cloud pane starts its list at 700 + 63, and has its own rows.
+        assert_eq!(hit((300.0, 700.0), &layout), Some((PaneSide::Remote, None)));
+        assert_eq!(hit((300.0, 762.9), &layout), Some((PaneSide::Remote, None)));
+        assert_eq!(
+            hit((300.0, 763.0), &layout),
+            Some((PaneSide::Remote, Some(0)))
+        );
+        assert_eq!(
+            hit((300.0, 791.0), &layout),
+            Some((PaneSide::Remote, Some(1)))
+        );
+        // Side by side the same x would have been over the local pane's neighbour; here every x
+        // inside the panes' width is a pane, and one beyond is not.
+        assert_eq!(
+            hit((637.0, 800.0), &layout),
+            Some((PaneSide::Remote, Some(1)))
+        );
+        assert_eq!(hit((645.0, 800.0), &layout), None);
+        // Under the cloud pane (the drawer) and above the local one (the toolbar).
+        assert_eq!(hit((300.0, 1300.0), &layout), None);
+        assert_eq!(hit((300.0, 20.0), &layout), None);
+    }
+
+    #[test]
+    fn row_beyond_count_is_pane_not_row() {
+        // Three rows: the space under them is the pane, not a fourth row.
+        let mut layout = side_by_side();
+        layout.remote.rows = 3;
+        assert_eq!(
+            hit((900.0, 123.0 + 27.9 + 56.0), &layout),
+            Some((PaneSide::Remote, Some(2)))
+        );
+        assert_eq!(
+            hit((900.0, 123.0 + 84.0), &layout),
+            Some((PaneSide::Remote, None))
+        );
+        assert_eq!(hit((900.0, 500.0), &layout), Some((PaneSide::Remote, None)));
+        assert_eq!(hit((900.0, 659.9), &layout), Some((PaneSide::Remote, None)));
+        // An empty list has no row at all.
+        layout.remote.rows = 0;
+        for y in [123.0, 130.0, 400.0] {
+            assert_eq!(hit((900.0, y), &layout), Some((PaneSide::Remote, None)));
+        }
+        // A list scrolled past its end (a refresh that shrank it) is the same.
+        layout.remote.rows = 10;
+        layout.remote.scroll_y = 10.0 * 28.0;
+        assert_eq!(hit((900.0, 123.0), &layout), Some((PaneSide::Remote, None)));
+
+        // A geometry that cannot place a row names none, rather than a wrong one.
+        for (row_height, list_top) in [
+            (0.0, 123.0),
+            (-28.0, 123.0),
+            (f32::NAN, 123.0),
+            (f32::INFINITY, 123.0),
+            (28.0, f32::NAN),
+        ] {
+            let mut odd = side_by_side();
+            odd.remote.row_height = row_height;
+            odd.remote.list_top = list_top;
+            assert_eq!(
+                hit((900.0, 200.0), &odd),
+                Some((PaneSide::Remote, None)),
+                "{row_height} {list_top}"
+            );
+        }
+    }
+
+    /// The tracker puts a batch on the row it was dropped on, and a drop below the rows on the pane.
+    #[test]
+    fn a_drop_names_the_row_it_landed_on() {
+        let mut t = DropTracker::default();
+        t.dropped("C:\\a".into(), Some((900.0, 160.0)));
+        let Some(Dropped::On(b)) = t.take(&side_by_side()) else {
+            panic!("a drop on a row of the cloud pane")
+        };
+        assert_eq!((b.side, b.row), (PaneSide::Remote, Some(1)));
+        t.dropped("C:\\b".into(), Some((900.0, 600.0)));
+        let Some(Dropped::On(b)) = t.take(&side_by_side()) else {
+            panic!("a drop below the rows")
+        };
+        assert_eq!((b.side, b.row), (PaneSide::Remote, None));
+    }
+
     // ---- The hook's timers, on a clock that only moves when a test moves it ----
     //
     // The testing backend keeps its own time (`mock_elapsed_time`): a Slint timer fires when the
@@ -551,7 +730,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::AppWindow;
-    use i_slint_backend_testing::{init_no_event_loop, mock_elapsed_time};
+    use i_slint_backend_testing::{ElementHandle, init_no_event_loop, mock_elapsed_time};
     use slint::ComponentHandle;
 
     /// A hook over a window of the testing backend, with a cursor to move and the calls it made.
@@ -740,18 +919,254 @@ mod tests {
         assert_eq!(b.hovers.borrow().len(), 3);
     }
 
+    /// Ledger 226: the UI is told what the files are over only when that changes, and told that
+    /// they are over nothing once, however often the hover is ended.
     #[test]
-    fn the_drop_chip_shows_on_the_cloud_pane_only_while_files_hover() {
-        use i_slint_backend_testing::ElementHandle;
+    fn hook_hover_is_change_gated_and_ends_once() {
+        let b = bed();
+        let folder = |row| Some((PaneSide::Remote, Some(row)));
 
+        b.hook.start_hover(b.window.window());
+        assert_eq!(*b.hovers.borrow(), [Some(OVER_LOCAL)]);
+        // Moving about inside the same pane, and over the header of it, says nothing new.
+        b.cursor.set((300, 110));
+        pass(POLL_MS);
+        b.cursor.set((120, 80));
+        pass(3 * POLL_MS);
+        assert_eq!(b.hovers.borrow().len(), 1);
+
+        // Row 0 and row 1 of the cloud pane (123..151..179): a change each, but not the polls
+        // that find the cursor still on the same row, wherever on it.
+        b.cursor.set((900, 130));
+        pass(POLL_MS);
+        b.cursor.set((950, 148));
+        pass(POLL_MS);
+        assert_eq!(b.hovers.borrow().len(), 2);
+        b.cursor.set((900, 160));
+        pass(POLL_MS);
+        assert_eq!(b.hovers.borrow().len(), 3);
+        assert_eq!(b.hovers.borrow()[1], folder(0));
+        assert_eq!(b.hovers.borrow()[2], folder(1));
+
+        // Over the toolbar it is nothing, said once however long it stays there.
+        b.cursor.set((900, 20));
+        pass(5 * POLL_MS);
+        assert_eq!(b.hovers.borrow().len(), 4);
+        assert_eq!(b.hovers.borrow()[3], None);
+        b.cursor.set((900, 160));
+        pass(POLL_MS);
+        assert_eq!(b.hovers.borrow().len(), 5);
+        assert_eq!(b.hovers.borrow()[4], folder(1));
+
+        // The drag ends, a leave, a cancel and a drop all call `end_hover`, and the UI hears of
+        // it once.
+        b.hook.tracker.borrow_mut().cancelled();
+        b.hook.end_hover();
+        b.hook.end_hover();
+        b.hook.end_hover();
+        assert_eq!(b.hovers.borrow().len(), 6);
+        assert_eq!(b.hovers.borrow()[5], None);
+        assert!(!b.hook.tracker.borrow().is_hovering());
+        pass(10 * POLL_MS);
+        assert_eq!(b.hovers.borrow().len(), 6, "the poll is gone");
+
+        // Ending a hover that was over nothing says nothing, and a hover that starts again is
+        // reported afresh, though it is over the same pane as before.
+        b.cursor.set((900, 20));
+        b.hook.start_hover(b.window.window());
+        assert_eq!(b.hovers.borrow().len(), 6, "nothing is under the cursor");
+        b.hook.end_hover();
+        assert_eq!(b.hovers.borrow().len(), 6);
+        b.cursor.set((100, 100));
+        b.hook.start_hover(b.window.window());
+        assert_eq!(b.hovers.borrow().len(), 7);
+        assert_eq!(b.hovers.borrow()[6], Some(OVER_LOCAL));
+    }
+
+    /// Ledger 226: a window on a monitor left of (or above) the primary one has a negative origin,
+    /// and the cursor over it is still placed in the window's own pixels.
+    #[test]
+    fn negative_origin_to_logical() {
+        let left = Geometry {
+            origin: (-1920, -50),
+            scale: 1.0,
+        };
+        assert_eq!(to_logical((-1020, 80), left), (900.0, 130.0));
+        assert_eq!(to_logical((-1920, -50), left), (0.0, 0.0));
+        // At 125%, in physical pixels: 1125 / 1.25 = 900.
+        let scaled = Geometry {
+            origin: (-2400, 0),
+            scale: 1.25,
+        };
+        assert_eq!(to_logical((-1275, 162), scaled), (900.0, 129.6));
+        // Left of the window's content, or above it: negative, so over no pane.
+        let (x, y) = to_logical((-2500, 10), scaled);
+        assert!(x < 0.0);
+        assert_eq!(hit((x, y), &side_by_side()), None);
+        let (x, y) = to_logical((-1500, -60), left);
+        assert!(y < 0.0);
+        assert_eq!(hit((x, y), &side_by_side()), None);
+
+        // Through the hook: files hovering and dropped over the cloud pane's row 1 of a window on
+        // the left monitor.
+        let b = bed_with_geometry(Some(left));
+        b.cursor.set((-1020, 110)); // logical (900, 160)
+        b.hook.start_hover(b.window.window());
+        assert_eq!(*b.hovers.borrow(), [Some((PaneSide::Remote, Some(1)))]);
+        b.hook.drop_file(b.window.window(), Path::new(r"C:\a"));
+        pass(0);
+        let drops = b.drops.borrow();
+        assert_eq!(drops.len(), 1);
+        assert_eq!((drops[0].side, drops[0].row), (PaneSide::Remote, Some(1)));
+        assert_eq!(b.unlocated.get(), 0);
+    }
+
+    /// With the system unable to say where the cursor is, a hover shows nothing and a drop is
+    /// ignored and reported (ledger 227).
+    #[test]
+    fn no_cursor_means_no_target_and_an_unplaced_drop() {
+        init_no_event_loop();
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let hovers = Rc::new(RefCell::new(Vec::new()));
+        let unlocated = Rc::new(Cell::new(0));
+        let hook = Hook::new(
+            Box::new({
+                let hovers = hovers.clone();
+                move |target| hovers.borrow_mut().push(target)
+            }),
+            Box::new({
+                let drops = drops.clone();
+                move |batch| drops.borrow_mut().push(batch)
+            }),
+            Box::new({
+                let unlocated = unlocated.clone();
+                move || unlocated.set(unlocated.get() + 1)
+            }),
+            Box::new(side_by_side),
+            Box::new(|_| {
+                Some(Geometry {
+                    origin: (0, 0),
+                    scale: 1.0,
+                })
+            }),
+            Box::new(|| None),
+        );
+        let window = AppWindow::new().unwrap();
+        window.show().unwrap();
+        hook.start_hover(window.window());
+        assert!(hovers.borrow().is_empty());
+        hook.drop_file(window.window(), Path::new(r"C:\a"));
+        pass(0);
+        assert!(drops.borrow().is_empty());
+        assert_eq!(unlocated.get(), 1);
+    }
+
+    /// Where the window's panes are, as `main.rs` hands them to the hook.
+    fn layout_of(w: &AppWindow) -> PaneLayout {
+        PaneLayout {
+            local: crate::geometry(&w.get_local_bounds()),
+            remote: crate::geometry(&w.get_remote_bounds()),
+        }
+    }
+
+    /// A window with a chosen site and `rows` rows in each pane, the first of each a folder.
+    fn window_with_rows(rows: usize) -> AppWindow {
         init_no_event_loop();
         let w = AppWindow::new().unwrap();
         w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
-        // Only a selected site lights up (see pane_tests for the pane with none).
         let site = crate::keyboard_tests::site("example-shop.com", crate::ProviderTile::Bunny, "B");
         w.set_sites(slint::ModelRc::new(slint::VecModel::from(vec![site])));
         w.set_selected_site(0);
+        let data: Vec<crate::viewmodel::RowData> = (0..rows)
+            .map(|i| crate::viewmodel::RowData {
+                name: format!("row-{i:03}"),
+                kind: if i == 0 {
+                    crate::viewmodel::FileKindData::Folder
+                } else {
+                    crate::viewmodel::FileKindData::Doc
+                },
+                size: "1 B".into(),
+                modified: "Today 10:02".into(),
+                folder: i == 0,
+                bytes: 1,
+            })
+            .collect();
+        w.set_local_rows(crate::viewmodel::to_slint_rows(&data));
+        w.set_remote_rows(crate::viewmodel::to_slint_rows(&data));
         w.show().unwrap();
+        w
+    }
+
+    /// The bounds the panes report are the rectangles of the real panes, side by side or stacked,
+    /// so that `hit` agrees with what is on screen.
+    #[test]
+    fn the_window_reports_where_its_panes_and_rows_are() {
+        let w = window_with_rows(5);
+        let center = |e: &i_slint_backend_testing::ElementHandle| {
+            let (p, s) = (e.absolute_position(), e.size());
+            (p.x + s.width / 2.0, p.y + s.height / 2.0)
+        };
+        for (width, height) in [(1280.0, 800.0), (960.0, 700.0)] {
+            w.window().set_size(slint::LogicalSize::new(width, height));
+            let layout = layout_of(&w);
+            let (local, remote) = (layout.local, layout.remote);
+            assert_eq!((local.rows, remote.rows), (5, 5));
+            assert_eq!(local.row_height, 28.0);
+            assert_eq!(local.scroll_y, 0.0);
+            // Under the pane's own header and column titles.
+            assert_eq!(remote.list_top, remote.y + 63.0, "{width}");
+            if width > 1000.0 {
+                assert!(remote.x > local.x + local.w, "side by side");
+                assert_eq!(local.y, remote.y);
+            } else {
+                assert!(remote.y > local.y + local.h, "stacked");
+                assert_eq!(local.x, remote.x);
+            }
+
+            // The middle of each row is over that row of that pane.
+            for (side, geometry) in [(PaneSide::Local, local), (PaneSide::Remote, remote)] {
+                let x = geometry.x + geometry.w / 2.0;
+                for row in 0..5 {
+                    let y = geometry.list_top + geometry.row_height * (row as f32 + 0.5);
+                    assert_eq!(hit((x, y), &layout), Some((side, Some(row))), "{width}");
+                }
+                // Below the rows it is the pane; the toolbar above and the status bar below the
+                // window's panes are nothing.
+                let below = geometry.list_top + geometry.row_height * 5.5;
+                assert_eq!(hit((x, below), &layout), Some((side, None)));
+            }
+            assert_eq!(hit((remote.x + 20.0, 10.0), &layout), None, "the toolbar");
+            assert_eq!(
+                hit((remote.x + 20.0, height - 5.0), &layout),
+                None,
+                "the status bar"
+            );
+        }
+        // They agree with the accessibility tree, which is what is drawn.
+        w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+        let layout = layout_of(&w);
+        let row = |name: &str| {
+            ElementHandle::find_by_accessible_label(&w, "Files in example-shop.com")
+                .next()
+                .and_then(|list| {
+                    list.query_descendants()
+                        .match_accessible_role(i_slint_backend_testing::AccessibleRole::ListItem)
+                        .match_predicate({
+                            let name = name.to_owned();
+                            move |e| e.accessible_label().is_some_and(|l| l.starts_with(&name))
+                        })
+                        .find_first()
+                })
+                .expect("the row is shown")
+        };
+        let (x, y) = center(&row("row-003"));
+        assert_eq!(hit((x, y), &layout), Some((PaneSide::Remote, Some(3))));
+    }
+
+    #[test]
+    fn the_drop_chip_shows_on_the_cloud_pane_only_while_files_hover() {
+        // Only a selected site lights up (see pane_tests for the pane with none).
+        let w = window_with_rows(0);
         let chips =
             || ElementHandle::find_by_accessible_label(&w, "Release to upload").collect::<Vec<_>>();
 
@@ -759,8 +1174,12 @@ mod tests {
         w.set_drop_hover_remote(true);
         let shown = chips();
         assert_eq!(shown.len(), 1);
-        assert!(!w.get_panes_stacked());
-        assert!(shown[0].absolute_position().x >= w.get_pane_split());
+        let remote = layout_of(&w).remote;
+        let at = shown[0].absolute_position();
+        assert!(
+            at.x >= remote.x && at.x < remote.x + remote.w,
+            "the chip is on the cloud pane"
+        );
         w.set_drop_hover_remote(false);
         assert!(chips().is_empty());
     }

@@ -104,7 +104,10 @@ async fn a_folder_that_is_gone_shows_an_error_and_stays_put() {
     // Ruling P24: the server answered, so the pill stays connected and the site healthy.
     assert_eq!(view.connection, "HTTPS · 0 ms");
     assert!(view.connection_ok);
-    assert_eq!(view.status_right, "HTTP/2 · sg.storage.bunnycdn.com");
+    assert_eq!(
+        view.status_right,
+        "HTTP/2 · sg.storage.bunnycdn.com · 32 connections ready"
+    );
     assert!(s.site_items()[0].healthy);
 
     // Once it can be listed again, it opens and the error goes.
@@ -114,22 +117,27 @@ async fn a_folder_that_is_gone_shows_an_error_and_stays_put() {
     assert_eq!(view.connection, "HTTPS · 0 ms");
 }
 
-#[tokio::test]
+/// Makes the next listing fail with `error` through every retry browsing makes: three attempts,
+/// 1 s and 2 s apart (the tests run on a paused clock), or the one attempt for an error that is
+/// not worth retrying.
+fn fail_listing(mock: &MockProvider, error: ProviderError) {
+    let attempts = if error.is_retryable() { 3 } else { 1 };
+    mock.fail_next(MockOp::List, error, attempts);
+}
+
+#[tokio::test(start_paused = true)]
 async fn other_errors_name_the_host() {
     let mock = site_mock();
     let s = saved(&mock).await;
-    mock.fail_next(
-        MockOp::List,
-        ProviderError::Network("connection reset".into()),
-        1,
-    );
+    fail_listing(&mock, ProviderError::Network("connection reset".into()));
     let view = select(&s, 0).await;
     assert_eq!(view.error.as_deref(), Some(UNREACHABLE));
+    assert_eq!(mock.calls(MockOp::List), 3, "it tried again twice first");
 }
 
 /// Final review Minor 1: every kind of failure is told in plain words, with no error labels and
 /// no "Couldn't reach" when the server did answer.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn each_kind_of_failure_is_told_in_plain_words() {
     let mock = site_mock();
     let s = saved(&mock).await;
@@ -154,7 +162,7 @@ async fn each_kind_of_failure_is_told_in_plain_words() {
             "sg.storage.bunnycdn.com had a problem (HTTP 400). Try again in a moment.",
         ),
     ] {
-        mock.fail_next(MockOp::List, error, 1);
+        fail_listing(&mock, error);
         assert_eq!(select(&s, 0).await.error.as_deref(), Some(said));
     }
     mock.fail_next(MockOp::List, ProviderError::Permanent("x".into()), 1);
@@ -376,6 +384,8 @@ async fn up_from_a_drive_goes_to_the_drives() {
     assert!(up.can_back, "Back returns to C:");
 }
 
+/// A folder that is not there (deleted or renamed since it was shown) says so by its path, and the
+/// pane stays where it was (polish 3 changed the words from "Couldn't open … : os error 3").
 #[tokio::test]
 async fn an_unreadable_local_folder_shows_an_error_and_stays_put() {
     let tmp = tempfile::tempdir().unwrap();
@@ -384,13 +394,31 @@ async fn an_unreadable_local_folder_shows_an_error_and_stays_put() {
     let before = navigate_local(&s, Some(tmp.path().to_path_buf())).await;
     let missing = tmp.path().join("missing");
     let view = navigate_local(&s, Some(missing.clone())).await;
-    let error = view.error.clone().unwrap();
-    assert!(
-        error.starts_with(&format!("Couldn't open {}: ", missing.display())),
-        "{error}"
+    assert_eq!(
+        view.error.as_deref(),
+        Some(format!("Couldn't find {}.", missing.display()).as_str())
     );
     assert_eq!(view.rows, before.rows);
     assert_eq!(view.crumbs, before.crumbs);
+    assert!(!view.loading);
+
+    // Another reason it can't be listed (here, a file where a folder was expected) keeps the
+    // reason the system gives.
+    let file = tmp.path().join("a.txt");
+    let view = navigate_local(&s, Some(file.clone())).await;
+    let error = view.error.clone().unwrap();
+    assert!(
+        error.starts_with(&format!("Couldn't open {}: ", file.display())),
+        "{error}"
+    );
+    assert_eq!(view.crumbs, before.crumbs);
+    // Listing a folder that is there clears the error.
+    assert_eq!(
+        navigate_local(&s, Some(tmp.path().to_path_buf()))
+            .await
+            .error,
+        None
+    );
 }
 
 #[tokio::test]
@@ -504,7 +532,9 @@ async fn sites_can_be_saved_and_tested_while_a_cloud_listing_hangs() {
     hanging.abort();
 }
 
-/// Ruling P21 (3): a listing of a site the user has left is dropped when it finally arrives.
+/// Ruling P21 (3): a listing of a site the user has left is dropped. Since polish 6 it is also
+/// given up at once, rather than left to hold its connection until the server answers: the task
+/// that waited for it comes back as soon as the other site takes effect.
 #[tokio::test]
 async fn a_late_listing_from_a_site_the_user_left_is_dropped() {
     let gated = Gated::new(
@@ -529,15 +559,47 @@ async fn a_late_listing_from_a_site_the_user_left_is_dropped() {
         .expect("opening another site waited for the held-back listing");
     assert_eq!(names(&b.rows), ["from-b.txt"]);
 
-    // Site A's answer finally comes, and it is a failure: neither its rows nor its error nor its
-    // health may reach the pane or the sidebar.
-    gated.mock().fail_next(MockOp::List, rejected(), 1);
-    gated.open();
-    let answer = timeout(PROMPTLY, late).await.unwrap().unwrap();
-    assert_eq!(answer, b, "the late answer reports the pane as it is");
+    // Site A's listing is given up the moment B takes effect, though the server never answered:
+    // the task comes back and the storage is not left with a request in flight.
+    let answer = timeout(PROMPTLY, late)
+        .await
+        .expect("site A's listing was not given up")
+        .unwrap();
+    assert_eq!(gated.waiting(), 0, "its connection was freed");
+    // What it reports is the pane as it is, which is not site A's.
+    assert_eq!(answer.site, b.site);
+    assert!(!names(&answer.rows).contains(&"from-a.txt"));
     assert_eq!(current_remote(&s), b);
     assert_eq!(remote_entry_names(&s), ["from-b.txt"]);
     assert!(s.site_items().iter().all(|site| site.healthy));
+}
+
+/// Ruling P21 (3), the backstop: an answer that was already on its way back when the other site
+/// took effect (so there was nothing left to give up) is dropped by its ticket, whatever it is -
+/// neither its rows nor its error nor its health reach the pane or the sidebar.
+#[tokio::test]
+async fn an_answer_that_beat_the_cancel_is_dropped_by_its_ticket() {
+    let (s, _) = two_sites().await;
+    let (a, b) = (s.remote_ticket(), s.remote_ticket());
+    let shown = s.select_site(b, 1, |_| {}).await;
+    assert_eq!(names(&shown.rows), ["from-b.txt"]);
+
+    for answer in [Err(rejected()), Err(ProviderError::NotFound)] {
+        let late = s.finish_listing(a, RemotePath::root(), answer);
+        assert_eq!(late, shown, "the pane is reported as it is");
+        assert_eq!(current_remote(&s), shown);
+        assert!(s.site_items().iter().all(|site| site.healthy));
+    }
+    let listing = s
+        .remote_place()
+        .unwrap()
+        .provider
+        .list(&RemotePath::root())
+        .await
+        .unwrap();
+    let late = s.finish_listing(a, RemotePath::root(), Ok(listing));
+    assert_eq!(late, shown);
+    assert_eq!(remote_entry_names(&s), ["from-b.txt"]);
 }
 
 /// Ruling P21 (3): the same for a folder the user has left within the site.
@@ -851,7 +913,7 @@ async fn back_and_forward_retrace_the_local_folders() {
 
 /// Ruling P24: a folder that is not there is not a connection failure (see also
 /// `a_folder_that_is_gone_shows_an_error_and_stays_put`); a failed connection still is.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn only_a_failed_connection_turns_the_pill_orange() {
     let mock = site_mock();
     let s = saved(&mock).await;
@@ -860,11 +922,7 @@ async fn only_a_failed_connection_turns_the_pill_orange() {
     let missing = open_remote(&s, 0).await;
     assert!(missing.connection_ok);
     assert!(s.site_items()[0].healthy);
-    mock.fail_next(
-        MockOp::List,
-        ProviderError::Network("connection reset".into()),
-        1,
-    );
+    fail_listing(&mock, ProviderError::Network("connection reset".into()));
     let offline = open_remote(&s, 0).await;
     assert!(!offline.connection_ok);
     assert_eq!(offline.connection, "Not connected");
@@ -1024,4 +1082,714 @@ async fn refresh_lists_the_local_folder_again_and_keeps_the_history() {
     assert!(local_back(&s).await.crumbs.is_empty());
     // The list of drives can be refreshed too.
     assert!(local_refresh(&s).await.rows.iter().any(|r| r.name == "C:"));
+}
+
+// ---- Task 25: browse polish carried over from I1 ----
+//
+// The tests named `polish_<n>_…` are the twelve items of the task (the ones about the window
+// itself are in `pane_tests.rs`, the ones about its keys in `keyboard_tests.rs`).
+
+use crate::add_site::SiteForm;
+use httporter_core::S3Preset;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Polish 1: while a site opens its view says so, so the status bar can say "Connecting…" instead
+/// of counting no items, and there is nowhere to go back or forward to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn polish_1_a_site_that_is_opening_is_connecting_not_empty() {
+    let mock = site_mock();
+    let (s, _, factory) = session_with(mock.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    let hold = factory.hold("testzone");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let ticket = s.remote_ticket();
+    let task = tokio::spawn({
+        let s = s.clone();
+        async move {
+            s.select_site(ticket, 0, move |view| {
+                let _ = tx.send(view);
+            })
+            .await
+        }
+    });
+    let switched = timeout(PROMPTLY, rx).await.unwrap().unwrap();
+    hold.entered().await;
+    assert!(switched.connecting && switched.loading);
+    assert!(switched.rows.is_empty());
+    assert!(switched.connection_ok, "green while it connects");
+    assert_eq!(switched.connection, "Connecting…");
+    assert!(!switched.can_back && !switched.can_forward);
+    assert_eq!(switched.error, None);
+
+    hold.release();
+    let listed = timeout(PROMPTLY, task).await.unwrap().unwrap();
+    assert!(!listed.connecting && !listed.loading);
+    assert_eq!(listed.connection, "HTTPS · 0 ms");
+    assert_eq!(names(&listed.rows), ["wp-content", "index.html"]);
+}
+
+/// Polish 1: a site that fails to open has stopped connecting (the window then says "0 items",
+/// not "Connecting…").
+#[tokio::test]
+async fn polish_1_a_site_that_fails_to_open_is_no_longer_connecting() {
+    let mock = site_mock();
+    let s = saved(&mock).await;
+    mock.fail_next(MockOp::List, rejected(), 1);
+    let failed = select(&s, 0).await;
+    assert!(!failed.connecting);
+    assert!(failed.rows.is_empty());
+    assert_eq!(failed.connection, "Not connected");
+
+    // The same for a site whose password is gone: there is no client to connect with.
+    let (s, creds, _) = session_with(site_mock());
+    let rec = s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    creds.delete(&CredentialKey::site(&rec.id)).unwrap();
+    let no_client = select(&s, 0).await;
+    assert!(!no_client.connecting && !no_client.loading);
+    assert!(no_client.error.is_some());
+}
+
+/// Polish 2 (ledger 252): a first listing that finds no zone is not "healthy": the pill goes
+/// orange and the sidebar's dot grey. After a listing has worked, a missing folder leaves both
+/// as they were.
+#[tokio::test]
+async fn polish_2_a_missing_zone_before_any_listing_is_not_healthy() {
+    let mock = site_mock();
+    let s = saved(&mock).await;
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    let view = select(&s, 0).await;
+    assert!(!view.connection_ok);
+    assert_eq!(view.connection, "Not connected");
+    assert_eq!(view.status_right, "");
+    assert!(view.error.is_some());
+    assert!(!s.site_items()[0].healthy);
+
+    // Opened properly, then a folder that is gone: connected and healthy still.
+    let listed = select(&s, 0).await;
+    assert!(listed.connection_ok && s.site_items()[0].healthy);
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    let missing = open_remote(&s, 0).await;
+    assert!(missing.connection_ok && missing.error.is_some());
+    assert_eq!(missing.connection, "HTTPS · 0 ms");
+    assert!(s.site_items()[0].healthy);
+}
+
+/// The Server item: a server that answers with a failure of its own (a 5xx, Bunny's busy 400)
+/// has been reached, so the site stays connected and healthy like a folder that is not there
+/// does; before any listing worked it is orange and grey like a missing zone.
+#[tokio::test(start_paused = true)]
+async fn polish_server_error_keeps_the_site_connected_like_not_found() {
+    let mock = site_mock();
+    let s = saved(&mock).await;
+    let root = select(&s, 0).await;
+    assert!(root.connection_ok);
+    for status in [503, 400] {
+        let detail = if status == 400 {
+            "busy"
+        } else {
+            "Service Unavailable"
+        };
+        fail_listing(
+            &mock,
+            ProviderError::Server {
+                status,
+                detail: detail.into(),
+            },
+        );
+        let view = open_remote(&s, 0).await;
+        assert_eq!(
+            view.error,
+            Some(format!(
+                "sg.storage.bunnycdn.com had a problem (HTTP {status}). Try again in a moment."
+            ))
+        );
+        assert!(view.connection_ok, "{status}");
+        assert_eq!(view.connection, "HTTPS · 0 ms");
+        assert_eq!(
+            view.status_right,
+            "HTTP/2 · sg.storage.bunnycdn.com · 32 connections ready"
+        );
+        assert!(s.site_items()[0].healthy);
+        // It stays where it was, with what it showed.
+        assert_eq!(view.crumbs, root.crumbs);
+        assert_eq!(view.rows, root.rows);
+        assert!(!view.loading && !view.connecting);
+        assert!(!view.can_back, "the history is as it was");
+    }
+    // The next try works, and the error goes.
+    let opened = open_remote(&s, 0).await;
+    assert_eq!(opened.error, None);
+    assert_eq!(opened.crumbs, ["testzone", "wp-content"]);
+
+    // Before any listing has worked there is nothing to show the site is up by.
+    let (fresh, _, _) = session_with(mock.clone());
+    fresh
+        .save_site(&valid("testzone", "sg", "pw"))
+        .await
+        .unwrap();
+    fail_listing(
+        &mock,
+        ProviderError::Server {
+            status: 503,
+            detail: "Service Unavailable".into(),
+        },
+    );
+    let first = select(&fresh, 0).await;
+    assert!(first.error.is_some());
+    assert!(!first.connection_ok);
+    assert_eq!(first.connection, "Not connected");
+    assert!(!fresh.site_items()[0].healthy);
+    assert!(!first.connecting);
+}
+
+/// Polish 3 (ledger 252): two Backs pressed before the first one's listing is in are two steps,
+/// not the same step twice, and so are two Forwards. The first listing is given up.
+#[tokio::test]
+async fn polish_3_two_quick_backs_and_forwards_are_two_steps() {
+    let gated = Gated::new(
+        MockProvider::new(Default::default())
+            .with_file("a/b/x.txt", b"x")
+            .with_file("a/y.txt", b"y"),
+        "a",
+    );
+    let (s, _, _) = session_with(gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    select(&s, 0).await;
+    gated.open();
+    assert_eq!(open_remote(&s, 0).await.crumbs, ["testzone", "a"]);
+    let deep = open_remote(&s, 0).await;
+    assert_eq!(deep.crumbs, ["testzone", "a", "b"]);
+
+    // The first Back is for "a", whose listing hangs; the second is pressed meanwhile.
+    let first = tokio::spawn({
+        let s = s.clone();
+        async move { remote_back(&s).await }
+    });
+    until_held(&gated).await;
+    let second = timeout(PROMPTLY, remote_back(&s))
+        .await
+        .expect("the second Back waited for the first");
+    assert_eq!(second.crumbs, ["testzone"], "two steps back, to the root");
+    assert!(!second.can_back && second.can_forward);
+    assert!(!second.loading);
+    timeout(PROMPTLY, first)
+        .await
+        .expect("the first Back was not given up")
+        .unwrap();
+    assert_eq!(gated.waiting(), 0, "its listing was given up and freed");
+    assert_eq!(current_remote(&s).crumbs, ["testzone"]);
+
+    // Forward twice, the same way: "a" hangs, and the second press goes on to "a/b".
+    let first = tokio::spawn({
+        let s = s.clone();
+        async move { remote_forward(&s).await }
+    });
+    until_held(&gated).await;
+    let second = timeout(PROMPTLY, remote_forward(&s))
+        .await
+        .expect("the second Forward waited for the first");
+    assert_eq!(second.crumbs, ["testzone", "a", "b"]);
+    assert!(second.can_back && !second.can_forward);
+    timeout(PROMPTLY, first).await.unwrap().unwrap();
+    assert_eq!(gated.waiting(), 0);
+
+    // The history is whole: Back goes to "a", then the root.
+    gated.open();
+    assert_eq!(remote_back(&s).await.crumbs, ["testzone", "a"]);
+    let root = remote_back(&s).await;
+    assert_eq!(root.crumbs, ["testzone"]);
+    assert!(!root.can_back && root.can_forward);
+}
+
+/// Polish 3 (ledger 252): Back to a folder that has since been deleted says so and stays where it
+/// was, with the history as it was; Back tried again (or Forward) still works.
+#[tokio::test]
+async fn polish_3_back_to_a_deleted_cloud_folder_says_so_and_stays_navigable() {
+    let mock = Arc::new(MockProvider::new(Default::default()).with_file("a/b/x.txt", b"x"));
+    let s = saved(&mock).await;
+    select(&s, 0).await;
+    open_remote(&s, 0).await;
+    let inside = open_remote(&s, 0).await;
+    assert_eq!(inside.crumbs, ["testzone", "a", "b"]);
+
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    let failed = remote_back(&s).await;
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("Couldn't find /a in testzone.")
+    );
+    assert_eq!(failed.crumbs, inside.crumbs, "it stays put");
+    assert!(
+        failed.can_back && !failed.can_forward,
+        "the history is as it was"
+    );
+    assert!(failed.connection_ok && !failed.loading);
+
+    let back = remote_back(&s).await;
+    assert_eq!(back.crumbs, ["testzone", "a"]);
+    assert_eq!(back.error, None);
+    assert!(back.can_back && back.can_forward);
+    let root = remote_back(&s).await;
+    assert_eq!(root.crumbs, ["testzone"]);
+    assert_eq!(remote_forward(&s).await.crumbs, ["testzone", "a"]);
+    assert_eq!(remote_forward(&s).await.crumbs, ["testzone", "a", "b"]);
+}
+
+/// Polish 3: the same for This PC, which says "Couldn't find {path}." and goes on.
+#[tokio::test]
+async fn polish_3_back_to_a_deleted_local_folder_says_so_and_stays_navigable() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("a").join("b")).unwrap();
+    let (s, _) = session_with_mock(MockProvider::new(Default::default()));
+    navigate_local(&s, Some(tmp.path().to_path_buf())).await;
+    open_local(&s, 0).await;
+    let inside = open_local(&s, 0).await;
+    assert_eq!(inside.crumbs.last().map(String::as_str), Some("b"));
+
+    std::fs::remove_dir_all(tmp.path().join("a")).unwrap();
+    let failed = local_back(&s).await;
+    assert_eq!(
+        failed.error,
+        Some(format!("Couldn't find {}.", tmp.path().join("a").display()))
+    );
+    assert_eq!(failed.crumbs, inside.crumbs, "it stays put");
+    assert_eq!(names(&failed.rows), names(&inside.rows));
+    assert!(failed.can_back && !failed.can_forward && !failed.loading);
+
+    // Once the folder is back, the same Back goes there.
+    std::fs::create_dir_all(tmp.path().join("a").join("b")).unwrap();
+    let back = local_back(&s).await;
+    assert_eq!(back.error, None);
+    assert_eq!(back.crumbs.last().map(String::as_str), Some("a"));
+    assert!(back.can_back && back.can_forward);
+    assert_eq!(
+        local_forward(&s).await.crumbs.last().map(String::as_str),
+        Some("b")
+    );
+}
+
+/// Polish 5 (parked): F5 while a folder is loading asks again for that folder, the one on its
+/// way, rather than for the folder shown, and the history stays as the request made it.
+#[tokio::test]
+async fn polish_5_refresh_during_loading_asks_again_for_the_folder_on_its_way() {
+    let gated = Gated::new(
+        MockProvider::new(Default::default()).with_file("slow/late.txt", b"l"),
+        "slow",
+    );
+    let (s, _, _) = session_with(gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    select(&s, 0).await;
+    let lists = || gated.mock().calls(MockOp::List);
+    assert_eq!(lists(), 1);
+
+    let opening = tokio::spawn({
+        let s = s.clone();
+        async move { open_remote(&s, 0).await }
+    });
+    until_held(&gated).await;
+    let refreshing = tokio::spawn({
+        let s = s.clone();
+        async move { remote_refresh(&s).await }
+    });
+    // The first request is given up, and the refresh waits in its place.
+    timeout(PROMPTLY, opening).await.unwrap().unwrap();
+    until_held(&gated).await;
+    assert_eq!(gated.waiting(), 1);
+    gated.open();
+    let view = timeout(PROMPTLY, refreshing).await.unwrap().unwrap();
+
+    assert_eq!(
+        view.crumbs,
+        ["testzone", "slow"],
+        "the folder on its way, not the root"
+    );
+    assert_eq!(names(&view.rows), ["late.txt"]);
+    assert!(view.can_back && !view.can_forward, "one Go, not two");
+    assert!(!view.loading);
+    assert_eq!(lists(), 2, "the root was not listed again");
+    assert_eq!(remote_back(&s).await.crumbs, ["testzone"]);
+}
+
+/// Polish 6 (parked): a listing that a newer request has replaced is given up, and frees its slot
+/// (its connection), though the server never answered; the pane does not get stuck loading.
+#[tokio::test]
+async fn polish_6_a_superseded_listing_is_aborted_and_frees_its_slot() {
+    let gated = Gated::new(
+        MockProvider::new(Default::default())
+            .with_file("fast/quick.txt", b"q")
+            .with_file("slow/late.txt", b"l"),
+        "slow",
+    );
+    let (s, _, _) = session_with(gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("testzone", "sg", "pw")).await.unwrap();
+    select(&s, 0).await;
+
+    let slow = tokio::spawn({
+        let s = s.clone();
+        async move { open_remote(&s, 1).await }
+    });
+    until_held(&gated).await;
+    assert_eq!(gated.waiting(), 1);
+    assert!(current_remote(&s).loading);
+
+    let fast = open_remote(&s, 0).await;
+    assert_eq!(fast.crumbs, ["testzone", "fast"]);
+    timeout(PROMPTLY, slow)
+        .await
+        .expect("the superseded request is still waiting for the server")
+        .unwrap();
+    assert_eq!(gated.waiting(), 0, "the slot is free");
+    let now = current_remote(&s);
+    assert!(!now.loading, "the pane is not stuck loading");
+    assert_eq!(now.crumbs, ["testzone", "fast"]);
+}
+
+/// Polish 6: picking a site again replaces its hanging listing with a new one.
+#[tokio::test]
+async fn polish_6_picking_a_site_gives_up_the_listing_before_it() {
+    let gated = Gated::new(
+        MockProvider::new(Default::default()).with_file("from-a.txt", b"a"),
+        "",
+    );
+    let (s, _, factory) = session_with(Arc::new(
+        MockProvider::new(Default::default()).with_file("from-b.txt", b"b"),
+    ));
+    factory.serve("zone-a", gated.clone());
+    let s = Arc::new(s);
+    s.save_site(&valid("zone-a", "sg", "pw")).await.unwrap();
+    s.save_site(&valid("zone-b", "de", "pw")).await.unwrap();
+    let hanging = tokio::spawn({
+        let s = s.clone();
+        async move { select(&s, 0).await }
+    });
+    until_held(&gated).await;
+    let again = tokio::spawn({
+        let s = s.clone();
+        async move { select(&s, 0).await }
+    });
+    timeout(PROMPTLY, hanging)
+        .await
+        .expect("the first listing of the site was not given up")
+        .unwrap();
+    until_held(&gated).await;
+    assert_eq!(gated.waiting(), 1, "one request is out, not two");
+    gated.open();
+    let listed = timeout(PROMPTLY, again).await.unwrap().unwrap();
+    assert_eq!(names(&listed.rows), ["from-a.txt"]);
+}
+
+/// Polish 9 (parked): Add Site asks, at the moment it would begin to write, whether it was
+/// cancelled: if so nothing is saved, neither the site nor its password.
+#[tokio::test]
+async fn polish_9_a_cancel_before_the_write_saves_nothing() {
+    let (s, creds, _) = session_with(site_mock());
+    let form = || SiteForm::BunnyPassword {
+        zone: "testzone".into(),
+        region_index: 4,
+        password: "pw".into(),
+    };
+    let prepared = s.prepare(form(), None, "My site".into()).await.unwrap();
+    let id = prepared.record.id.clone();
+
+    // Asked once, on a blocking thread (where the credential store may be slow to answer).
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let proceed = {
+        let asked = asked.clone();
+        move || {
+            asked.lock().unwrap().push(std::thread::current().id());
+            false
+        }
+    };
+    assert!(s.store_prepared_if(prepared, proceed).await.is_none());
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_ne!(asked[0], std::thread::current().id());
+    assert!(s.sites().is_empty());
+    assert!(s.site_items().is_empty());
+    assert_eq!(creds.get(&CredentialKey::site(&id)).unwrap(), None);
+    assert!(
+        lock(&s.store).list_sites().unwrap().sites.is_empty(),
+        "nor is it in the database"
+    );
+
+    // Not cancelled: the whole site is saved.
+    let prepared = s.prepare(form(), None, "My site".into()).await.unwrap();
+    let id = prepared.record.id.clone();
+    let saved = s
+        .store_prepared_if(prepared, || true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.id, id);
+    assert_eq!(s.sites().len(), 1);
+    assert_eq!(
+        creds.get(&CredentialKey::site(&id)).unwrap().as_deref(),
+        Some("pw")
+    );
+    assert_eq!(lock(&s.store).list_sites().unwrap().sites.len(), 1);
+}
+
+/// Polish 10 (Minor 4): a 404 on the root of a Bunny zone names the fields that can be wrong; a
+/// folder below the root keeps its own words. Test Connection says the same.
+#[tokio::test]
+async fn polish_10_a_missing_zone_names_the_zone_and_region() {
+    let words = "Couldn't find zone “testzone” in Singapore. Check the zone name and region.";
+    let mock = site_mock();
+    let s = saved(&mock).await;
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    let view = select(&s, 0).await;
+    assert_eq!(view.error.as_deref(), Some(words));
+
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    let tested = s.test_connection(&valid("testzone", "sg", "pw")).await;
+    assert!(!tested.ok);
+    assert_eq!(tested.text, words);
+
+    // Another region, another city.
+    let (de, _, _) = session_with(mock.clone());
+    de.save_site(&valid("testzone", "de", "pw")).await.unwrap();
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    assert_eq!(
+        select(&de, 0).await.error.as_deref(),
+        Some("Couldn't find zone “testzone” in Frankfurt. Check the zone name and region.")
+    );
+
+    // A folder below the root is a folder that is gone.
+    select(&s, 0).await;
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    assert_eq!(
+        open_remote(&s, 0).await.error.as_deref(),
+        Some("Couldn't find /wp-content in testzone.")
+    );
+    // Listing the root again and finding it gone is the zone again.
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    assert_eq!(remote_refresh(&s).await.error.as_deref(), Some(words));
+}
+
+/// Polish 10: the same for the bucket of an S3 site, with the region the site was saved with.
+#[tokio::test]
+async fn polish_10_a_missing_bucket_names_the_bucket_and_region() {
+    let mock = site_mock();
+    let (s, _, _) = session_with(mock.clone());
+    let form = SiteForm::S3 {
+        preset: S3Preset::AwsS3,
+        region: "eu-west-1".into(),
+        account_id: String::new(),
+        endpoint: String::new(),
+        path_style: false,
+        bucket: "my-bucket".into(),
+        key_id: "AKIAEXAMPLE".into(),
+        secret: "secret".into(),
+    };
+    let prepared = s.prepare(form, None, String::new()).await.unwrap();
+    let words = "Couldn't find bucket “my-bucket” in eu-west-1. Check the bucket name and region.";
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    let tested = s.test_prepared(&prepared).await;
+    assert!(!tested.ok);
+    assert_eq!(tested.text, words);
+    s.store_prepared(prepared).await.unwrap();
+
+    mock.fail_next(MockOp::List, ProviderError::NotFound, 1);
+    assert_eq!(select(&s, 0).await.error.as_deref(), Some(words));
+
+    // Without a region to name, the words do not make one up.
+    assert_eq!(
+        crate::copy::bucket_not_found("my-bucket", " "),
+        "Couldn't find bucket “my-bucket”. Check the bucket name and region."
+    );
+}
+
+/// Polish 11 (Minor 5): every cloud view says which site it is of, so the window can tell a
+/// listing from the site left a moment ago from the one chosen.
+#[tokio::test]
+async fn polish_11_a_view_says_which_site_it_is_of() {
+    let (s, _) = two_sites().await;
+    assert_eq!(current_remote(&s).site, None);
+    let a = select(&s, 0).await;
+    assert_eq!(a.site, s.site_id_at(0));
+    assert!(a.site.is_some());
+    let b = select(&s, 1).await;
+    assert_eq!(b.site, s.site_id_at(1));
+    assert_ne!(a.site, b.site);
+
+    // Every kind of view of the pane carries it.
+    assert_eq!(s.sort_remote(SortKey::Size, true).site, b.site);
+    assert_eq!(open_remote(&s, 7).await.site, b.site);
+    assert_eq!(remote_refresh(&s).await.site, b.site);
+    assert_eq!(remote_up(&s).await.site, b.site);
+    // A switch in progress too.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ticket = s.remote_ticket();
+    s.select_site(ticket, 0, move |view| {
+        let _ = tx.send(view);
+    })
+    .await;
+    assert_eq!(rx.recv().unwrap().site, s.site_id_at(0));
+
+    // No site: none.
+    assert_eq!(select(&s, 9).await.site, None);
+}
+
+// ---- The pieces under the polish: Course and until_cancelled ----
+
+#[test]
+fn a_course_moves_its_history_when_the_listing_arrives_and_not_when_it_fails() {
+    let mut c: Course<&str> = Course::default();
+    c.begin(Step::Go, &"root", "a");
+    assert!(c.history.back.is_empty(), "not until the listing is in");
+    let pending = c.pending.as_ref().unwrap();
+    assert_eq!((pending.step, pending.at), (Step::Go, "a"));
+    assert_eq!(pending.history.back, ["root"], "the history it will have");
+    c.arrive();
+    assert_eq!(c.history.back, ["root"]);
+    assert!(c.pending.is_none());
+
+    // A listing that fails leaves the history as it was, and nothing pending.
+    c.begin(Step::Go, &"a", "b");
+    c.fail();
+    assert_eq!(c.history.back, ["root"]);
+    assert!(c.history.forward.is_empty() && c.pending.is_none());
+
+    // Going to the place shown is no step.
+    c.begin(Step::Go, &"a", "a");
+    c.arrive();
+    assert_eq!(c.history.back, ["root"]);
+
+    // A new place clears the way forward.
+    c.begin(Step::Go, &"a", "b");
+    c.arrive();
+    c.begin(Step::Back, &"b", "a");
+    c.arrive();
+    assert_eq!(c.history.forward, ["b"]);
+    c.begin(Step::Go, &"a", "c");
+    c.arrive();
+    assert!(c.history.forward.is_empty());
+    assert_eq!(c.history.back, ["root", "a"]);
+}
+
+#[test]
+fn a_back_pressed_while_one_is_on_its_way_goes_on_from_where_it_is_going() {
+    let mut c: Course<&str> = Course::default();
+    c.begin(Step::Go, &"root", "a");
+    c.arrive();
+    c.begin(Step::Go, &"a", "b");
+    c.arrive();
+    assert_eq!(c.history.back, ["root", "a"]);
+
+    assert_eq!(c.ahead().back_to(), Some("a"));
+    c.begin(Step::Back, &"b", "a");
+    assert_eq!(c.ahead().back_to(), Some("root"), "counted from 'a'");
+    // The pane still shows "b": the second Back is told so, and goes one further.
+    c.begin(Step::Back, &"b", "root");
+    let pending = c.pending.as_ref().unwrap();
+    assert_eq!((pending.step, pending.at), (Step::Back, "root"));
+    assert!(pending.history.back.is_empty());
+    assert_eq!(pending.history.forward, ["b", "a"]);
+    assert_eq!(
+        c.history.back,
+        ["root", "a"],
+        "the shown history is unchanged"
+    );
+    c.arrive();
+    assert!(c.history.back.is_empty());
+    assert_eq!(c.history.forward, ["b", "a"]);
+
+    // Forward, the same way.
+    assert_eq!(c.ahead().forward_to(), Some("a"));
+    c.begin(Step::Forward, &"root", "a");
+    assert_eq!(c.ahead().forward_to(), Some("b"));
+    c.begin(Step::Forward, &"root", "b");
+    c.arrive();
+    assert_eq!(c.history.back, ["root", "a"]);
+    assert!(c.history.forward.is_empty());
+}
+
+#[test]
+fn a_new_place_on_its_way_does_not_feed_back_and_a_refresh_keeps_the_request() {
+    let mut c: Course<&str> = Course::default();
+    c.begin(Step::Go, &"root", "a");
+    c.arrive();
+    c.begin(Step::Go, &"a", "b");
+    c.arrive();
+
+    // A Go on its way is not a place to go back from: Back counts from the place shown.
+    c.begin(Step::Go, &"b", "c");
+    assert_eq!(c.ahead().back_to(), Some("a"));
+    c.begin(Step::Back, &"b", "a");
+    let pending = c.pending.as_ref().unwrap();
+    assert_eq!(pending.at, "a");
+    assert_eq!(pending.history.back, ["root"]);
+    c.fail();
+
+    // Refresh asks again for what is on its way, and the request keeps its step and history.
+    c.begin(Step::Go, &"b", "c");
+    assert_eq!(c.refresh_target(&"b"), "c");
+    c.begin(Step::Refresh, &"b", "c");
+    let pending = c.pending.as_ref().unwrap();
+    assert_eq!((pending.step, pending.at), (Step::Go, "c"));
+    c.arrive();
+    assert_eq!(c.history.back, ["root", "a", "b"]);
+
+    // With nothing on its way it is the place shown, and the history does not move.
+    assert_eq!(c.refresh_target(&"c"), "c");
+    c.begin(Step::Refresh, &"c", "c");
+    assert_eq!(c.pending.as_ref().unwrap().step, Step::Refresh);
+    c.arrive();
+    assert_eq!(c.history.back, ["root", "a", "b"]);
+    assert!(c.history.forward.is_empty());
+}
+
+#[tokio::test]
+async fn until_cancelled_gives_the_work_unless_cancel_comes_first() {
+    use tokio::sync::oneshot;
+    // Never cancelled: the work's answer.
+    let (_keep, rx) = oneshot::channel::<()>();
+    assert_eq!(until_cancelled(async { 7 }, rx).await, Some(7));
+
+    // Cancelled before it starts: it never does.
+    let started = AtomicBool::new(false);
+    let (tx, rx) = oneshot::channel();
+    tx.send(()).unwrap();
+    let answer = until_cancelled(
+        async {
+            started.store(true, Ordering::SeqCst);
+            1
+        },
+        rx,
+    )
+    .await;
+    assert_eq!(answer, None);
+    assert!(!started.load(Ordering::SeqCst));
+
+    // A dropped sender is a cancel too.
+    let (tx, rx) = oneshot::channel::<()>();
+    drop(tx);
+    assert_eq!(until_cancelled(async { 1 }, rx).await, None);
+
+    // Cancelled while the work waits: the work is dropped (which frees what it held).
+    struct Guard(Arc<AtomicBool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let dropped = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = oneshot::channel();
+    let guard = Guard(dropped.clone());
+    let task = tokio::spawn(until_cancelled(
+        async move {
+            let _guard = guard;
+            std::future::pending::<()>().await
+        },
+        rx,
+    ));
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished() && !dropped.load(Ordering::SeqCst));
+    tx.send(()).unwrap();
+    assert_eq!(task.await.unwrap(), None);
+    assert!(dropped.load(Ordering::SeqCst), "the work was dropped");
 }
