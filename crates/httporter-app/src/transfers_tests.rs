@@ -1630,3 +1630,119 @@ fn a_file_refused_alone_says_so() {
         "Not here."
     );
 }
+
+// ---- The follow-up to the fix wave (minors A and B) ----
+
+/// Review minor A: closing waits [`SETTLE_FOR`] at most in all. `quit` sets the deadline, and
+/// `finish`, once the event loop has stopped, waits only for what is left of it, not
+/// [`SETTLE_FOR`] again.
+#[test]
+fn closing_waits_for_one_deadline_not_two() {
+    let journal = Arc::new(SlowJournal::default());
+    let b = bed_on(
+        MockProvider::new(bunny_like()),
+        &["testzone"],
+        &|_, _, _| {},
+        journal.clone(),
+    );
+    b.t.engine.pause_all();
+    let storage: Arc<dyn StorageProvider> = b.mock.clone();
+    b.t.engine.submit(deletes(&b, storage, 3)).unwrap();
+    // A disk that has stopped answering: the cancels never get written.
+    journal.hold(true);
+    let before = Instant::now();
+    b.t.quit(Quit::Cancel);
+    let deadline = lock(&b.t.state).closing_by.expect("quit sets the deadline");
+    assert!(deadline >= before + SETTLE_FOR && deadline <= Instant::now() + SETTLE_FOR);
+
+    // As if all but 300 ms of it had gone by while the window waited.
+    let left = Instant::now() + Duration::from_millis(300);
+    lock(&b.t.state).closing_by = Some(left);
+    let started = Instant::now();
+    b.t.finish();
+    let took = started.elapsed();
+    assert!(Instant::now() >= left);
+    assert!(took < Duration::from_secs(2), "finish waited {took:?}");
+    assert!(!b.t.settled(Quit::Cancel), "the writes are still held");
+    journal.hold(false);
+}
+
+/// Review minor B: the settings go A, B, then back to A while the clients for the first A are
+/// still being built. That build ends last, holding a client made while B was in use; it is
+/// not handed to the engine, though A is in use again: only the latest change's clients are,
+/// with its limits.
+#[test]
+fn a_build_for_settings_changed_since_is_not_handed_over() {
+    let b = bed_with(
+        MockProvider::new(bunny_like()),
+        &["testzone", "zone-b"],
+        &|_, _, _| {},
+    );
+    let zones = ["testzone", "zone-b"];
+    let site_of = |zone: &str| {
+        b.sites
+            .iter()
+            .find(|site| site.name == zone)
+            .unwrap()
+            .clone()
+    };
+    // Both sites have a lane, with a transfer held in its queue.
+    b.t.engine.pause_all();
+    for zone in zones {
+        let site = site_of(zone);
+        b.t.engine
+            .submit(Batch {
+                site: site.id.clone(),
+                site_name: site.name.clone(),
+                host: site.host.clone(),
+                provider: b.mock.clone(),
+                jobs: vec![Job::Delete {
+                    remote: rp("old.txt"),
+                    folder: false,
+                }],
+                checksums: HashMap::new(),
+            })
+            .unwrap();
+    }
+    let with = |simultaneous| TransferSettings {
+        simultaneous,
+        ..TransferSettings::default()
+    };
+    let (a, b_settings) = (with(2), with(3));
+    let limit = || b.t.engine.site_transfer_limit(&site_of("testzone").id);
+
+    // A: its build is held at the first site it makes a client for.
+    let holds = [b.factory.hold(zones[0]), b.factory.hold(zones[1])];
+    b.t.apply_settings(a.clone());
+    let first = wait_for("the first build", || {
+        (0..2).find(|&i| holds[i].has_entered())
+    });
+    let second = 1 - first;
+
+    // B: built (its second site once let through) and handed over.
+    b.t.apply_settings(b_settings);
+    holds[second].wait_entered();
+    holds[second].release();
+    wait_for("B's limits", || (limit() == Some(3)).then_some(()));
+
+    // The first build goes on now, while B is in use: the second site's client is B's. It then
+    // waits to be handed over while A is chosen again, and its own build is held.
+    let applying = lock(&b.t.applying);
+    let built = b.factory.configs().len();
+    holds[first].release();
+    wait_for("the first build to go on", || {
+        (b.factory.configs().len() > built).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let again = b.factory.hold(zones[first]);
+    b.t.apply_settings(a.clone());
+    again.wait_entered();
+    drop(applying);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(limit(), Some(3), "the first build for A was handed over");
+
+    // The latest change's clients, and its limits.
+    again.release();
+    wait_for("A's limits", || (limit() == Some(2)).then_some(()));
+    assert_eq!(b.t.session.settings(), a);
+}

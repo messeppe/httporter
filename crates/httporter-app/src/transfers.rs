@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -171,6 +171,8 @@ struct State {
     affected: Vec<Affected>,
     feed: Feed,
     quitting: Option<Quit>,
+    /// When closing stops waiting, once set (see `Transfers::closing_deadline`).
+    closing_by: Option<Instant>,
 }
 
 impl State {
@@ -194,6 +196,9 @@ pub struct Transfers {
     /// Held while new settings are handed to the engine, so that an older change never lands
     /// after a newer one.
     applying: Mutex<()>,
+    /// Goes up with every change of settings: the clients built for one are handed to the
+    /// engine only while no other change came since (see `apply_settings`).
+    settings_generation: AtomicU64,
 }
 
 /// Marks the picker closed when dropped (also if the picker panicked).
@@ -220,6 +225,7 @@ impl Transfers {
             picking: Arc::new(AtomicBool::new(false)),
             state: Mutex::new(State::default()),
             applying: Mutex::new(()),
+            settings_generation: AtomicU64::new(0),
         })
     }
 
@@ -993,10 +999,17 @@ impl Transfers {
     /// engine's new limits applied, so that no transfer starts on an old client under them (a
     /// raised Simultaneous would otherwise queue inside the old client's own slots, and a new
     /// proxy would never reach the queued jobs).
+    ///
+    /// Clients built for a change are handed over only if no other change came while they were
+    /// built. That is told by a generation, not by comparing settings (review minor B): after A,
+    /// B, then A again, a slow build for the first A may hold clients made while B was in use.
     fn apply_settings(self: &Arc<Self>, settings: TransferSettings) {
         if settings == self.session.settings() {
             return;
         }
+        // Before the hub has them: a build that finds the generation unchanged was made under
+        // the settings it was started for.
+        let generation = self.settings_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.session.hub().set_settings(settings.clone());
         let saved = self.session.save_settings(self.link.rt(), settings.clone());
         let link = self.link.clone();
@@ -1022,8 +1035,8 @@ impl Transfers {
                 })
                 .collect();
             let _applying = lock(&this.applying);
-            if this.session.settings() != settings {
-                // Newer settings came meanwhile: theirs apply.
+            if this.settings_generation.load(Ordering::SeqCst) != generation {
+                // Newer settings came meanwhile (the same as these again, maybe): theirs apply.
                 return;
             }
             for (site, provider) in fresh {
@@ -1058,26 +1071,27 @@ impl Transfers {
         stopped && self.engine.pending_writes() == 0 && self.engine.pending_aborts() == 0
     }
 
-    /// Waits up to `limit` for [`Self::settled`]; whether it got there.
-    fn wait_settled(&self, how: Quit, limit: Duration) -> bool {
-        let deadline = Instant::now() + limit;
-        loop {
-            if self.settled(how) {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+    /// Waits until `deadline` at most for [`Self::settled`]; whether it got there.
+    fn wait_settled(&self, how: Quit, deadline: Instant) -> bool {
+        wait_until(deadline, || self.settled(how))
+    }
+
+    /// When closing stops waiting: [`SETTLE_FOR`] after the first [`Self::quit`], or from now
+    /// when the window closed without one. `quit` and [`Self::finish`] share it, so closing
+    /// waits [`SETTLE_FOR`] at most in all, not that twice (review minor A).
+    fn closing_deadline(&self) -> Instant {
+        *lock(&self.state)
+            .closing_by
+            .get_or_insert_with(|| Instant::now() + SETTLE_FOR)
     }
 
     /// The quit alert's answer, or a close that must wait (Pause): everything is paused, or
     /// cancelled for Cancel, and the event loop stops once that is saved (review C1). The window
-    /// stays meanwhile, and says "Saving…" when it takes long enough to see; it closes after
-    /// [`SETTLE_FOR`] whatever happens.
+    /// stays meanwhile, and says "Saving…" when it takes long enough to see; it closes by the
+    /// closing deadline whatever happens.
     fn quit(self: &Arc<Self>, how: Quit) {
         lock(&self.state).quitting = Some(how);
+        let deadline = self.closing_deadline();
         match how {
             Quit::Cancel => self.engine.cancel_all(),
             Quit::Pause => self.engine.pause_all(),
@@ -1088,9 +1102,10 @@ impl Transfers {
         }
         let this = self.clone();
         self.link.rt().spawn_blocking(move || {
-            if !this.wait_settled(how, SAVING_AFTER) {
+            let saving = (Instant::now() + SAVING_AFTER).min(deadline);
+            if !this.wait_settled(how, saving) {
                 this.link.status(copy::SAVING.to_owned());
-                this.wait_settled(how, SETTLE_FOR);
+                this.wait_settled(how, deadline);
             }
             let _ = slint::invoke_from_event_loop(|| {
                 let _ = slint::quit_event_loop();
@@ -1099,15 +1114,28 @@ impl Transfers {
     }
 
     /// After the event loop has stopped: lets the work in flight stop, the journal catch up and
-    /// the uploads cancelled be given up, for at most [`SETTLE_FOR`]. After Pause and Quit (or a
-    /// close with nothing running) the jobs still queued stay in the journal for the resume
-    /// banner; after Cancel and Quit nothing is left.
+    /// the uploads cancelled be given up, until the closing deadline at most (what is left of
+    /// it after `quit`). After Pause and Quit (or a close with nothing running) the jobs still
+    /// queued stay in the journal for the resume banner; after Cancel and Quit nothing is left.
     pub fn finish(&self) {
         let how = lock(&self.state).quitting.unwrap_or(Quit::Pause);
         if how == Quit::Pause {
             self.engine.pause_all();
         }
-        self.wait_settled(how, SETTLE_FOR);
+        self.wait_settled(how, self.closing_deadline());
+    }
+}
+
+/// Waits, on this thread, until `done` or `deadline`; whether `done` got there.
+fn wait_until(deadline: Instant, done: impl Fn() -> bool) -> bool {
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 

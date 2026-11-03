@@ -64,6 +64,12 @@ impl Hold {
         }
     }
 
+    /// Whether the client is being made by now, without waiting (once true, it is not said
+    /// again).
+    pub(crate) fn has_entered(&self) -> bool {
+        self.entered.try_recv().is_ok()
+    }
+
     /// As [`Self::entered`], for a test that is not async: blocks its thread until then.
     pub(crate) fn wait_entered(&self) {
         self.entered
