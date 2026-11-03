@@ -13,8 +13,11 @@ import { Sidebar } from "components/sidebar.slint";
 import { StatusBar } from "components/statusbar.slint";
 import { Pane } from "components/pane.slint";
 import { AddSiteSheet } from "components/add_site.slint";
+import { TransferRow } from "types.slint";
+import { TransferDrawer } from "components/drawer.slint";
 
 export { FileKind, FileRow, ProviderTile, SiteItem, Theme }
+export { TransferRow }
 
 // Error message shown above the panes.
 component ErrorBanner inherits Rectangle {
@@ -154,6 +157,42 @@ export component AppWindow inherits Window {
     // The sheet was cancelled (Cancel button or Escape); it has already closed itself. If a test or
     // save was running (`add-site-busy`), the app should give up on it and clear the flag.
     callback add-site-cancel();
+
+    // ---- The transfer drawer (see components/drawer.slint) ----
+    // The drawer is expanded, and which tab it shows (0 Active, 1 Queued, 2 Failed, 3 Done). The
+    // Show / Hide Transfers button flips `transfers-open` itself and tells the app through
+    // `transfers-toggle`.
+    in-out property <bool> transfers-open: false;
+    in-out property <int> transfers-tab: 0;
+    // The engine has work (running, paused or stopped); `transfers-paused` is the user's pause.
+    in property <bool> transfers-running;
+    in property <bool> transfers-paused;
+    // The one line of the collapsed drawer.
+    in property <string> transfers-collapsed-text;
+    in property <string> transfers-title;
+    in property <string> transfers-line;
+    // The speeds without their units, and the time left (empty when not known).
+    in property <string> transfers-files-per-s;
+    in property <string> transfers-mb-per-s;
+    in property <string> transfers-eta;
+    // Overall progress, 0 to 100.
+    in property <float> transfers-percent;
+    in property <[string]> transfers-tab-titles;
+    in property <[TransferRow]> transfers-active;
+    in property <[TransferRow]> transfers-queued;
+    in property <[TransferRow]> transfers-failed;
+    in property <[TransferRow]> transfers-done;
+    callback transfers-toggle();
+    callback transfers-pause();
+    callback transfers-resume();
+    callback transfers-cancel-all();
+    // The row buttons give the job's id (`TransferRow.id`).
+    callback transfer-cancel(int);
+    callback transfer-retry(int);
+    callback transfers-retry-failed();
+    callback transfer-move-to-top(int);
+    callback transfer-pause(int);
+    callback transfer-resume(int);
 
     // The sidebar is shown. The toolbar button flips it; the app may set it too (to restore what
     // the user chose last time).
@@ -305,6 +344,35 @@ export component AppWindow inherits Window {
                             crumb-clicked(index) => { root.remote-crumb-clicked(index); }
                             sort(column) => { root.sort-remote(column); }
                         }
+                    }
+
+                    TransferDrawer {
+                        open <=> root.transfers-open;
+                        tab <=> root.transfers-tab;
+                        running: root.transfers-running;
+                        paused: root.transfers-paused;
+                        collapsed-text: root.transfers-collapsed-text;
+                        title: root.transfers-title;
+                        line: root.transfers-line;
+                        files-per-s: root.transfers-files-per-s;
+                        mb-per-s: root.transfers-mb-per-s;
+                        eta: root.transfers-eta;
+                        percent: root.transfers-percent;
+                        tab-titles: root.transfers-tab-titles;
+                        active-rows: root.transfers-active;
+                        queued-rows: root.transfers-queued;
+                        failed-rows: root.transfers-failed;
+                        done-rows: root.transfers-done;
+                        toggle => { root.transfers-toggle(); }
+                        pause => { root.transfers-pause(); }
+                        resume => { root.transfers-resume(); }
+                        cancel-all => { root.transfers-cancel-all(); }
+                        cancel(id) => { root.transfer-cancel(id); }
+                        retry(id) => { root.transfer-retry(id); }
+                        retry-failed => { root.transfers-retry-failed(); }
+                        move-to-top(id) => { root.transfer-move-to-top(id); }
+                        pause-row(id) => { root.transfer-pause(id); }
+                        resume-row(id) => { root.transfer-resume(id); }
                     }
                 }
             }

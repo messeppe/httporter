@@ -15,6 +15,7 @@ use slint::Model;
 mod add_site;
 mod binding;
 mod copy;
+mod drawer_view;
 mod drop_hook;
 mod format;
 mod local_fs;

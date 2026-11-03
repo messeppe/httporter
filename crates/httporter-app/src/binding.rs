@@ -556,6 +556,9 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         move || ctx.cancel_sheet()
     });
 
+    // The transfer drawer: its idle state and callback stubs until the engine is wired (Task 23).
+    crate::drawer_view::install(ui);
+
     if !sites.is_empty() {
         ui.set_selected_site(0);
         ctx.remote(RemoteOp::Select(0));

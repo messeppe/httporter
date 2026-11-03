@@ -22,3 +22,16 @@ export struct SiteItem {
     mono: string,
     healthy: bool,
 }
+
+// One row of the transfer drawer. `id` is the job's id in the engine (what the row's buttons hand
+// back), `percent` runs 0 to 100, and `detail` is the Failed tab's reason or a queued row's
+// "Paused". `paused` is a queued job paused on its own: its menu then offers Resume.
+export struct TransferRow {
+    id: int,
+    name: string,
+    kind: FileKind,
+    size: string,
+    percent: float,
+    detail: string,
+    paused: bool,
+}

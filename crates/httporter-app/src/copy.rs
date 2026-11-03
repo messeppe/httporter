@@ -277,6 +277,157 @@ pub fn startup_error_text(error: &dyn Error) -> String {
     format!("HTTPorter couldn't start.\n\n{error}")
 }
 
+// ---- The transfer drawer ----
+
+use chrono::{DateTime, Utc};
+use httporter_core::{BatchSummary, Direction, EngineState};
+
+use crate::format::{format_count, format_progress, format_size};
+
+/// The collapsed drawer when nothing is running, and the expanded drawer's title then.
+pub const NO_TRANSFERS: &str = "No transfers running";
+
+/// What a queued row says when its job was paused on its own.
+pub const ROW_PAUSED: &str = "Paused";
+
+/// "Uploading", "Downloading", "Deleting" or "Transferring".
+fn transfer_verb(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Upload => "Uploading",
+        Direction::Download => "Downloading",
+        Direction::Delete => "Deleting",
+        Direction::Mixed => "Transferring",
+    }
+}
+
+/// The drawer's title: "Uploading to {site}", "Downloading from {site}", "Deleting from {site}" or
+/// "Transferring with {site}". When the engine is not simply running it says why first: "Paused ·
+/// {title}", "Waiting for the connection · {title}", "Not enough space on {drive} · {title}", and
+/// "Sign-in failed · {site}" when a site refused its credentials.
+pub fn drawer_title(state: &EngineState, direction: Direction, site: &str) -> String {
+    let title = match direction {
+        Direction::Upload => format!("Uploading to {site}"),
+        Direction::Download => format!("Downloading from {site}"),
+        Direction::Delete => format!("Deleting from {site}"),
+        Direction::Mixed => format!("Transferring with {site}"),
+    };
+    match state {
+        EngineState::Idle | EngineState::Running => title,
+        EngineState::Paused => format!("Paused · {title}"),
+        EngineState::Offline { .. } => format!("Waiting for the connection · {title}"),
+        EngineState::AuthStopped { site } => format!("Sign-in failed · {site}"),
+        EngineState::DiskFull { drive, .. } => format!("Not enough space on {drive} · {title}"),
+    }
+}
+
+/// "1 file", "2 files", "13,793 files".
+fn files(n: u64) -> String {
+    if n == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{} files", format_count(n))
+    }
+}
+
+/// The drawer's second line: "8,412 of 13,793 files · 527 of 865 MB · over HTTPS to {host}", or
+/// for deletes "{done} of {total} items on {host}".
+pub fn drawer_line(
+    direction: Direction,
+    files_done: u64,
+    files_total: u64,
+    bytes_done: u64,
+    bytes_total: u64,
+    host: &str,
+) -> String {
+    let (done, total) = (format_count(files_done), format_count(files_total));
+    if direction == Direction::Delete {
+        format!("{done} of {total} items on {host}")
+    } else {
+        let size = format_progress(bytes_done, bytes_total);
+        format!("{done} of {total} files · {size} · over HTTPS to {host}")
+    }
+}
+
+/// The collapsed drawer while transfers run: "Uploading 8,412 of 13,793 files · 96 files/s".
+pub fn drawer_collapsed_running(
+    direction: Direction,
+    files_done: u64,
+    files_total: u64,
+    files_per_s: &str,
+) -> String {
+    format!(
+        "{} {} of {} files · {files_per_s} files/s",
+        transfer_verb(direction),
+        format_count(files_done),
+        format_count(files_total)
+    )
+}
+
+/// How long ago `then` was, in words: "just now", "5 min ago", "2 hours ago", "yesterday",
+/// "3 days ago".
+fn ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = (now - then).num_seconds();
+    let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
+    if seconds < 45 {
+        "just now".to_owned()
+    } else if hours < 1 {
+        format!("{} min ago", minutes.max(1))
+    } else if hours < 24 {
+        if hours == 1 {
+            "1 hour ago".to_owned()
+        } else {
+            format!("{hours} hours ago")
+        }
+    } else if days < 2 {
+        "yesterday".to_owned()
+    } else {
+        format!("{days} days ago")
+    }
+}
+
+/// "Last transfer 2 hours ago · 34 files · 4.2 MB".
+pub fn drawer_last_transfer(batch: &BatchSummary, now: DateTime<Utc>) -> String {
+    format!(
+        "Last transfer {} · {} · {}",
+        ago(batch.finished_at, now),
+        files(batch.files),
+        format_size(batch.bytes)
+    )
+}
+
+/// The collapsed drawer when nothing runs: "No transfers running", and " · Last transfer …" when
+/// there is a last batch.
+pub fn drawer_idle(last: Option<&BatchSummary>, now: DateTime<Utc>) -> String {
+    match last {
+        Some(batch) => format!("{NO_TRANSFERS} · {}", drawer_last_transfer(batch, now)),
+        None => NO_TRANSFERS.to_owned(),
+    }
+}
+
+/// The time left, without "about" and "left": "56 s", "4 min", "1 h 20 min".
+pub fn drawer_eta(eta: Duration) -> String {
+    let seconds = eta.as_secs_f64().round() as u64;
+    if seconds < 60 {
+        return format!("{seconds} s");
+    }
+    let minutes = (seconds + 30) / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} min"),
+    }
+}
+
+/// The drawer's tabs: "Active 32", "Queued 5,349", "Failed 0", "Done 8,412".
+pub fn drawer_tab_titles(active: u64, queued: u64, failed: u64, done: u64) -> [String; 4] {
+    [
+        format!("Active {}", format_count(active)),
+        format!("Queued {}", format_count(queued)),
+        format!("Failed {}", format_count(failed)),
+        format!("Done {}", format_count(done)),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
