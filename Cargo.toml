@@ -30,7 +30,15 @@ rusqlite = "0.41.1"
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-slint = "1.18"
+# The app draws with the software renderer only (main.rs), so the OpenGL renderer
+# (femtovg, glutin) and the tray icon stay out of the exe (S8: ≤ 25 MB).
+slint = { version = "1.18", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-software",
+    "accessibility",
+] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = "1.54.1"
@@ -43,7 +51,31 @@ windows-sys = "0.61.2"
 wiremock = "0.6.5"
 
 # Never set `panic = "abort"`: the app relies on unwinding.
+# Built for size (S8: ≤ 25 MB), except the code that is busy while transferring
+# (checksums, TLS) or drawing (the software renderer and its rasterizers).
 [profile.release]
+opt-level = "s"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+[profile.release.package.sha2]
+opt-level = 3
+
+[profile.release.package.md-5]
+opt-level = 3
+
+[profile.release.package.aws-lc-sys]
+opt-level = 3
+
+[profile.release.package.aws-lc-rs]
+opt-level = 3
+
+[profile.release.package.i-slint-renderer-software]
+opt-level = 3
+
+[profile.release.package.tiny-skia]
+opt-level = 3
+
+[profile.release.package.zeno]
+opt-level = 3
