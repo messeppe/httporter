@@ -140,7 +140,9 @@ pub struct Listing {
 ///
 /// Every implementation reports failures the same way:
 /// - a missing folder or file is [`ProviderError::NotFound`], and so is
-///   deleting one (`delete_file`, `delete_folder`);
+///   deleting one (`delete_file`, `delete_folder`), except that providers
+///   that cannot tell may return `Ok` for a missing path (S3's DELETE
+///   answers the same either way);
 /// - a write that collides with what is there, such as a file uploaded onto
 ///   a folder or below another file, is [`ProviderError::Refused`];
 /// - an upload to an existing file overwrites it;
@@ -169,6 +171,9 @@ pub trait StorageProvider: Send + Sync {
 
     async fn download(&self, path: &RemotePath) -> Result<ByteStream, ProviderError>;
 
+    /// Deletes the file at `path`. A missing file is
+    /// [`ProviderError::NotFound`]; providers that cannot tell may return
+    /// `Ok` for a missing path.
     async fn delete_file(&self, path: &RemotePath) -> Result<(), ProviderError>;
 
     /// Deletes `dir` and everything under it. Without
