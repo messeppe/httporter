@@ -56,7 +56,7 @@ fn row_data(prefix: &str, count: usize) -> Vec<RowData> {
 /// A window with one saved site (not chosen, so the cloud pane reads "No site selected"): with no
 /// site at all the window shows the Welcome screen instead of the panes.
 pub(crate) fn window_with_panes(local: usize, remote: usize) -> AppWindow {
-    testing::init_no_event_loop();
+    init_headless();
     let w = AppWindow::new().unwrap();
     w.set_sites(ModelRc::new(VecModel::from(vec![site(
         "example-shop.com",
@@ -979,4 +979,976 @@ fn the_status_bar_follows_the_pane_last_used() {
     click(w.window(), center(&row_starting(&w, "local-00001")), 1);
     slint::platform::update_timers_and_animations();
     assert_eq!(w.get_status_left(), "3 local items");
+}
+
+// ---- Task 17: selecting, the rubber band and the context menus ----
+
+use crate::keyboard_tests::{chord, description};
+use slint::platform::PointerEventButton;
+use std::cell::RefCell;
+
+/// Marks rows `rows` of a pane's model as selected, as the app does with the rows it selects.
+fn mark_selected(model: ModelRc<crate::FileRow>, rows: &[usize]) {
+    for &i in rows {
+        let mut row = model.row_data(i).unwrap();
+        row.selected = true;
+        model.set_row_data(i, row);
+    }
+}
+
+fn press_at(w: &AppWindow, at: LogicalPosition, button: PointerEventButton) {
+    w.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: at });
+    w.window().dispatch_event(WindowEvent::PointerPressed {
+        position: at,
+        button,
+    });
+}
+
+fn move_to(w: &AppWindow, at: LogicalPosition) {
+    w.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: at });
+}
+
+fn release_at(w: &AppWindow, at: LogicalPosition, button: PointerEventButton) {
+    w.window().dispatch_event(WindowEvent::PointerReleased {
+        position: at,
+        button,
+    });
+}
+
+fn right_click(w: &AppWindow, at: LogicalPosition) {
+    press_at(w, at, PointerEventButton::Right);
+    release_at(w, at, PointerEventButton::Right);
+}
+
+/// Task 17: Ctrl+A in a pane reports "select all" for that pane, and for no other combination.
+#[test]
+fn ctrl_a_selects_all_rows() {
+    let w = window_with_panes(4, 3);
+    let all = Rc::new(RefCell::new(Vec::new()));
+    w.on_select_all({
+        let all = all.clone();
+        move |pane| all.borrow_mut().push(pane)
+    });
+    tab(&w, LOCAL_LIST);
+    chord(w.window(), &[Key::Control], "a");
+    assert_eq!(*all.borrow(), [0]);
+    chord(w.window(), &[Key::Control], "A");
+    assert_eq!(*all.borrow(), [0, 0]);
+
+    // Only Ctrl+A: not A, Ctrl+Shift+A, Ctrl+Alt+A.
+    tap(w.window(), "a");
+    chord(w.window(), &[Key::Control, Key::Shift], "a");
+    chord(w.window(), &[Key::Control, Key::Alt], "a");
+    assert_eq!(all.borrow().len(), 2);
+
+    // The cloud pane's own list reports itself.
+    tab(&w, REMOTE_LIST - LOCAL_LIST);
+    chord(w.window(), &[Key::Control], "a");
+    assert_eq!(*all.borrow(), [0, 0, 1]);
+    // And a pane with no rows still says so: the app has nothing to select.
+    let empty = window_with_panes(0, 0);
+    let all = Rc::new(Cell::new(0));
+    empty.on_select_all({
+        let all = all.clone();
+        move |_| all.set(all.get() + 1)
+    });
+    tab(&empty, LOCAL_LIST);
+    chord(empty.window(), &[Key::Control], "a");
+    assert_eq!(all.get(), 1);
+}
+
+/// The keyboard reports the row it lands on, and Shift says it extends the selection.
+#[test]
+fn the_keys_report_the_row_they_land_on_with_shift() {
+    let w = window_with_panes(5, 0);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    w.on_row_pointer({
+        let log = log.clone();
+        move |pane, row, ctrl, shift| log.borrow_mut().push((pane, row, ctrl, shift))
+    });
+    tab(&w, LOCAL_LIST);
+    tap(w.window(), Key::DownArrow);
+    tap(w.window(), Key::DownArrow);
+    chord(w.window(), &[Key::Shift], Key::DownArrow);
+    chord(w.window(), &[Key::Shift], Key::End);
+    tap(w.window(), Key::Home);
+    chord(w.window(), &[Key::Shift], Key::PageDown);
+    assert_eq!(
+        *log.borrow(),
+        [
+            (0, 0, false, false),
+            (0, 1, false, false),
+            (0, 2, false, true),
+            (0, 4, false, true),
+            (0, 0, false, false),
+            (0, 4, false, true),
+        ]
+    );
+}
+
+/// A click reports the modifiers that were held, and a click on the other pane says which pane.
+#[test]
+fn a_click_reports_the_row_and_the_modifiers() {
+    let w = window_with_panes(6, 6);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    w.on_row_pointer({
+        let log = log.clone();
+        move |pane, row, ctrl, shift| log.borrow_mut().push((pane, row, ctrl, shift))
+    });
+    let at = |name: &str| center(&row_starting(&w, name));
+    click(w.window(), at("local-00001"), 1);
+    chord_click(&w, &[Key::Control], at("local-00003"));
+    chord_click(&w, &[Key::Shift], at("local-00005"));
+    chord_click(&w, &[Key::Control, Key::Shift], at("remote-00002"));
+    click(w.window(), at("remote-00004"), 1);
+    assert_eq!(
+        *log.borrow(),
+        [
+            (0, 1, false, false),
+            (0, 3, true, false),
+            (0, 5, false, true),
+            (1, 2, true, true),
+            (1, 4, false, false),
+        ]
+    );
+}
+
+/// Clicks with modifiers held.
+fn chord_click(w: &AppWindow, modifiers: &[Key], at: LogicalPosition) {
+    for m in modifiers {
+        w.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: (*m).into() });
+    }
+    click(w.window(), at, 1);
+    for m in modifiers.iter().rev() {
+        w.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: (*m).into() });
+    }
+}
+
+/// Dragging in the empty space below the rows reports the rows the band crosses as it moves; with
+/// Ctrl held it says the band adds to the selection; it only starts below the last row.
+#[test]
+fn the_rubber_band_reports_the_rows_it_crosses() {
+    let w = window_with_panes(3, 3);
+    w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    let bands = Rc::new(RefCell::new(Vec::new()));
+    w.on_band_select({
+        let bands = bands.clone();
+        move |pane, from, to, additive| bands.borrow_mut().push((pane, from, to, additive))
+    });
+    let log = Rc::new(RefCell::new(Vec::new()));
+    w.on_row_pointer({
+        let log = log.clone();
+        move |pane, row, _, _| log.borrow_mut().push((pane, row))
+    });
+    let list = w.get_local_bounds();
+    let x = list.x + list.width / 2.0;
+    let at = |below_top: f32| LogicalPosition::new(x, list.list_top + below_top);
+
+    // Three rows end at 84 px; a press at 150 px is in the empty space. It crosses no row yet.
+    press_at(&w, at(150.0), PointerEventButton::Left);
+    assert_eq!(*bands.borrow(), [(0, -1, -1, false)]);
+    // Up to 30 px: it now covers rows 1 and 2 (the rows end at 3).
+    move_to(&w, at(30.0));
+    assert_eq!(bands.borrow().last(), Some(&(0, 1, 2, false)));
+    move_to(&w, at(5.0));
+    assert_eq!(bands.borrow().last(), Some(&(0, 0, 2, false)));
+    // Back down to the empty space: it covers none again.
+    move_to(&w, at(120.0));
+    assert_eq!(bands.borrow().last(), Some(&(0, -1, -1, false)));
+    release_at(&w, at(120.0), PointerEventButton::Left);
+    let done = bands.borrow().len();
+    move_to(&w, at(10.0));
+    assert_eq!(bands.borrow().len(), done, "the band ends with the button");
+    assert!(
+        log.borrow().is_empty(),
+        "the band selects no row by a click"
+    );
+
+    // With Ctrl held it adds to the selection.
+    w.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    press_at(&w, at(150.0), PointerEventButton::Left);
+    move_to(&w, at(40.0));
+    release_at(&w, at(40.0), PointerEventButton::Left);
+    w.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+    assert_eq!(bands.borrow().last(), Some(&(0, 1, 2, true)));
+
+    // A full list has no empty space: the press is on a row, and there is no band.
+    let full = window_with_panes(60, 3);
+    full.window()
+        .set_size(slint::LogicalSize::new(1280.0, 800.0));
+    let n = Rc::new(Cell::new(0));
+    full.on_band_select({
+        let n = n.clone();
+        move |_, _, _, _| n.set(n.get() + 1)
+    });
+    let bounds = full.get_local_bounds();
+    let last = LogicalPosition::new(
+        bounds.x + bounds.width / 2.0,
+        bounds.list_top + bounds.height - 63.0 - 5.0,
+    );
+    press_at(&full, last, PointerEventButton::Left);
+    move_to(&full, LogicalPosition::new(last.x, last.y - 60.0));
+    release_at(&full, last, PointerEventButton::Left);
+    assert_eq!(n.get(), 0);
+}
+
+/// The titles of the entries of the context menu that is open, in order, with whether each can be
+/// chosen (a turned-off entry is drawn at half strength). Separators have no title.
+fn open_menu(w: &AppWindow) -> Vec<(String, bool)> {
+    let frame = ElementQuery::from_root(w)
+        .match_type_name("MenuFrame")
+        .find_first()
+        .expect("a context menu is open");
+    frame
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::Text)
+        .find_all()
+        .into_iter()
+        .filter_map(|e| {
+            let title = e.accessible_label()?.to_string();
+            (!title.is_empty()).then(|| (title, e.computed_opacity() > 0.9))
+        })
+        .collect()
+}
+
+fn menu_is_open(w: &AppWindow) -> bool {
+    ElementQuery::from_root(w)
+        .match_type_name("MenuFrame")
+        .find_first()
+        .is_some()
+}
+
+/// The entry of the open menu with this title.
+fn menu_entry(w: &AppWindow, title: &str) -> ElementHandle {
+    let frame = ElementQuery::from_root(w)
+        .match_type_name("MenuFrame")
+        .find_first()
+        .expect("a context menu is open");
+    frame
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::Text)
+        .match_predicate({
+            let title = title.to_owned();
+            move |e| e.accessible_label().is_some_and(|l| l == title)
+        })
+        .find_first()
+        .unwrap_or_else(|| panic!("no menu entry {title:?}"))
+}
+
+/// Records what the menus and the shortcuts call.
+fn record_commands(w: &AppWindow) -> Rc<RefCell<Vec<String>>> {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    macro_rules! log {
+        ($on:ident, $name:expr) => {{
+            let (log, weak) = (log.clone(), w.as_weak());
+            w.$on(move || {
+                let local = weak.upgrade().unwrap().get_local_pane_active();
+                log.borrow_mut().push(format!(
+                    "{} ({})",
+                    $name,
+                    if local { "pc" } else { "cloud" }
+                ));
+            });
+        }};
+    }
+    log!(on_upload, "upload");
+    log!(on_download, "download");
+    log!(on_download_to, "download-to");
+    log!(on_new_folder, "new-folder");
+    log!(on_delete, "delete");
+    log!(on_refresh, "refresh");
+    w.on_show_in_explorer({
+        let log = log.clone();
+        move |row| log.borrow_mut().push(format!("explorer {row}"))
+    });
+    w.on_row_pointer({
+        let log = log.clone();
+        move |pane, row, _, _| log.borrow_mut().push(format!("row {pane}:{row}"))
+    });
+    log
+}
+
+/// Task 17: a right click on a cloud row opens Download, Download to…, New Folder…, Delete… and
+/// Refresh; on a This PC row Upload, New Folder…, Show in Explorer and Refresh. Each is on or off
+/// as the toolbar says, and a chosen one reaches the app.
+#[test]
+fn context_menu_items_present_with_tr() {
+    let w = window_with_panes(4, 4);
+    w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    let log = record_commands(&w);
+    let entries = |items: &[(&str, bool)]| -> Vec<(String, bool)> {
+        items.iter().map(|(t, on)| ((*t).to_owned(), *on)).collect()
+    };
+
+    // The cloud menu, with Delete off (nothing is selected that could go).
+    w.set_can_download(true);
+    w.set_can_new_folder(true);
+    right_click(&w, center(&row_starting(&w, "remote-00001")));
+    assert_eq!(
+        open_menu(&w),
+        entries(&[
+            ("Download", true),
+            ("Download to…", true),
+            ("New Folder…", true),
+            ("Delete…", false),
+            ("Refresh", true),
+        ])
+    );
+    // The row under the click was picked first, as an ordinary click on it would.
+    assert_eq!(*log.borrow(), ["row 1:1"]);
+    // A turned-off entry cannot be chosen; a turned-on one can, and closes the menu.
+    menu_entry(&w, "Delete…").mock_single_click(PointerEventButton::Left);
+    assert_eq!(log.borrow().len(), 1, "a turned-off entry cannot be chosen");
+    // (Whether Slint dismisses the menu after a click on a turned-off entry is up to it.)
+    mark_selected(w.get_remote_rows(), &[1]); // the app selected the row that was picked
+    reopen_menu(&w, center(&row_starting(&w, "remote-00001")));
+    menu_entry(&w, "Download to…").mock_single_click(PointerEventButton::Left);
+    assert!(!menu_is_open(&w));
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("download-to (cloud)")
+    );
+
+    // With a selection that can go, Delete… is on; and it reaches the app.
+    w.set_can_delete(true);
+    mark_selected(w.get_remote_rows(), &[2]);
+    right_click(&w, center(&row_starting(&w, "remote-00002")));
+    assert_eq!(
+        log.borrow().len(),
+        1 + 1,
+        "no new pick: the row was selected already"
+    );
+    assert!(open_menu(&w).contains(&("Delete…".to_owned(), true)));
+    menu_entry(&w, "Delete…").mock_single_click(PointerEventButton::Left);
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("delete (cloud)")
+    );
+    right_click(&w, center(&row_starting(&w, "remote-00002")));
+    menu_entry(&w, "Download").mock_single_click(PointerEventButton::Left);
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("download (cloud)")
+    );
+    right_click(&w, center(&row_starting(&w, "remote-00002")));
+    menu_entry(&w, "New Folder…").mock_single_click(PointerEventButton::Left);
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("new-folder (cloud)")
+    );
+    right_click(&w, center(&row_starting(&w, "remote-00002")));
+    menu_entry(&w, "Refresh").mock_single_click(PointerEventButton::Left);
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("refresh (cloud)")
+    );
+
+    // The This PC menu.
+    log.borrow_mut().clear();
+    w.set_can_upload(true);
+    w.set_can_new_folder(false);
+    right_click(&w, center(&row_starting(&w, "local-00002")));
+    assert_eq!(
+        open_menu(&w),
+        entries(&[
+            ("Upload", true),
+            ("New Folder…", false),
+            ("Show in Explorer", true),
+            ("Refresh", true),
+        ])
+    );
+    assert_eq!(*log.borrow(), ["row 0:2"]);
+    menu_entry(&w, "New Folder…").mock_single_click(PointerEventButton::Left);
+    mark_selected(w.get_local_rows(), &[2]);
+    reopen_menu(&w, center(&row_starting(&w, "local-00002")));
+    assert_eq!(log.borrow().len(), 1, "turned off");
+    menu_entry(&w, "Show in Explorer").mock_single_click(PointerEventButton::Left);
+    assert_eq!(log.borrow().last().map(String::as_str), Some("explorer 2"));
+    right_click(&w, center(&row_starting(&w, "local-00003")));
+    menu_entry(&w, "Upload").mock_single_click(PointerEventButton::Left);
+    assert_eq!(log.borrow().last().map(String::as_str), Some("upload (pc)"));
+    right_click(&w, center(&row_starting(&w, "local-00003")));
+    menu_entry(&w, "Refresh").mock_single_click(PointerEventButton::Left);
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("refresh (pc)"),
+        "the pane's own Refresh lists the pane it was chosen in"
+    );
+}
+
+/// The Menu key and Shift+F10 open the menu of the row the keyboard is on.
+#[test]
+fn the_menu_key_and_shift_f10_open_the_context_menu() {
+    let w = window_with_panes(4, 4);
+    w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    let log = record_commands(&w);
+    tab(&w, LOCAL_LIST);
+    tap(w.window(), Key::DownArrow);
+    tap(w.window(), Key::DownArrow);
+    assert!(!menu_is_open(&w));
+    tap(w.window(), Key::Menu);
+    assert_eq!(
+        open_menu(&w)
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>(),
+        ["Upload", "New Folder…", "Show in Explorer", "Refresh"]
+    );
+    menu_entry(&w, "Show in Explorer").mock_single_click(PointerEventButton::Left);
+    assert_eq!(
+        log.borrow().last().map(String::as_str),
+        Some("explorer 1"),
+        "the row the keyboard is on"
+    );
+
+    // Shift+F10 in the cloud pane's list.
+    click(w.window(), row_center_of(&w, "remote-00001"), 1);
+    tap(w.window(), Key::DownArrow);
+    chord(w.window(), &[Key::Shift], Key::F10);
+    assert_eq!(
+        open_menu(&w)
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Download",
+            "Download to…",
+            "New Folder…",
+            "Delete…",
+            "Refresh"
+        ]
+    );
+    // A click elsewhere closes it without choosing anything.
+    let before = log.borrow().len();
+    click(w.window(), center(&pane_named(&w, "This PC")), 1);
+    assert!(!menu_is_open(&w));
+    assert!(
+        log.borrow()
+            .iter()
+            .skip(before)
+            .all(|l| l.starts_with("row"))
+    );
+}
+
+// ---- Task 22: dragging between the panes, the chips and paste ----
+
+/// A window wide enough for the panes to sit side by side, with rows 0 and 5 of each pane
+/// folders, a site chosen and the toolbar's rules for uploading and downloading on.
+fn window_for_drags() -> AppWindow {
+    let w = window_with_panes(6, 6);
+    w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    w.set_selected_site(0);
+    w.set_can_upload(true);
+    w.set_can_download(true);
+    w
+}
+
+struct Drops {
+    to_remote: Rc<RefCell<Vec<i32>>>,
+    to_local: Rc<RefCell<Vec<i32>>>,
+    picks: Rc<RefCell<Vec<(i32, i32, bool, bool)>>>,
+}
+
+fn watch_drops(w: &AppWindow) -> Drops {
+    let drops = Drops {
+        to_remote: Rc::default(),
+        to_local: Rc::default(),
+        picks: Rc::default(),
+    };
+    w.on_drag_to_remote({
+        let log = drops.to_remote.clone();
+        move |row| log.borrow_mut().push(row)
+    });
+    w.on_drag_to_local({
+        let log = drops.to_local.clone();
+        move |row| log.borrow_mut().push(row)
+    });
+    w.on_row_pointer({
+        let log = drops.picks.clone();
+        move |pane, row, ctrl, shift| log.borrow_mut().push((pane, row, ctrl, shift))
+    });
+    drops
+}
+
+/// Presses at `from`, moves 10 px right and then to `to`, and lets go there.
+fn drag(w: &AppWindow, from: LogicalPosition, to: LogicalPosition) {
+    press_at(w, from, PointerEventButton::Left);
+    move_to(w, LogicalPosition::new(from.x + 10.0, from.y));
+    move_to(w, to);
+    release_at(w, to, PointerEventButton::Left);
+}
+
+fn row_center(w: &AppWindow, name: &str) -> LogicalPosition {
+    center(&row_starting(w, name))
+}
+
+fn chips(w: &AppWindow, text: &str) -> usize {
+    ElementHandle::find_by_accessible_label(w, text).count()
+}
+
+/// Task 22: a drag from This PC dropped on a folder row of the cloud pane names that row; on a
+/// file, the empty space or the header of the pane, the folder it shows (-1); on the pane the drag
+/// began in, or outside both panes, it does nothing.
+#[test]
+fn in_app_drag_fires_with_target_row() {
+    let w = window_for_drags();
+    let drops = watch_drops(&w);
+    let remote = pane_named(&w, "example-shop.com");
+
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        row_center(&w, "remote-00005"),
+    );
+    assert_eq!(*drops.to_remote.borrow(), [5], "a folder row");
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        row_center(&w, "remote-00000"),
+    );
+    assert_eq!(
+        *drops.to_remote.borrow(),
+        [5, 0],
+        "the first row is a folder too"
+    );
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        row_center(&w, "remote-00002"),
+    );
+    assert_eq!(*drops.to_remote.borrow(), [5, 0, -1], "a file row");
+    // Below the rows, and on the pane's header.
+    let (p, s) = (remote.absolute_position(), remote.size());
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        LogicalPosition::new(p.x + s.width / 2.0, p.y + s.height - 40.0),
+    );
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        LogicalPosition::new(p.x + 60.0, p.y + 18.0),
+    );
+    assert_eq!(*drops.to_remote.borrow(), [5, 0, -1, -1, -1]);
+
+    // Nothing for: the pane it began in, the toolbar, the status bar.
+    let before = drops.to_remote.borrow().len();
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        row_center(&w, "local-00003"),
+    );
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        LogicalPosition::new(p.x + 100.0, 10.0),
+    );
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        LogicalPosition::new(p.x + 100.0, 795.0),
+    );
+    assert_eq!(drops.to_remote.borrow().len(), before);
+    assert!(drops.to_local.borrow().is_empty());
+
+    // The same from the cloud pane to This PC, with `can-download`.
+    drag(
+        &w,
+        row_center(&w, "remote-00002"),
+        row_center(&w, "local-00005"),
+    );
+    drag(
+        &w,
+        row_center(&w, "remote-00002"),
+        row_center(&w, "local-00004"),
+    );
+    drag(
+        &w,
+        row_center(&w, "remote-00002"),
+        row_center(&w, "remote-00001"),
+    );
+    assert_eq!(*drops.to_local.borrow(), [5, -1]);
+    assert_eq!(drops.to_remote.borrow().len(), before);
+}
+
+/// The same when the window is narrow and the panes are one above the other.
+#[test]
+fn in_app_drag_works_between_stacked_panes() {
+    let w = window_with_panes(6, 6);
+    w.window().set_size(slint::LogicalSize::new(960.0, 900.0));
+    w.set_selected_site(0);
+    w.set_can_upload(true);
+    let drops = watch_drops(&w);
+    assert!(
+        pane_named(&w, "example-shop.com").absolute_position().y
+            > pane_named(&w, "This PC").absolute_position().y
+    );
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        row_center(&w, "remote-00005"),
+    );
+    drag(
+        &w,
+        row_center(&w, "local-00001"),
+        row_center(&w, "remote-00003"),
+    );
+    assert_eq!(*drops.to_remote.borrow(), [5, -1]);
+}
+
+/// A drag starts after 4 px of movement: until then it is a click, and the ghost shows the
+/// number of rows being carried.
+#[test]
+fn a_drag_starts_after_four_pixels_and_shows_a_ghost_with_the_count() {
+    let w = window_for_drags();
+    let drops = watch_drops(&w);
+    w.set_local_selected_count(3);
+    let from = row_center(&w, "local-00001");
+    let ghost = |text: &str| chips(&w, text);
+
+    press_at(&w, from, PointerEventButton::Left);
+    move_to(&w, LogicalPosition::new(from.x + 3.0, from.y));
+    assert_eq!(ghost("3 items"), 0, "3 px is not a drag yet");
+    move_to(&w, LogicalPosition::new(from.x + 3.0, from.y + 2.0));
+    assert_eq!(ghost("3 items"), 0, "nor is 3.6 px");
+    move_to(&w, LogicalPosition::new(from.x + 4.0, from.y));
+    assert_eq!(ghost("3 items"), 1, "4 px is");
+    move_to(&w, row_center(&w, "remote-00005"));
+    assert_eq!(ghost("3 items"), 1);
+    release_at(&w, row_center(&w, "remote-00005"), PointerEventButton::Left);
+    assert_eq!(ghost("3 items"), 0, "the ghost goes with the button");
+    assert_eq!(*drops.to_remote.borrow(), [5]);
+
+    // One row reads "1 item".
+    w.set_local_selected_count(1);
+    press_at(&w, from, PointerEventButton::Left);
+    move_to(&w, LogicalPosition::new(from.x + 20.0, from.y));
+    assert_eq!(ghost("1 item"), 1);
+    assert_eq!(ghost("1 items"), 0);
+    release_at(&w, from, PointerEventButton::Left);
+
+    // A press and release without a move is a click, and no drop.
+    press_at(&w, from, PointerEventButton::Left);
+    release_at(&w, from, PointerEventButton::Left);
+    assert_eq!(drops.to_remote.borrow().len(), 1);
+}
+
+/// A pane that has nowhere to send its rows (the toolbar rule is off) does not start a drag.
+#[test]
+fn a_drag_is_inert_while_the_toolbar_rule_is_off() {
+    let w = window_for_drags();
+    w.set_can_upload(false);
+    let drops = watch_drops(&w);
+    w.set_local_selected_count(2);
+    let from = row_center(&w, "local-00001");
+    press_at(&w, from, PointerEventButton::Left);
+    move_to(&w, LogicalPosition::new(from.x + 20.0, from.y));
+    assert_eq!(chips(&w, "2 items"), 0, "no ghost");
+    move_to(&w, row_center(&w, "remote-00005"));
+    assert_eq!(chips(&w, "Release to upload to remote-00005.txt"), 0);
+    release_at(&w, row_center(&w, "remote-00005"), PointerEventButton::Left);
+    assert!(drops.to_remote.borrow().is_empty());
+    // The cloud pane's rows go only while Download is on.
+    w.set_can_download(false);
+    let from = row_center(&w, "remote-00002");
+    drag(&w, from, row_center(&w, "local-00005"));
+    assert!(drops.to_local.borrow().is_empty());
+}
+
+/// Esc gives the drag up: the ghost goes, the drop does nothing, and the next drag is whole.
+#[test]
+fn escape_cancels_drag() {
+    let w = window_for_drags();
+    let drops = watch_drops(&w);
+    w.set_local_selected_count(2);
+    let from = row_center(&w, "local-00001");
+    let target = row_center(&w, "remote-00005");
+
+    press_at(&w, from, PointerEventButton::Left);
+    move_to(&w, LogicalPosition::new(from.x + 20.0, from.y));
+    move_to(&w, target);
+    assert_eq!(chips(&w, "2 items"), 1);
+    assert_eq!(chips(&w, "Release to upload to remote-00005.txt"), 1);
+    tap(w.window(), Key::Escape);
+    assert_eq!(chips(&w, "2 items"), 0, "the ghost is gone");
+    assert_eq!(
+        chips(&w, "Release to upload to remote-00005.txt"),
+        0,
+        "and so is the chip"
+    );
+    // Moving on does not bring it back, and letting go over the folder drops nothing.
+    move_to(&w, row_center(&w, "remote-00000"));
+    assert_eq!(chips(&w, "2 items"), 0);
+    release_at(&w, row_center(&w, "remote-00000"), PointerEventButton::Left);
+    assert!(drops.to_remote.borrow().is_empty());
+
+    // The next drag works as if nothing had happened.
+    drag(&w, from, target);
+    assert_eq!(*drops.to_remote.borrow(), [5]);
+    // Esc with no drag is no business of the drag.
+    tap(w.window(), Key::Escape);
+    drag(&w, from, row_center(&w, "remote-00000"));
+    assert_eq!(*drops.to_remote.borrow(), [5, 0]);
+}
+
+/// Pressing a row that is selected waits for the button to come up before it narrows the
+/// selection, so a whole selection can be dragged; a Ctrl or Shift press acts at once.
+#[test]
+fn dragging_a_selection_keeps_it() {
+    let w = window_for_drags();
+    let drops = watch_drops(&w);
+    mark_selected(w.get_local_rows(), &[1, 2, 3]);
+    w.set_local_selected_count(3);
+
+    // A drag from a selected row: no pick at all, just the drop.
+    drag(
+        &w,
+        row_center(&w, "local-00002"),
+        row_center(&w, "remote-00005"),
+    );
+    assert_eq!(*drops.to_remote.borrow(), [5]);
+    assert!(
+        drops.picks.borrow().is_empty(),
+        "the selection was not collapsed: {:?}",
+        drops.picks.borrow()
+    );
+
+    // A click on it (no drag) narrows the selection when the button comes up.
+    let at = row_center(&w, "local-00002");
+    press_at(&w, at, PointerEventButton::Left);
+    assert!(drops.picks.borrow().is_empty(), "not yet");
+    release_at(&w, at, PointerEventButton::Left);
+    assert_eq!(*drops.picks.borrow(), [(0, 2, false, false)]);
+
+    // With Ctrl or Shift the press acts at once, selected row or not.
+    drops.picks.borrow_mut().clear();
+    chord_click(&w, &[Key::Control], row_center(&w, "local-00003"));
+    chord_click(&w, &[Key::Shift], row_center(&w, "local-00001"));
+    assert_eq!(
+        *drops.picks.borrow(),
+        [(0, 3, true, false), (0, 1, false, true)]
+    );
+    // And a row that is not selected acts at once, so it is what is dragged.
+    drops.picks.borrow_mut().clear();
+    press_at(&w, row_center(&w, "local-00004"), PointerEventButton::Left);
+    assert_eq!(*drops.picks.borrow(), [(0, 4, false, false)]);
+    release_at(&w, row_center(&w, "local-00004"), PointerEventButton::Left);
+}
+
+/// Task 22: while files from Explorer hover over the cloud pane its chip says "Release to upload",
+/// and over a folder row names it: "Release to upload to {folder}". A long name is cut short.
+#[test]
+fn hover_text_names_the_folder() {
+    let w = window_for_drags();
+    let remote = pane_named(&w, "example-shop.com");
+    w.set_drop_hover_remote(true);
+    assert_eq!(chips(&w, "Release to upload"), 1);
+    assert_eq!(chips(&w, "Release to upload to remote-00005.txt"), 0);
+
+    w.set_drop_hover_row(5);
+    assert_eq!(chips(&w, "Release to upload to remote-00005.txt"), 1);
+    assert_eq!(chips(&w, "Release to upload"), 0);
+    w.set_drop_hover_row(0);
+    assert_eq!(chips(&w, "Release to upload to remote-00000.txt"), 1);
+    w.set_drop_hover_row(-1);
+    assert_eq!(chips(&w, "Release to upload"), 1);
+    w.set_drop_hover_remote(false);
+    assert_eq!(chips(&w, "Release to upload"), 0);
+
+    // The words the app builds for a drop on a folder name it too.
+    let batch = crate::drop_hook::DropBatch {
+        side: crate::drop_hook::PaneSide::Remote,
+        row: Some(5),
+        paths: vec![r"C:\a".into(), r"C:\b".into()],
+    };
+    assert_eq!(
+        crate::copy::drop_status(&batch, Some("example-shop.com"), Some("uploads")),
+        "Uploading arrives in the next build (I2): 2 items dropped on the uploads folder in example-shop.com."
+    );
+
+    // A very long folder name stays inside the pane.
+    let long = "a-folder-with-a-very-long-name-that-would-not-fit-in-the-pane-at-all-".repeat(3);
+    let mut rows: Vec<crate::viewmodel::RowData> = row_data("remote", 3);
+    rows[0].name = long.clone();
+    w.set_remote_rows(to_slint_rows(&rows));
+    w.set_drop_hover_remote(true);
+    w.set_drop_hover_row(0);
+    let chip = ElementHandle::find_by_accessible_label(&w, &format!("Release to upload to {long}"))
+        .next()
+        .expect("the chip names the folder");
+    let (c, cs) = (chip.absolute_position(), chip.size());
+    let (p, ps) = (remote.absolute_position(), remote.size());
+    assert!(
+        c.x >= p.x && c.x + cs.width <= p.x + ps.width + 0.5,
+        "the chip ({}..{}) is wider than the pane ({}..{})",
+        c.x,
+        c.x + cs.width,
+        p.x,
+        p.x + ps.width
+    );
+}
+
+/// During a drag of the cloud selection the This PC pane says "Release to download", naming the
+/// folder row it is over.
+#[test]
+fn the_local_pane_offers_to_download_and_names_the_folder() {
+    let w = window_for_drags();
+    let drops = watch_drops(&w);
+    w.set_remote_selected_count(1);
+    let from = row_center(&w, "remote-00002");
+    press_at(&w, from, PointerEventButton::Left);
+    move_to(&w, LogicalPosition::new(from.x + 20.0, from.y));
+    move_to(&w, row_center(&w, "local-00005"));
+    assert_eq!(chips(&w, "Release to download to local-00005.txt"), 1);
+    move_to(&w, row_center(&w, "local-00003"));
+    assert_eq!(chips(&w, "Release to download"), 1);
+    assert_eq!(chips(&w, "Release to download to local-00003.txt"), 0);
+    move_to(&w, row_center(&w, "remote-00001"));
+    assert_eq!(
+        chips(&w, "Release to download"),
+        0,
+        "not over This PC any more"
+    );
+    assert_eq!(
+        chips(&w, "Release to upload"),
+        0,
+        "the cloud pane is where it began"
+    );
+    release_at(&w, row_center(&w, "remote-00001"), PointerEventButton::Left);
+    assert!(drops.to_local.borrow().is_empty());
+}
+
+/// Ctrl+V in the cloud pane asks to paste, while Upload can be pressed; This PC's list does not.
+#[test]
+fn ctrl_v_pastes_in_the_cloud_pane_only_while_upload_is_on() {
+    let w = window_with_panes(3, 3);
+    let pastes = Rc::new(Cell::new(0));
+    w.on_paste({
+        let pastes = pastes.clone();
+        move || pastes.set(pastes.get() + 1)
+    });
+    tab(&w, REMOTE_LIST);
+    chord(w.window(), &[Key::Control], "v");
+    assert_eq!(pastes.get(), 0, "Upload is off");
+    w.set_can_upload(true);
+    chord(w.window(), &[Key::Control], "v");
+    chord(w.window(), &[Key::Control], "V");
+    assert_eq!(pastes.get(), 2);
+
+    // Not with other modifiers, not a plain V, not while the key is held.
+    tap(w.window(), "v");
+    chord(w.window(), &[Key::Control, Key::Shift], "v");
+    chord(w.window(), &[Key::Control, Key::Alt], "v");
+    w.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    w.window()
+        .dispatch_event(WindowEvent::KeyPressRepeated { text: "v".into() });
+    w.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+    assert_eq!(pastes.get(), 2);
+
+    // This PC's list has nothing to paste into.
+    let pc = window_with_panes(3, 3);
+    pc.set_can_upload(true);
+    let pastes = Rc::new(Cell::new(0));
+    pc.on_paste({
+        let pastes = pastes.clone();
+        move || pastes.set(pastes.get() + 1)
+    });
+    tab(&pc, LOCAL_LIST);
+    chord(pc.window(), &[Key::Control], "v");
+    assert_eq!(pastes.get(), 0);
+}
+
+// ---- Task 25, item 8: a Refresh button in each pane's header ----
+
+/// Polish 8 (spec 8.2.1): each pane's header has a Refresh button. It lists its own pane, whichever
+/// was used last; the cloud pane's is off while no site is chosen, and says so.
+#[test]
+fn polish_8_each_pane_has_a_refresh_button_for_its_own_pane() {
+    let w = window_with_panes(3, 3);
+    w.window().set_size(slint::LogicalSize::new(1280.0, 800.0));
+    let buttons = || {
+        let mut found: Vec<ElementHandle> = ElementHandle::find_by_accessible_label(&w, "Refresh")
+            .filter(|e| e.accessible_role() == Some(AccessibleRole::Button))
+            .collect();
+        found.sort_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x));
+        found
+    };
+    assert_eq!(buttons().len(), 2, "one in each header");
+    let (local, remote) = (
+        pane_named(&w, "This PC"),
+        pane_named(&w, "No site selected"),
+    );
+    for (button, pane) in buttons().iter().zip([&local, &remote]) {
+        let (b, p) = (button.absolute_position(), pane.absolute_position());
+        assert!(
+            b.x > p.x && b.y >= p.y && b.y < p.y + 37.0,
+            "in the pane's header"
+        );
+    }
+
+    // With no site chosen the cloud pane's is off, and says why.
+    assert_eq!(buttons()[0].accessible_enabled(), Some(true));
+    assert_eq!(description(&buttons()[0]), "");
+    assert_eq!(buttons()[1].accessible_enabled(), Some(false));
+    assert_eq!(description(&buttons()[1]), "No site selected");
+    w.set_selected_site(0);
+    assert_eq!(buttons()[1].accessible_enabled(), Some(true));
+    assert_eq!(description(&buttons()[1]), "");
+
+    // Each lists its own pane: it makes it the pane in use, then asks for a refresh.
+    let log = Rc::new(RefCell::new(Vec::new()));
+    w.on_refresh({
+        let (log, weak) = (log.clone(), w.as_weak());
+        move || {
+            log.borrow_mut()
+                .push(weak.upgrade().unwrap().get_local_pane_active())
+        }
+    });
+    click(w.window(), center(&buttons()[0]), 1);
+    click(w.window(), center(&buttons()[1]), 1);
+    click(w.window(), center(&buttons()[0]), 1);
+    assert_eq!(*log.borrow(), [true, false, true]);
+    // The keyboard reaches them, in order: after the list and the crumbs.
+    w.set_local_crumbs(crumb_names(&["D:", "sites"]));
+    log.borrow_mut().clear();
+    tab(&w, LOCAL_LIST + 1 + 1);
+    tap(w.window(), Key::Return);
+    assert_eq!(*log.borrow(), [true]);
+    // Assistive technology can press it.
+    buttons()[1].invoke_accessible_default_action();
+    assert_eq!(*log.borrow(), [true, false]);
+}
+
+fn row_center_of(w: &AppWindow, name: &str) -> LogicalPosition {
+    center(&row_starting(w, name))
+}
+
+/// Opens the menu of the row at `at`, unless a menu is open already.
+fn reopen_menu(w: &AppWindow, at: LogicalPosition) {
+    if !menu_is_open(w) {
+        right_click(w, at);
+    }
+}
+
+/// Starts the testing backend on this thread, once: a test that opens a second window must not
+/// start it again.
+fn init_headless() {
+    thread_local! {
+        static STARTED: Cell<bool> = const { Cell::new(false) };
+    }
+    if !STARTED.with(|started| started.replace(true)) {
+        testing::init_no_event_loop();
+    }
 }
