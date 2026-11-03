@@ -42,17 +42,33 @@ pub(crate) fn from_response(
     )
 }
 
+/// What [`ProviderError::Refused`] says when the service refused one object inside an answer
+/// that was otherwise a success (review I5). The app shows it in its own words.
+pub const ACCESS_DENIED: &str = "access to this file was denied";
+
 /// The error for an S3 `Code` and `Message`. `status` is the HTTP status of the answer, or any
 /// non-error status (use 200) for an error that came inside a successful answer, such as one
 /// key of a `DeleteObjects` request.
+///
+/// An error inside a successful answer is about one object: the request itself was signed and
+/// accepted, so a refusal there is never the sign-in failing. It is
+/// [`ProviderError::Refused`] with [`ACCESS_DENIED`] (a bucket policy or a key limited to some
+/// paths), which fails that file alone instead of stopping the site.
 pub(crate) fn from_parts(
     status: u16,
     code: Option<&str>,
     message: Option<&str>,
     retry_after: Option<Duration>,
 ) -> ProviderError {
-    code.and_then(|code| by_code(code, status, retry_after))
-        .unwrap_or_else(|| by_status(status, code, message, retry_after))
+    let error = code
+        .and_then(|code| by_code(code, status, retry_after))
+        .unwrap_or_else(|| by_status(status, code, message, retry_after));
+    match error {
+        ProviderError::Auth { .. } if status < 300 => {
+            ProviderError::Refused(ACCESS_DENIED.to_owned())
+        }
+        other => other,
+    }
 }
 
 /// The meaning of the codes that name a reason precisely; `None` for the rest.
@@ -293,10 +309,16 @@ mod tests {
 
     #[test]
     fn an_error_inside_a_successful_answer_keeps_its_meaning() {
-        // One key of a DeleteObjects request: the HTTP status was 200.
+        // One key of a DeleteObjects request: the HTTP status was 200. The request was signed
+        // and accepted, so a refusal is about that key, never the sign-in (review I5).
         let per_key = |code: &str| from_parts(200, Some(code), Some("text"), None);
+        let denied = ProviderError::Refused(ACCESS_DENIED.into());
+        assert_eq!(per_key("AccessDenied"), denied);
+        assert_eq!(per_key("AllAccessDisabled"), denied);
+        assert_eq!(per_key("InvalidAccessKeyId"), denied);
+        // The same codes as the answer to a request are the request refused.
         assert_eq!(
-            per_key("AccessDenied"),
+            from_parts(403, Some("AccessDenied"), Some("text"), None),
             ProviderError::Auth {
                 hint: AuthHint::Unknown
             }

@@ -826,10 +826,38 @@ impl StorageProvider for S3Storage {
         self.delete_targets(bucket, &targets).await
     }
 
-    /// Asks for a single key: much lighter than the default, a listing of the root.
+    /// Asks for a single key, much lighter than the default (a listing of the root), and takes
+    /// any answer at all as the service being there, as Bunny's probe does (review I2): only no
+    /// answer (no connection, a reset, a timeout) is an error. A refusal or a server error is
+    /// for the next real request to report, which stops the site or fails the job with the
+    /// right words; it must not keep a site "offline" while the network is fine.
     async fn reachable(&self) -> Result<(), ProviderError> {
         let bucket = self.bucket()?;
-        self.list_page(bucket, "", None, Some(1)).await.map(|_| ())
+        let url = self.list_url(bucket, "", None, Some(1));
+        let response = self
+            .call(
+                Method::GET,
+                url,
+                &[],
+                EMPTY_PAYLOAD_SHA256,
+                None,
+                Some(self.list_timeout),
+            )
+            .await?;
+        // Read (a little of) it so the connection can be reused; what it says doesn't matter.
+        let _ = read_capped(response, ERROR_BODY_MAX).await;
+        Ok(())
+    }
+
+    /// `AbortMultipartUpload`. An upload the service no longer has is as good as aborted.
+    async fn abort_multipart(
+        &self,
+        path: &RemotePath,
+        upload_id: &str,
+    ) -> Result<(), ProviderError> {
+        let bucket = self.bucket()?;
+        let object = object_url(&self.endpoint, bucket, path);
+        self.abort_upload(&object, upload_id).await
     }
 }
 

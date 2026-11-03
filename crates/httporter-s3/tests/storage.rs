@@ -17,7 +17,7 @@ use httporter_core::{
     ProviderError, ProxyMode, RemotePath, StorageProvider, TransferSettings, UploadOptions,
     UploadSource,
 };
-use httporter_s3::{Credentials, Endpoint, S3Config, S3Storage, Url};
+use httporter_s3::{ACCESS_DENIED, Credentials, Endpoint, S3Config, S3Storage, Url};
 use wiremock::matchers::{body_bytes, header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -916,9 +916,8 @@ async fn delete_batch_maps_per_key_errors() {
         results,
         [
             Ok(()),
-            Err(ProviderError::Auth {
-                hint: AuthHint::Unknown
-            }),
+            // One key refused inside an accepted request is that key, never the sign-in (I5).
+            Err(ProviderError::Refused(ACCESS_DENIED.into())),
             Err(ProviderError::Server {
                 status: 500,
                 detail: "InternalError".into()
@@ -986,9 +985,7 @@ async fn delete_batch_with_an_unnamed_error_fails_the_keys_it_did_not_clear() {
                 status: 500,
                 detail: "InternalError".into()
             }),
-            Err(ProviderError::Auth {
-                hint: AuthHint::Unknown
-            }),
+            Err(ProviderError::Refused(ACCESS_DENIED.into())),
         ]
     );
 }
@@ -1106,9 +1103,7 @@ async fn delete_folder_reports_a_key_that_could_not_be_deleted() {
         .await;
     assert_eq!(
         provider(&server).delete_folder(&p("locked")).await,
-        Err(ProviderError::Auth {
-            hint: AuthHint::Unknown
-        })
+        Err(ProviderError::Refused(ACCESS_DENIED.into()))
     );
 }
 
@@ -1585,7 +1580,7 @@ async fn nothing_secret_appears_in_errors_or_debug_output() {
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn reachable_asks_for_one_key_and_reports_failures() {
+async fn reachable_asks_for_one_key() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path(format!("/{BUCKET}")))
@@ -1597,19 +1592,47 @@ async fn reachable_asks_for_one_key_and_reports_failures() {
         .mount(&server)
         .await;
     provider(&server).reachable().await.unwrap();
+}
 
-    let refused = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(s3_error(403, "AccessDenied", "Access Denied"))
-        .expect(1)
-        .mount(&refused)
-        .await;
-    assert_eq!(
-        provider(&refused).reachable().await,
-        Err(ProviderError::Auth {
-            hint: AuthHint::Unknown
-        })
-    );
+/// Review I2: the probe only asks whether the service answers at all, as Bunny's does. Any HTTP
+/// answer, a refusal or a server error included, means the connection is back: the next real
+/// request then stops the site or fails the job with the right words. Only no answer is
+/// offline.
+#[tokio::test]
+async fn reachable_is_any_answer_and_only_no_answer_is_offline() {
+    for (status, code) in [
+        (403, "AccessDenied"),
+        (403, "InvalidAccessKeyId"),
+        (400, "ExpiredToken"),
+        (404, "NoSuchBucket"),
+        (500, "InternalError"),
+        (503, "SlowDown"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(s3_error(status, code, "no"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            provider(&server).reachable().await,
+            Ok(()),
+            "HTTP {status} {code}"
+        );
+    }
+
+    // A port nothing listens on: no answer at all.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let ep = Endpoint {
+        base: Url::parse(&format!("http://{addr}")).unwrap(),
+        path_style: true,
+        region: REGION.into(),
+    };
+    let storage = S3Storage::new(S3Config::for_site(BUCKET, ep, creds(), &settings())).unwrap();
+    let error = storage.reachable().await.unwrap_err();
+    assert!(matches!(error, ProviderError::Network(_)), "{error:?}");
 }
 
 #[tokio::test]

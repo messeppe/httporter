@@ -15,7 +15,11 @@
 //! attempt's upload id and part size (whatever the configuration says now), skips the parts
 //! recorded as stored and sends the rest. If the service no longer has the upload (it answers
 //! `NoSuchUpload`, which is [`ProviderError::NotFound`]), the recorded progress is worthless,
-//! and the file is uploaded again from the start as a new upload.
+//! and the file is uploaded again from the start as a new upload. So it is when the service
+//! refuses the recorded parts as it completes the upload (`InvalidPart`, `InvalidPartOrder`:
+//! they are not what it stored), except that the old upload is aborted first. Whether the file
+//! is still the one the parts were cut from is the journal's to check before it answers
+//! [`PartJournal::load`] (ruling Q49).
 //!
 //! **Like every call of the provider, one attempt.** A part that fails ends the upload with that
 //! error once the parts in flight beside it are done (their progress is kept); whoever called
@@ -27,7 +31,10 @@
 //! because the future was dropped. A pause or a shutdown drops the future and keeps the upload;
 //! a cancel by the user is the engine's to mark in the journal first. Without a journal nothing
 //! can resume, so an unfinished upload is aborted. (An upload that was dropped is aborted by a
-//! task spawned on the runtime that was running it, which is not waited for.)
+//! task spawned on the runtime that was running it, which is not waited for; the engine sends
+//! its own abort for a cancelled upload, with
+//! [`StorageProvider::abort_multipart`](httporter_core::StorageProvider::abort_multipart), from
+//! a task the app waits for as it closes.)
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
@@ -43,8 +50,10 @@ use reqwest::header::{CONTENT_LENGTH, ETAG};
 use reqwest::{Body, Method};
 use url::Url;
 
-use crate::body::{check_file_len, file_range_body, file_range_md5, read_limited, until_stalled};
-use crate::errors::network_error;
+use crate::body::{
+    check_file_len, file_range_body, file_range_md5, read_capped, read_limited, until_stalled,
+};
+use crate::errors::{self, ERROR_BODY_MAX, network_error};
 use crate::sigv4::{Credentials, EMPTY_PAYLOAD_SHA256, UNSIGNED_PAYLOAD, sha256_hex};
 use crate::storage::{ANSWER_MAX, S3Storage, b64, failure, object_headers, signed_headers};
 use crate::xml;
@@ -213,12 +222,35 @@ impl S3Storage {
                     return Ok(());
                 }
                 // The service does not have the upload any more: there is nothing to resume.
-                Err(ProviderError::NotFound) if resumed => unfinished.forget(),
-                Err(error) => {
+                Err(Stopped::Gone) if resumed => unfinished.forget(),
+                // It has the upload, but not the parts the journal recorded (ruling Q49): they
+                // are worth nothing, so the upload is given up and the file sent again.
+                Err(Stopped::BadParts(_)) if resumed => unfinished.abort_now().await,
+                Err(stopped) => {
                     unfinished.settle().await;
-                    return Err(error);
+                    return Err(stopped.into_error());
                 }
             }
+        }
+    }
+
+    /// `AbortMultipartUpload` for the upload `upload_id` of `object`. An upload the service no
+    /// longer has is as good as aborted.
+    pub(crate) async fn abort_upload(
+        &self,
+        object: &Url,
+        upload_id: &str,
+    ) -> Result<(), ProviderError> {
+        let url = query_url(object, upload_id, &[]);
+        let response = self
+            .call(Method::DELETE, url, &[], EMPTY_PAYLOAD_SHA256, None, None)
+            .await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        match failure(response, self.request_timeout).await {
+            ProviderError::NotFound => Ok(()),
+            error => Err(error),
         }
     }
 
@@ -254,7 +286,7 @@ impl S3Storage {
         &self,
         job: &Job<'_>,
         mut done: BTreeMap<u32, String>,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<(), Stopped> {
         let mut waiting: VecDeque<u32> = (1..=job.total_parts())
             .filter(|number| !done.contains_key(number))
             .collect();
@@ -280,14 +312,14 @@ impl S3Storage {
                     done.insert(number, etag);
                 }
                 // The upload is gone: the parts beside this one are lost with it.
-                Err(ProviderError::NotFound) => return Err(ProviderError::NotFound),
+                Err(ProviderError::NotFound) => return Err(Stopped::Gone),
                 Err(error) => {
                     failed.get_or_insert(error);
                 }
             }
         }
         if let Some(error) = failed {
-            return Err(error);
+            return Err(Stopped::Failed(error));
         }
         let parts: Vec<(u32, String)> = done.into_iter().collect();
         self.complete(job, &parts).await
@@ -345,7 +377,7 @@ impl S3Storage {
     }
 
     /// `CompleteMultipartUpload` for `parts`, which are all of them in order.
-    async fn complete(&self, job: &Job<'_>, parts: &[(u32, String)]) -> Result<(), ProviderError> {
+    async fn complete(&self, job: &Job<'_>, parts: &[(u32, String)]) -> Result<(), Stopped> {
         let body = xml::complete_request(parts).into_bytes();
         let extra = [("content-type".to_owned(), "application/xml".to_owned())];
         let payload = sha256_hex(&body);
@@ -359,14 +391,56 @@ impl S3Storage {
                 Some(body),
                 Some(timeout),
             )
-            .await?;
+            .await
+            .map_err(Stopped::Failed)?;
         let status = response.status();
-        if !status.is_success() {
-            return Err(failure(response, timeout).await);
-        }
+        let retry_after = errors::retry_after(response.headers());
+        let body = if status.is_success() {
+            read_limited(response, ANSWER_MAX)
+                .await
+                .map_err(Stopped::Failed)?
+        } else {
+            tokio::time::timeout(timeout, read_capped(response, ERROR_BODY_MAX))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default()
+        };
         // The answer can be a failure that came after the `200`.
-        let body = read_limited(response, ANSWER_MAX).await?;
-        xml::parse_complete(&body, status.as_u16())
+        let failed = if status.is_success() {
+            xml::parse_complete(&body, status.as_u16()).err()
+        } else {
+            Some(errors::from_response(status.as_u16(), retry_after, &body))
+        };
+        let Some(error) = failed else {
+            return Ok(());
+        };
+        let code = xml::parse_error(&body).code;
+        Err(match code.as_deref() {
+            _ if error == ProviderError::NotFound => Stopped::Gone,
+            Some("InvalidPart" | "InvalidPartOrder") => Stopped::BadParts(error),
+            _ => Stopped::Failed(error),
+        })
+    }
+}
+
+/// Why sending an upload's parts stopped short of completing it.
+#[derive(Debug)]
+enum Stopped {
+    /// The service no longer has the upload (`NoSuchUpload`).
+    Gone,
+    /// The service refused the parts listed to complete it (`InvalidPart`, `InvalidPartOrder`):
+    /// they are not the parts it stored.
+    BadParts(ProviderError),
+    Failed(ProviderError),
+}
+
+impl Stopped {
+    fn into_error(self) -> ProviderError {
+        match self {
+            Self::Gone => ProviderError::NotFound,
+            Self::BadParts(error) | Self::Failed(error) => error,
+        }
     }
 }
 
@@ -431,6 +505,13 @@ impl Unfinished {
         self.journal
             .as_ref()
             .is_none_or(|journal| journal.cancelled())
+    }
+
+    /// The upload is worth nothing to anyone: abort it now, whatever the journal says.
+    async fn abort_now(&mut self) {
+        if let Some(abort) = self.abort.take() {
+            abort.send().await;
+        }
     }
 
     /// The upload failed: abort it now, or keep it for the retry.

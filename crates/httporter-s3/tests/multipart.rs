@@ -323,6 +323,9 @@ struct Fake {
     create_id: String,
     /// Uploads the service no longer has: every request about them is `NoSuchUpload`.
     gone: HashSet<String>,
+    /// Uploads whose parts the service no longer accepts as listed: completing them is
+    /// `InvalidPart`.
+    bad_parts: HashSet<String>,
     /// How long the answer to a part is held back.
     part_delay: Duration,
     /// Parts that fail, with the status and code of their error.
@@ -338,6 +341,7 @@ impl Fake {
             part_size,
             create_id: UPLOAD_ID.to_owned(),
             gone: HashSet::new(),
+            bad_parts: HashSet::new(),
             part_delay: Duration::ZERO,
             failing: HashMap::new(),
             completion: Completion::Done,
@@ -355,6 +359,12 @@ impl Fake {
     /// The service has lost the upload `id`.
     fn without(mut self, id: &str) -> Self {
         self.gone.insert(id.to_owned());
+        self
+    }
+
+    /// The service refuses the parts listed to complete the upload `id` (`InvalidPart`).
+    fn refusing_parts_of(mut self, id: &str) -> Self {
+        self.bad_parts.insert(id.to_owned());
         self
     }
 
@@ -501,6 +511,12 @@ impl Fake {
         let parts = listed_parts(&request.body);
         let response = if self.gone.contains(&id) {
             no_such_upload()
+        } else if self.bad_parts.contains(&id) {
+            s3_error(
+                400,
+                "InvalidPart",
+                "One or more of the specified parts could not be found.",
+            )
         } else {
             match self.completion {
                 Completion::Done => xml(format!(
@@ -1362,4 +1378,85 @@ async fn a_file_that_changed_is_permanent_and_nothing_is_created() {
     );
     assert!(fake.log().is_empty());
     assert!(journal.notes().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The final fix wave (ruling Q49)
+// ---------------------------------------------------------------------------------------------
+
+/// Ruling Q49: a resumed upload whose recorded parts the service refuses as it completes
+/// (`InvalidPart`) is given up, aborted so its parts are freed, and sent again as a new upload.
+#[tokio::test]
+async fn invalid_part_on_resume_aborts_and_starts_over() {
+    let server = start().await;
+    let fake = Fake::new(16 * MIB)
+        .refusing_parts_of(STALE_ID)
+        .serve(&server)
+        .await;
+    let journal = RecordingJournal::resuming(progress(STALE_ID, 16 * MIB, &[1, 2, 3, 4, 5]));
+
+    upload(&provider(&server), &journalled(&journal))
+        .await
+        .unwrap();
+
+    fake.check();
+    let mut trace = vec!["complete", "abort", "create"];
+    trace.extend(["part"; 5]);
+    trace.push("complete");
+    assert_eq!(fake.trace(), trace);
+    assert_eq!(fake.aborts(), [STALE_ID]);
+    let completes = fake.completes();
+    assert_eq!(completes[1].0, UPLOAD_ID);
+    assert_eq!(numbers(&completes[1].1), [1, 2, 3, 4, 5]);
+    // The journal now holds the new upload, and then that it is done.
+    assert_eq!(
+        journal.notes()[0],
+        Note::Started {
+            upload_id: UPLOAD_ID.to_owned(),
+            part_size: 16 * MIB
+        }
+    );
+    assert_eq!(journal.notes().last(), Some(&Note::Finished));
+}
+
+/// Outside a resume, `InvalidPart` is a plain failure: the upload is kept for the retry (which
+/// then resumes, and starts over if it comes again).
+#[tokio::test]
+async fn invalid_part_on_a_new_upload_fails_it_and_keeps_it() {
+    let server = start().await;
+    let fake = Fake::new(16 * MIB)
+        .refusing_parts_of(UPLOAD_ID)
+        .serve(&server)
+        .await;
+    let journal = RecordingJournal::fresh();
+
+    let result = upload(&provider(&server), &journalled(&journal)).await;
+
+    assert!(
+        matches!(&result, Err(ProviderError::Permanent(text)) if text.contains("InvalidPart")),
+        "{result:?}"
+    );
+    assert!(fake.aborts().is_empty());
+    assert_eq!(fake.creates(), 1);
+    fake.check();
+}
+
+/// Ruling Q49 (a): the engine gives up an upload kept for a resume that will never come with
+/// `abort_multipart`: one `AbortMultipartUpload`, validly signed, for that upload of that key.
+/// One the service no longer has is as good as aborted.
+#[tokio::test]
+async fn abort_multipart_sends_one_abort_for_the_upload() {
+    let server = start().await;
+    let fake = Fake::new(16 * MIB).without(STALE_ID).serve(&server).await;
+    let storage = provider(&server);
+
+    storage
+        .abort_multipart(&p(OBJECT), UPLOAD_ID)
+        .await
+        .unwrap();
+    storage.abort_multipart(&p(OBJECT), STALE_ID).await.unwrap();
+
+    assert_eq!(fake.trace(), ["abort", "abort"]);
+    assert_eq!(fake.aborts(), [UPLOAD_ID, STALE_ID]);
+    fake.check();
 }
