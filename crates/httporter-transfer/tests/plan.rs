@@ -843,14 +843,19 @@ fn describe(err: &ProviderError) -> String {
     format!("Failed: {err}")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn delete_without_recursive_capability_expands_to_files_and_markers() {
-    let mock = MockProvider::new(Capabilities::default())
-        .with_file("old/a.txt", b"1")
-        .with_file("old/sub/b.txt", b"22")
-        .with_file("old/sub/deeper/c.txt", b"333")
-        .with_file("x.txt", b"x")
-        .with_file("keep.txt", b"keep");
+    // Room for every delete at once, so only the order of the jobs and the engine's waiting
+    // keep the folder's delete behind the files inside it.
+    let mock = MockProvider::new(Capabilities {
+        delete_concurrency: 8,
+        ..Capabilities::default()
+    })
+    .with_file("old/a.txt", b"1")
+    .with_file("old/sub/b.txt", b"22")
+    .with_file("old/sub/deeper/c.txt", b"333")
+    .with_file("x.txt", b"x")
+    .with_file("keep.txt", b"keep");
     let picked = vec![listed(&mock, "old").await, listed(&mock, "x.txt").await];
     let plan = plan_delete(&mock, &picked).await.unwrap();
     // Every file first, then one delete of the picked folder, last (ruling Q38): it removes
@@ -876,7 +881,9 @@ async fn delete_without_recursive_capability_expands_to_files_and_markers() {
         }
     );
 
-    // The engine runs it to the end: a folder that vanished with its last file is done.
+    // The engine runs it to the end. The folder's delete waits for the file deletes in flight
+    // inside it (sent sooner, this mock would refuse a folder that isn't empty); then the
+    // folder, which vanished with its last file, is done (ruling Q45).
     let journal = Arc::new(MemoryJournal::new());
     let engine = Engine::new(
         tokio::runtime::Handle::current(),
@@ -885,6 +892,8 @@ async fn delete_without_recursive_capability_expands_to_files_and_markers() {
         describe,
     );
     let mock = Arc::new(mock);
+    mock.set_latency(MockOp::DeleteFile, std::time::Duration::from_secs(1));
+    let start = tokio::time::Instant::now();
     engine
         .submit(Batch {
             site: site(),
@@ -904,6 +913,13 @@ async fn delete_without_recursive_capability_expands_to_files_and_markers() {
     }
     let s = engine.snapshot();
     assert_eq!((s.files_done, s.files_failed), (5, 0), "{:?}", s.failed);
+    assert_eq!(
+        start.elapsed(),
+        std::time::Duration::from_secs(1),
+        "the four files at once"
+    );
+    assert_eq!(mock.max_in_flight(MockOp::DeleteFile), 4);
+    assert_eq!(mock.calls(MockOp::DeleteFolder), 1);
     assert!(journal.records().iter().all(|r| r.state == JobState::Done));
     let left: Vec<String> = mock
         .list(&RemotePath::root())
