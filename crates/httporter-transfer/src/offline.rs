@@ -99,3 +99,53 @@ pub(crate) fn drive_of(path: &Path) -> String {
         _ => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn three_network_errors_within_ten_seconds_go_offline() {
+        let mut errors = NetworkErrors::default();
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert!(!errors.record(at(0)));
+        assert!(!errors.record(at(9)));
+        // The first is 11 s old by now: two within the window.
+        assert!(!errors.record(at(11)));
+        assert!(errors.record(at(12)));
+        errors.clear();
+        assert!(!errors.record(at(12)));
+        // Exactly 10 s apart still counts as within.
+        assert!(!errors.record(at(22)));
+        assert!(errors.record(at(22)));
+    }
+
+    #[test]
+    fn a_full_disk_is_known_by_kind_or_by_windows_code() {
+        assert!(is_disk_full(&io::Error::from(io::ErrorKind::StorageFull)));
+        assert!(is_disk_full(&io::Error::from_raw_os_error(112)));
+        assert!(is_disk_full(&io::Error::from_raw_os_error(39)));
+        assert!(!is_disk_full(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(!is_disk_full(&io::Error::other("disk on fire")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drives_as_the_user_knows_them() {
+        assert_eq!(drive_of(Path::new(r"d:\downloads\a.bin")), "D:");
+        assert_eq!(drive_of(Path::new(r"\\?\C:\very\long\path")), "C:");
+        assert_eq!(
+            drive_of(Path::new(r"\\nas\media\films\a.mkv")),
+            r"\\nas\media"
+        );
+        assert_eq!(
+            drive_of(Path::new(r"\\?\UNC\nas\media\a.mkv")),
+            r"\\nas\media"
+        );
+        assert_eq!(drive_of(Path::new(r"\downloads\a.bin")), r"\");
+        assert_eq!(drive_of(Path::new(r"relative\a.bin")), "");
+    }
+}
