@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::Utc;
 use httporter_core::{
-    BatchSummary, Direction, EngineSnapshot, EngineState, Job, JobId, JobKind, JobRecord, JobState,
-    JobView, Journal, JournalError, ProviderError, SiteId, StorageProvider, TransferSettings,
+    BatchSummary, Checksum, Direction, EngineSnapshot, EngineState, Job, JobId, JobKind, JobRecord,
+    JobState, JobView, Journal, JournalError, ProviderError, RemotePath, SiteId, StorageProvider,
+    TransferSettings,
 };
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, mpsc, watch};
@@ -37,6 +38,10 @@ pub struct Batch {
     /// The site's client; the newest batch's client is the one the site's lane uses.
     pub provider: Arc<dyn StorageProvider>,
     pub jobs: Vec<Job>,
+    /// The listed SHA-256 or MD5 of files to download, by remote path, so what arrives is
+    /// checked (ruling Q27). Not journalled: a download resumed after a crash has no hint and
+    /// completes unverified.
+    pub checksums: HashMap<RemotePath, Checksum>,
 }
 
 /// Runs transfer jobs: journalled before they start, per-site lanes with adaptive limits,
@@ -105,6 +110,8 @@ pub(crate) struct Entry {
     stop: Option<Stop>,
     /// A delete request for it may have reached the server, so a later `NotFound` means done.
     sent: bool,
+    /// What a download's contents must hash to, when its batch said.
+    checksum: Option<Checksum>,
 }
 
 /// Every job the engine still needs to know about: queued, active, failed, and the done ones
@@ -269,7 +276,7 @@ impl Engine {
 
     /// Journals every job of `batch` (one transaction), then queues them on the site's lane.
     /// Returns the batch id (a UUID). A batch the journal can't record is refused whole, and
-    /// nothing of it runs (ruling Q21).
+    /// nothing of it runs (ruling Q21). A batch without jobs changes nothing.
     pub fn submit(&self, batch: Batch) -> Result<String, JournalError> {
         let Batch {
             site,
@@ -277,8 +284,13 @@ impl Engine {
             host,
             provider,
             jobs,
+            checksums,
         } = batch;
         let batch_id = uuid::Uuid::new_v4().to_string();
+        if jobs.is_empty() {
+            // Nothing to run, so the run's totals stay as they are (ruling Q37).
+            return Ok(batch_id);
+        }
         let mut records: Vec<JobRecord> = jobs
             .into_iter()
             .map(|job| JobRecord {
@@ -319,13 +331,19 @@ impl Engine {
             for (id, record) in ids.into_iter().zip(records) {
                 let job = record.job;
                 let size = size_of(&job);
+                let checksum = match &job {
+                    Job::Download { remote, .. } => checksums.get(remote).cloned(),
+                    _ => None,
+                };
                 info.open += 1;
                 info.kinds.note(job.kind());
                 st.run.kinds.note(job.kind());
                 st.run.files_total += 1;
                 st.run.bytes_total += size;
                 st.lanes[lane].queue.push_back(id);
-                st.jobs.insert(id, Entry::new(job, lane, seq, size));
+                let mut entry = Entry::new(job, lane, seq, size);
+                entry.checksum = checksum;
+                st.jobs.insert(id, entry);
             }
             if info.open > 0 {
                 st.batches.insert(seq, info);
@@ -581,6 +599,7 @@ impl Entry {
             error: None,
             stop: None,
             sent: false,
+            checksum: None,
         }
     }
 
@@ -592,6 +611,7 @@ impl Entry {
             size: self.size,
             done_bytes: self.done_bytes,
             error: self.error.clone(),
+            paused: self.paused,
         }
     }
 }
@@ -684,18 +704,20 @@ impl State {
                         if matches!(entry.job, Job::Delete { .. }) {
                             entry.sent = true;
                         }
-                        items.push((id, entry.job.clone(), sent));
+                        items.push((id, entry.job.clone(), sent, entry.checksum.clone()));
                     }
                 }
                 let work = match items.len() {
                     1 => {
-                        let (id, job, sent) = items.remove(0);
-                        work_for(id, job, sent)
+                        let (id, job, sent, checksum) = items.remove(0);
+                        work_for(id, job, sent, checksum)
                     }
                     _ => Work::DeleteFiles {
                         items: items
                             .into_iter()
-                            .map(|(id, job, sent)| (id, crate::lane::remote_of(&job).clone(), sent))
+                            .map(|(id, job, sent, _)| {
+                                (id, crate::lane::remote_of(&job).clone(), sent)
+                            })
                             .collect(),
                     },
                 };
@@ -756,7 +778,9 @@ impl State {
         self.lanes[lane].paths.remove(&entry.job);
     }
 
-    fn mark_done(&mut self, id: JobId, writer: &JournalWriter, now: Instant) {
+    /// A job is done. `own_request` counts it as a success for the lane's limiter; the jobs of
+    /// a `delete_batch` request count once for the whole request instead (ruling Q37).
+    fn mark_done(&mut self, id: JobId, writer: &JournalWriter, now: Instant, own_request: bool) {
         self.leave_active(id);
         let Some(entry) = self.jobs.get_mut(id) else {
             return;
@@ -776,7 +800,9 @@ impl State {
         self.run.files_done += 1;
         self.run.bytes_finished += size;
         self.rates.record(now, 1, unmetered);
-        self.lanes[lane].slots_mut(slot).limiter.on_success();
+        if own_request {
+            self.lanes[lane].slots_mut(slot).limiter.on_success();
+        }
         if let Some(info) = self.batches.get_mut(&batch) {
             info.open -= 1;
             info.done_files += 1;
@@ -960,6 +986,7 @@ impl State {
             })
             .collect();
         active.sort_unstable();
+        let active_count = active.len() as u64;
         let queued: Vec<JobView> = self
             .lanes
             .iter()
@@ -981,6 +1008,7 @@ impl State {
             bytes_per_s,
             eta,
             active: active.into_iter().take(WINDOW).filter_map(view).collect(),
+            active_count,
             queued,
             queued_count: self.lanes.iter().map(|lane| lane.queue.len() as u64).sum(),
             failed: self
@@ -998,10 +1026,15 @@ impl State {
 }
 
 /// The work a single job does.
-fn work_for(id: JobId, job: Job, sent: bool) -> Work {
+fn work_for(id: JobId, job: Job, sent: bool, checksum: Option<Checksum>) -> Work {
     match job {
         Job::Upload { local, remote, .. } => Work::Upload { id, local, remote },
-        Job::Download { remote, local, .. } => Work::Download { id, remote, local },
+        Job::Download { remote, local, .. } => Work::Download {
+            id,
+            remote,
+            local,
+            checksum,
+        },
         Job::Delete { remote, folder } => Work::Delete {
             id,
             remote,
@@ -1107,10 +1140,32 @@ impl Inner {
         }
     }
 
-    /// A job of `unit` ended: done, or failed with `result`'s error. An auth failure stops the
-    /// job's site and puts the job back in the queue instead; a failure of a job being
-    /// cancelled cancels it.
+    /// A job of `unit` ended: done, or failed with `result`'s error. A failure of a job being
+    /// cancelled cancels it, whatever the error; otherwise an auth failure stops the job's site
+    /// and puts the job back in the queue.
     pub(crate) fn finish(&self, unit: UnitId, id: JobId, result: Result<(), ProviderError>) {
+        self.end(unit, id, result, true);
+    }
+
+    /// As [`finish`](Self::finish), for one path of a `delete_batch` request: the request's
+    /// success is counted once, by [`batch_succeeded`](Self::batch_succeeded).
+    pub(crate) fn finish_in_batch(
+        &self,
+        unit: UnitId,
+        id: JobId,
+        result: Result<(), ProviderError>,
+    ) {
+        self.end(unit, id, result, false);
+    }
+
+    /// A `delete_batch` request succeeded: one success for the lane's limiter, however many
+    /// paths it carried (ruling Q37).
+    pub(crate) fn batch_succeeded(&self, lane: usize, kind: SlotKind) {
+        self.lock().lanes[lane].slots_mut(kind).limiter.on_success();
+        self.poke();
+    }
+
+    fn end(&self, unit: UnitId, id: JobId, result: Result<(), ProviderError>, own_request: bool) {
         let now = Instant::now();
         {
             let mut guard = self.lock();
@@ -1123,12 +1178,14 @@ impl Inner {
             }
             let (lane, stop) = (entry.lane, entry.stop);
             match result {
-                Ok(()) => st.mark_done(id, &self.writer, now),
+                Ok(()) => st.mark_done(id, &self.writer, now, own_request),
+                // A pending cancel wins over whatever the request answered, an auth failure
+                // included (ruling Q37).
+                Err(_) if stop == Some(Stop::Cancel) => st.mark_cancelled(id, &self.writer),
                 Err(ProviderError::Auth { .. }) => {
                     st.requeue_front(lane, vec![id]);
                     st.auth_stop(lane);
                 }
-                Err(_) if stop == Some(Stop::Cancel) => st.mark_cancelled(id, &self.writer),
                 Err(error) => st.mark_failed(id, (self.describe)(&error), &self.writer),
             }
         }

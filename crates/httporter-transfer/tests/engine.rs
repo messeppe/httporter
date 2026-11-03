@@ -1,6 +1,7 @@
 //! The transfer engine against `MockProvider`, on a paused tokio clock: every wait below is
 //! virtual time, so latency, retries and bandwidth limits cost no real time.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -65,6 +66,7 @@ fn batch(provider: Arc<dyn StorageProvider>, jobs: Vec<Job>) -> Batch {
         host: "storage.example".into(),
         provider,
         jobs,
+        checksums: HashMap::new(),
     }
 }
 
@@ -1273,6 +1275,7 @@ async fn views_show_kind_path_size_and_progress() {
             size: 10,
             done_bytes: 0,
             error: None,
+            paused: false,
         }
     );
 }

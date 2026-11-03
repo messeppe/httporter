@@ -15,9 +15,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use httporter_core::{
-    BodyMeter, Job, JobId, ProviderError, RemotePath, RetryPolicy, StorageProvider,
-    TransferSettings, UploadOptions, UploadSource, content_type_for, with_retry,
+    BodyMeter, Checksum, ChecksumKind, Job, JobId, ProviderError, RemotePath, RetryPolicy,
+    StorageProvider, TransferSettings, UploadOptions, UploadSource, content_type_for, with_retry,
 };
+use md5::Md5;
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
@@ -288,7 +289,10 @@ impl ActivePaths {
             Job::Delete {
                 remote,
                 folder: true,
-            } => self.all.keys().any(|path| path.is_within(remote)),
+            } => {
+                self.all.keys().any(|path| path.is_within(remote))
+                    || self.under_folder_delete(remote)
+            }
             Job::Delete {
                 remote,
                 folder: false,
@@ -328,6 +332,8 @@ pub(crate) enum Work {
         id: JobId,
         remote: RemotePath,
         local: PathBuf,
+        /// What the contents must hash to, when the batch said (ruling Q27).
+        checksum: Option<Checksum>,
     },
     Delete {
         id: JobId,
@@ -398,8 +404,13 @@ async fn run(inner: &Arc<Inner>, spec: &UnitSpec) {
             let result = upload(inner, spec, *id, local, remote).await;
             inner.finish(spec.unit, *id, result);
         }
-        Work::Download { id, remote, local } => {
-            let result = download(inner, spec, *id, remote, local, None).await;
+        Work::Download {
+            id,
+            remote,
+            local,
+            checksum,
+        } => {
+            let result = download(inner, spec, *id, remote, local, checksum.as_ref()).await;
             inner.finish(spec.unit, *id, result);
         }
         Work::Delete {
@@ -524,17 +535,19 @@ impl Drop for PartFile {
 }
 
 /// Streams `remote` into the part file, taking each chunk from the bandwidth limit, checks it
-/// against `sha256` when one is known, then renames it over `local`.
+/// against `expected` when there is one to check, then renames it over `local`.
 ///
-/// `sha256` is the listed digest of the remote file. A `Job::Download` carries none yet, so
-/// the engine passes `None` until a batch can say it (see the Task 12 report).
+/// `expected` is the listed digest of the remote file, from the job's batch (ruling Q27); it
+/// is checked when checksums are verified and it is a SHA-256 or an MD5. Contents that don't
+/// match are fetched once more, then the job fails with `ChecksumMismatch`. A download resumed
+/// from the journal has no digest and completes unchecked.
 async fn download(
     inner: &Arc<Inner>,
     spec: &UnitSpec,
     id: JobId,
     remote: &RemotePath,
     local: &Path,
-    sha256: Option<[u8; 32]>,
+    expected: Option<&Checksum>,
 ) -> Result<(), ProviderError> {
     if let Some(parent) = local.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(extended(parent)).map_err(|e| local_error(parent, &e))?;
@@ -543,28 +556,71 @@ async fn download(
         path: part_path(local),
         renamed: false,
     };
-    attempts(inner, spec, |_| {
-        fetch(inner, spec, id, remote, &part.path, sha256)
-    })
-    .await?;
+    let expected = expected.filter(|checksum| {
+        spec.verify && matches!(checksum.kind, ChecksumKind::Sha256 | ChecksumKind::Md5)
+    });
+    let mut mismatches = 0;
+    loop {
+        let fetched = attempts(inner, spec, |_| {
+            fetch(inner, spec, id, remote, &part.path, expected)
+        })
+        .await;
+        match fetched {
+            Ok(()) => break,
+            Err(ProviderError::ChecksumMismatch) if mismatches == 0 => mismatches += 1,
+            Err(error) => return Err(error),
+        }
+    }
     std::fs::rename(extended(&part.path), extended(local)).map_err(|e| local_error(local, &e))?;
     part.renamed = true;
     Ok(())
 }
 
-/// One attempt at a download: the whole body into a fresh part file.
+/// A digest being computed over a download, of the kind its expected checksum is.
+enum Hasher {
+    Sha256(Sha256),
+    Md5(Md5),
+}
+
+impl Hasher {
+    fn for_checksum(checksum: &Checksum) -> Option<Self> {
+        match checksum.kind {
+            ChecksumKind::Sha256 => Some(Self::Sha256(Sha256::new())),
+            ChecksumKind::Md5 => Some(Self::Md5(Md5::new())),
+            ChecksumKind::MultipartEtag => None,
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            Self::Sha256(digest) => digest.update(data),
+            Self::Md5(digest) => digest.update(data),
+        }
+    }
+
+    /// The digest, in hex.
+    fn finish(self) -> String {
+        match self {
+            Self::Sha256(digest) => hex::encode(digest.finalize()),
+            Self::Md5(digest) => hex::encode(digest.finalize()),
+        }
+    }
+}
+
+/// One attempt at a download: the whole body into a fresh part file, checked against
+/// `expected` when given.
 async fn fetch(
     inner: &Inner,
     spec: &UnitSpec,
     id: JobId,
     remote: &RemotePath,
     part: &Path,
-    sha256: Option<[u8; 32]>,
+    expected: Option<&Checksum>,
 ) -> Result<(), ProviderError> {
     inner.restart_progress(spec.unit, id);
     let mut body = spec.provider.download(remote).await?;
     let mut file = std::fs::File::create(extended(part)).map_err(|e| local_error(part, &e))?;
-    let mut digest = sha256.map(|_| Sha256::new());
+    let mut digest = expected.and_then(Hasher::for_checksum);
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
         inner.bucket.take(chunk.len()).await;
@@ -575,8 +631,8 @@ async fn fetch(
         inner.progress(spec.unit, id, chunk.len() as u64);
     }
     drop(file);
-    if let (Some(digest), Some(expected)) = (digest, sha256)
-        && <[u8; 32]>::from(digest.finalize()) != expected
+    if let (Some(digest), Some(expected)) = (digest, expected)
+        && !digest.finish().eq_ignore_ascii_case(&expected.hex)
     {
         return Err(ProviderError::ChecksumMismatch);
     }
@@ -588,8 +644,9 @@ async fn fetch(
 ///
 /// A folder goes with `delete_folder`. With `recursive_delete` that is one request for the
 /// whole subtree; without it the planner has already queued what is inside ahead of the folder
-/// (ruling Q16), and the folder waits for those deletes, so only the empty folder or its marker
-/// is left for `delete_folder`.
+/// (rulings Q16, Q38), and the folder waits for those deletes, so only the empty folder or its
+/// marker is left for `delete_folder`. A folder that is already gone is done as well: one that
+/// only its files implied vanished with the last of them.
 async fn delete(
     inner: &Inner,
     spec: &UnitSpec,
@@ -605,7 +662,7 @@ async fn delete(
         };
         async move {
             match request.await {
-                Err(ProviderError::NotFound) if sent || attempt > 0 => Ok(()),
+                Err(ProviderError::NotFound) if folder || sent || attempt > 0 => Ok(()),
                 other => other,
             }
         }
@@ -615,7 +672,8 @@ async fn delete(
 
 /// File deletes sent together. Each path is answered for on its own: those that fail with a
 /// retryable error are sent again (alone together) after the policy's wait, the others are
-/// done or failed at once.
+/// done or failed at once. A request that deleted something and wasn't asked to slow down is
+/// one success for the lane's limiter, however many paths it carried (ruling Q37).
 async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePath, bool)]) {
     let policy = &spec.policy;
     let mut pending: Vec<(JobId, RemotePath, bool)> = items.to_vec();
@@ -627,6 +685,7 @@ async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePat
         let mut again = Vec::new();
         let mut wait = Duration::ZERO;
         let mut slowed = false;
+        let mut deleted = false;
         for (id, path, sent) in pending {
             let answer = answers.next().unwrap_or_else(|| {
                 Err(ProviderError::Permanent(
@@ -634,9 +693,13 @@ async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePat
                 ))
             });
             match answer {
-                Ok(()) => inner.finish(spec.unit, id, Ok(())),
+                Ok(()) => {
+                    deleted = true;
+                    inner.finish_in_batch(spec.unit, id, Ok(()));
+                }
                 Err(ProviderError::NotFound) if sent || attempt > 0 => {
-                    inner.finish(spec.unit, id, Ok(()));
+                    deleted = true;
+                    inner.finish_in_batch(spec.unit, id, Ok(()));
                 }
                 Err(error) if worth_retrying(&error, policy) => {
                     slowed |= error.is_slow_down();
@@ -648,18 +711,20 @@ async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePat
                     }
                     again.push((id, path, error));
                 }
-                Err(error) => inner.finish(spec.unit, id, Err(error)),
+                Err(error) => inner.finish_in_batch(spec.unit, id, Err(error)),
             }
         }
         if slowed {
             inner.slow_down(spec.lane, spec.kind, seen);
+        } else if deleted {
+            inner.batch_succeeded(spec.lane, spec.kind);
         }
         if again.is_empty() {
             return;
         }
         let Some(&delay) = policy.delays.get(attempt) else {
             for (id, _, error) in again {
-                inner.finish(spec.unit, id, Err(error));
+                inner.finish_in_batch(spec.unit, id, Err(error));
             }
             return;
         };

@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::RemotePath;
 
 /// Identifies one job in the engine, the journal and the drawer's rows alike: it is the job's
-/// journal record id (`JobRecord.id as u64`), at least 1, assigned by `Journal::insert`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// journal record id (`JobRecord.id as u64`), at least 1, assigned by `Journal::insert`. The
+/// default, 0, is no job's id: it only fills a [`JobView`] built in a test.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct JobId(pub u64);
 
 /// One thing to do on one site.
@@ -52,9 +53,11 @@ impl Job {
 }
 
 /// Which kind of [`Job`] a job is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
+    /// Also the default, which only fills a [`JobView`] built in a test.
+    #[default]
     Upload,
     Download,
     Delete,
@@ -98,7 +101,7 @@ pub enum EngineState {
 }
 
 /// One row of the transfer drawer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JobView {
     pub id: JobId,
     pub kind: JobKind,
@@ -108,6 +111,8 @@ pub struct JobView {
     pub done_bytes: u64,
     /// Why the job failed, in plain words.
     pub error: Option<String>,
+    /// A queued job held back with `Engine::pause` until it is resumed.
+    pub paused: bool,
 }
 
 /// The batch that finished last, for the collapsed drawer's "Last transfer …".
@@ -137,7 +142,9 @@ pub struct EngineSnapshot {
     pub files_per_s: f64,
     pub bytes_per_s: f64,
     pub eta: Option<Duration>,
+    /// The first 200 active jobs; `active_count` counts them all.
     pub active: Vec<JobView>,
+    pub active_count: u64,
     /// The first 200 queued jobs; `queued_count` counts them all.
     pub queued: Vec<JobView>,
     pub queued_count: u64,
