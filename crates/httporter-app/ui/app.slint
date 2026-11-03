@@ -15,9 +15,13 @@ import { Pane } from "components/pane.slint";
 import { AddSiteSheet } from "components/add_site.slint";
 import { TransferRow } from "types.slint";
 import { TransferDrawer } from "components/drawer.slint";
+import { ConflictContents, ConflictRow } from "types.slint";
+import { Banner, ConflictSheet, DeleteAlert, NewFolderSheet, QuitAlert, RemoveSiteAlert } from "components/sheets.slint";
+import { CapsuleButton } from "components/buttons.slint";
 
 export { FileKind, FileRow, ProviderTile, SiteItem, Theme }
 export { TransferRow }
+export { ConflictContents, ConflictRow }
 
 // Error message shown above the panes.
 component ErrorBanner inherits Rectangle {
@@ -194,6 +198,72 @@ export component AppWindow inherits Window {
     callback transfer-pause(int);
     callback transfer-resume(int);
 
+    // ---- Sheets, alerts and banners (see components/sheets.slint and src/sheets_view.rs) ----
+    // Each one opens when the app sets its `-open` flag (after filling in its texts), and closes
+    // itself when the user answers, before the callback below is called. Nothing opens them until
+    // the transfer engine is wired in (Task 23; Remove Site: Task 24), and until then the
+    // callbacks do nothing.
+
+    // The conflict sheet. The texts come from `ConflictSheetView`; the rows' `action` is each
+    // row's choice (0 Replace, 1 Skip, 2 Keep both) and is read back when Continue is pressed.
+    in-out property <bool> conflicts-open: false;
+    in property <string> conflicts-title;
+    in property <string> conflicts-body;
+    in property <string> conflicts-for-all;
+    in property <string> conflicts-summary;
+    in property <string> conflicts-col-source;
+    in property <string> conflicts-col-target;
+    in property <string> conflicts-remember;
+    in property <string> conflicts-cancel-label;
+    in-out property <[ConflictRow]> conflicts-rows;
+    // The default action was changed (0 Replace if different, 1 Replace all, 2 Skip all, 3 Keep
+    // both): the rows' actions are set to match.
+    callback conflicts-mode-changed(int);
+    // The default action and whether to remember it for the site.
+    callback conflicts-continue(int, bool);
+    callback conflicts-cancel();
+
+    // The delete alert: title, text and the label of the delete button.
+    in-out property <bool> delete-open: false;
+    in property <string> delete-title;
+    in property <string> delete-body;
+    in property <string> delete-label;
+    callback delete-confirm();
+    callback delete-cancel();
+
+    // The New Folder sheet. Create hands the name to the app, which shows `new-folder-error` or
+    // closes the sheet (`new-folder-open`); `new-folder-name` is the name the sheet starts with.
+    in-out property <bool> new-folder-open: false;
+    in property <string> new-folder-name;
+    in-out property <string> new-folder-error;
+    callback new-folder-create(string);
+    callback new-folder-cancel();
+
+    // The Remove Site alert.
+    in-out property <bool> remove-site-open: false;
+    in property <string> remove-site-title;
+    in property <string> remove-site-body;
+    callback remove-site-confirm();
+    callback remove-site-cancel();
+
+    // The alert for closing the window while transfers are running.
+    in-out property <bool> quit-open: false;
+    in property <string> quit-title;
+    in property <string> quit-body;
+    callback quit-pause();
+    callback quit-cancel-all();
+    callback quit-keep-running();
+
+    // The banners above the panes: each shows while its text is not empty.
+    in property <string> resume-banner-text;
+    in property <string> offline-banner-text;
+    in property <string> auth-banner-text;
+    in property <string> disk-banner-text;
+    callback resume-banner-resume();
+    callback resume-banner-discard();
+    callback auth-banner-edit-site();
+    callback disk-banner-resume();
+
     // The sidebar is shown. The toolbar button flips it; the app may set it too (to restore what
     // the user chose last time).
     in-out property <bool> sidebar-visible: true;
@@ -286,6 +356,47 @@ export component AppWindow inherits Window {
                     padding: 8px;
                     spacing: 8px;
 
+                    if root.resume-banner-text != "": Banner {
+                        text: root.resume-banner-text;
+                        icon: Icons.clock;
+                        fg: Theme.accent-text;
+                        bg: Theme.accent-soft;
+                        CapsuleButton {
+                            text: @tr("Resume");
+                            primary: true;
+                            clicked => { root.resume-banner-resume(); }
+                        }
+                        CapsuleButton {
+                            text: @tr("Discard");
+                            clicked => { root.resume-banner-discard(); }
+                        }
+                    }
+                    if root.offline-banner-text != "": Banner {
+                        text: root.offline-banner-text;
+                        icon: Icons.warn;
+                        fg: Theme.orange;
+                        bg: Theme.orange-soft;
+                    }
+                    if root.auth-banner-text != "": Banner {
+                        text: root.auth-banner-text;
+                        icon: Icons.lock;
+                        fg: Theme.red;
+                        bg: Theme.red-soft;
+                        CapsuleButton {
+                            text: @tr("Edit Site…");
+                            clicked => { root.auth-banner-edit-site(); }
+                        }
+                    }
+                    if root.disk-banner-text != "": Banner {
+                        text: root.disk-banner-text;
+                        icon: Icons.warn;
+                        fg: Theme.orange;
+                        bg: Theme.orange-soft;
+                        CapsuleButton {
+                            text: @tr("Resume");
+                            clicked => { root.disk-banner-resume(); }
+                        }
+                    }
                     if root.error-text != "": ErrorBanner { text: root.error-text; }
 
                     // Side by side when each pane can have the mockup's 420 px, stacked otherwise
@@ -405,6 +516,99 @@ export component AppWindow inherits Window {
         cancel => {
             root.add-site-open = false;
             root.add-site-cancel();
+        }
+    }
+
+    // The sheets and alerts, also on top of everything, each closing itself before it says what
+    // was chosen (so that the app may open the next one in answer).
+    if root.conflicts-open: ConflictSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        title: root.conflicts-title;
+        body: root.conflicts-body;
+        for-all-label: root.conflicts-for-all;
+        summary: root.conflicts-summary;
+        col-source: root.conflicts-col-source;
+        col-target: root.conflicts-col-target;
+        remember-label: root.conflicts-remember;
+        cancel-label: root.conflicts-cancel-label;
+        rows <=> root.conflicts-rows;
+        mode-changed(mode) => { root.conflicts-mode-changed(mode); }
+        continued(mode, remember) => {
+            root.conflicts-open = false;
+            root.conflicts-continue(mode, remember);
+        }
+        cancelled => {
+            root.conflicts-open = false;
+            root.conflicts-cancel();
+        }
+    }
+    if root.delete-open: DeleteAlert {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        title: root.delete-title;
+        body: root.delete-body;
+        delete-label: root.delete-label;
+        confirmed => {
+            root.delete-open = false;
+            root.delete-confirm();
+        }
+        cancelled => {
+            root.delete-open = false;
+            root.delete-cancel();
+        }
+    }
+    if root.new-folder-open: NewFolderSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        initial-name: root.new-folder-name;
+        error <=> root.new-folder-error;
+        create(name) => { root.new-folder-create(name); }
+        cancelled => {
+            root.new-folder-open = false;
+            root.new-folder-cancel();
+        }
+    }
+    if root.remove-site-open: RemoveSiteAlert {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        title: root.remove-site-title;
+        body: root.remove-site-body;
+        confirmed => {
+            root.remove-site-open = false;
+            root.remove-site-confirm();
+        }
+        cancelled => {
+            root.remove-site-open = false;
+            root.remove-site-cancel();
+        }
+    }
+    if root.quit-open: QuitAlert {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        title: root.quit-title;
+        body: root.quit-body;
+        pause-and-quit => {
+            root.quit-open = false;
+            root.quit-pause();
+        }
+        cancel-and-quit => {
+            root.quit-open = false;
+            root.quit-cancel-all();
+        }
+        keep-running => {
+            root.quit-open = false;
+            root.quit-keep-running();
         }
     }
 }

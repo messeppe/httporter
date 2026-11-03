@@ -22,6 +22,11 @@ export component Field inherits Rectangle {
     // Return was pressed (not auto-repeat).
     callback accepted();
 
+    // Selects the whole text, for a value that is offered and likely to be replaced.
+    public function select-all() {
+        input.select-all();
+    }
+
     height: 28px;
     forward-focus: input;
     border-radius: 7px;

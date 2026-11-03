@@ -35,3 +35,20 @@ export struct TransferRow {
     detail: string,
     paused: bool,
 }
+
+// Whether the two files of a conflict hold the same contents (the conflict sheet's Contents column);
+// `unknown` when neither side had a digest to tell by.
+export enum ConflictContents { identical, different, unknown }
+
+// One row of the conflict sheet. `source` and `target` are the sides as "357.2 KB · Today 09:58":
+// the side the files come from and the side they go to. `contents` is the word for `same`, and
+// `action` is the row's choice: 0 Replace, 1 Skip, 2 Keep both.
+export struct ConflictRow {
+    name: string,
+    kind: FileKind,
+    source: string,
+    target: string,
+    contents: string,
+    same: ConflictContents,
+    action: int,
+}

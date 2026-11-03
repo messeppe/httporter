@@ -196,7 +196,7 @@ component Stat inherits HorizontalLayout {
 }
 
 // The icon, the tint and the spoken name for each kind of file.
-global KindStyle {
+export global KindStyle {
     pure public function icon(kind: FileKind) -> image {
         return kind == FileKind.folder ? Icons.folder : kind == FileKind.code ? Icons.code : kind == FileKind.image ? Icons.image : Icons.doc;
     }

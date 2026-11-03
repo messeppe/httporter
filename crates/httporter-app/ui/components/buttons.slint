@@ -87,12 +87,14 @@ export component ToolButton inherits Rectangle {
     }
 }
 
-// 28 px labelled button (mockup `.btn`); `primary` fills with the accent colour.
+// 28 px labelled button (mockup `.btn`); `primary` fills with the accent colour, `destructive` writes
+// the label in red (mockup `.btn.destructive`).
 // Keyboard behaviour is the same as ToolButton.
 export component CapsuleButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
     in property <bool> primary: false;
+    in property <bool> destructive: false;
     in property <bool> enabled: true;
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
@@ -124,14 +126,14 @@ export component CapsuleButton inherits Rectangle {
         if root.icon.width > 0: VCenter {
             Image {
                 source: root.icon;
-                colorize: root.primary ? Theme.on-accent : Theme.label;
+                colorize: root.primary ? Theme.on-accent : (root.destructive ? Theme.red : Theme.label);
                 width: 16px;
                 height: 16px;
             }
         }
         Text {
             text: root.text;
-            color: root.primary ? Theme.on-accent : Theme.label;
+            color: root.primary ? Theme.on-accent : (root.destructive ? Theme.red : Theme.label);
             font-size: Theme.font-body;
             font-weight: root.primary ? Theme.weight-semibold : Theme.weight-medium;
             vertical-alignment: center;

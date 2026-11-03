@@ -20,6 +20,7 @@ mod drop_hook;
 mod format;
 mod local_fs;
 mod session;
+mod sheets_view;
 mod sort;
 mod viewmodel;
 

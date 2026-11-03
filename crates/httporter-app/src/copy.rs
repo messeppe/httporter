@@ -428,6 +428,269 @@ pub fn drawer_tab_titles(active: u64, queued: u64, failed: u64, done: u64) -> [S
     ]
 }
 
+// ---- Sheets, alerts and banners ----
+
+use httporter_core::{CompareBy, DeleteSummary, ProviderKind};
+
+/// "1 folder", "3 folders".
+fn folders(n: u64) -> String {
+    if n == 1 {
+        "1 folder".to_owned()
+    } else {
+        format!("{} folders", format_count(n))
+    }
+}
+
+/// A size as the delete alert says it: [`format_size`] without a trailing ".0" ("54 MB", but
+/// "12.3 MB").
+fn size_in_words(bytes: u64) -> String {
+    let size = format_size(bytes);
+    match size.split_once(".0 ") {
+        Some((whole, unit)) => format!("{whole} {unit}"),
+        None => size,
+    }
+}
+
+// The conflict sheet.
+
+/// The conflict sheet's Contents column: both sides hold the same bytes, they differ, or that
+/// could not be told.
+pub const CONTENTS_IDENTICAL: &str = "Identical";
+pub const CONTENTS_DIFFERENT: &str = "Different";
+pub const CONTENTS_UNKNOWN: &str = "Unknown";
+
+/// The conflict sheet's column for the files on this PC.
+pub const ON_THIS_PC: &str = "On this PC";
+
+/// "On Bunny": the conflict sheet's column for the files on the site.
+pub fn on_site(short: &str) -> String {
+    format!("On {short}")
+}
+
+/// A file's side of a conflict row: "357.2 KB · Today 09:58", or the size alone when the file has
+/// no date.
+pub fn size_and_date(size: &str, date: Option<&str>) -> String {
+    match date {
+        Some(date) => format!("{size} · {date}"),
+        None => size.to_owned(),
+    }
+}
+
+/// The conflict sheet's title. Uploads name the site, downloads the folder the files go to:
+/// "12 files already exist on example-shop.com", "12 files already exist in Downloads".
+pub fn conflict_title(direction: Direction, count: u64, site: &str, folder: &str) -> String {
+    let what = if count == 1 {
+        "1 file already exists".to_owned()
+    } else {
+        format!("{} already exist", files(count))
+    };
+    if direction == Direction::Download {
+        format!("{what} in {folder}")
+    } else {
+        format!("{what} on {site}")
+    }
+}
+
+/// Under the conflict sheet's title: what the batch is and where it goes.
+pub fn conflict_body(direction: Direction, total_files: u64, target: &str) -> String {
+    let verb = if direction == Direction::Download {
+        "downloading"
+    } else {
+        "uploading"
+    };
+    format!(
+        "You're {verb} {} to {target}. Choose once what happens to existing files; you can change \
+         single files below.",
+        files(total_files)
+    )
+}
+
+/// Before the segmented control: "For all 12:".
+pub fn conflict_for_all(count: u64) -> String {
+    format!("For all {}:", format_count(count))
+}
+
+/// How a conflict compared two files, as the sheet says it: "SHA-256", "MD5" or "size".
+fn compared_by_name(by: CompareBy) -> &'static str {
+    match by {
+        CompareBy::Sha256 => "SHA-256",
+        CompareBy::Md5 => "MD5",
+        CompareBy::Size => "size",
+    }
+}
+
+/// The conflict sheet's summary: "7 differ · 5 identical (same SHA-256)", and " · 2 unknown" when
+/// some could not be compared. `identical_by` is how the identical ones were told apart; with
+/// none identical there is nothing to say about it.
+pub fn conflict_summary(
+    differ: u64,
+    identical: u64,
+    unknown: u64,
+    identical_by: Option<CompareBy>,
+) -> String {
+    let mut text = format!(
+        "{} differ · {} identical",
+        format_count(differ),
+        format_count(identical)
+    );
+    if let Some(by) = identical_by.filter(|_| identical > 0) {
+        text.push_str(&format!(" (same {})", compared_by_name(by)));
+    }
+    if unknown > 0 {
+        text.push_str(&format!(" · {} unknown", format_count(unknown)));
+    }
+    text
+}
+
+/// The conflict sheet's checkbox: "Remember for uploads to this site".
+pub fn conflict_remember(direction: Direction) -> String {
+    if direction == Direction::Download {
+        "Remember for downloads from this site".to_owned()
+    } else {
+        "Remember for uploads to this site".to_owned()
+    }
+}
+
+/// The conflict sheet's cancel button: "Cancel Upload" or "Cancel Download".
+pub fn conflict_cancel(direction: Direction) -> String {
+    if direction == Direction::Download {
+        "Cancel Download".to_owned()
+    } else {
+        "Cancel Upload".to_owned()
+    }
+}
+
+// The delete alert.
+
+/// The delete alert's last sentence: Bunny keeps nothing back, and neither does S3 here.
+fn cant_be_undone(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Bunny => "Bunny Storage has no trash, so this can't be undone.",
+        ProviderKind::S3 => "This can't be undone.",
+    }
+}
+
+/// The delete alert's title: "Delete “old-promo-2025” from example-shop.com?" for one item, "Delete 3
+/// folders and 12 files from example-shop.com?" for several.
+pub fn delete_title(summary: &DeleteSummary, site: &str) -> String {
+    if let Some((name, _)) = &summary.single {
+        return format!("Delete “{name}” from {site}?");
+    }
+    let what = match (summary.folders, summary.files) {
+        (folders_n, 0) => folders(folders_n),
+        (0, files_n) => files(files_n),
+        (folders_n, files_n) => format!("{} and {}", folders(folders_n), files(files_n)),
+    };
+    format!("Delete {what} from {site}?")
+}
+
+/// The delete alert's text: how much goes (when there is anything to count), then that it can't
+/// be undone.
+pub fn delete_body(summary: &DeleteSummary, provider: ProviderKind) -> String {
+    let undone = cant_be_undone(provider);
+    if summary.total_files == 0 || matches!(summary.single, Some((_, false))) {
+        return undone.to_owned();
+    }
+    let amount = format!(
+        "{} ({})",
+        files(summary.total_files),
+        size_in_words(summary.total_bytes)
+    );
+    if summary.single.is_some() {
+        format!("This folder holds {amount}. {undone}")
+    } else {
+        format!("That's {amount} in all. {undone}")
+    }
+}
+
+/// The delete alert's button: "Delete 48 Files", or "Delete" for one file or nothing to count.
+pub fn delete_button(summary: &DeleteSummary) -> String {
+    let one_file = matches!(summary.single, Some((_, false)));
+    match summary.total_files {
+        0 => "Delete".to_owned(),
+        _ if one_file => "Delete".to_owned(),
+        1 => "Delete 1 File".to_owned(),
+        n => format!("Delete {} Files", format_count(n)),
+    }
+}
+
+// The New Folder sheet.
+
+/// The name the New Folder sheet starts with.
+pub const NEW_FOLDER_NAME: &str = "untitled folder";
+/// Under the New Folder sheet's field when it is empty.
+pub const NAME_MISSING: &str = "Enter a name.";
+/// Under the field when the name has a slash in it.
+pub const NAME_HAS_SEPARATOR: &str = "Names can't contain / or \\.";
+
+/// Under the field when the folder already has an item of that name.
+pub fn name_exists(name: &str) -> String {
+    format!("“{name}” already exists here.")
+}
+
+/// Under the field for `.` and `..`, which name no folder.
+pub fn name_not_allowed(name: &str) -> String {
+    format!("“{name}” can't be used as a name.")
+}
+
+// The Remove Site alert and the quit alert.
+
+/// The Remove Site alert's title.
+pub fn remove_site_title(site: &str) -> String {
+    format!("Remove “{site}”?")
+}
+
+/// The Remove Site alert's text; `provider` is the service's name ("Bunny Storage").
+pub fn remove_site_body(provider: &str) -> String {
+    format!(
+        "HTTPorter forgets this site and its saved password. Files on {provider} aren't touched."
+    )
+}
+
+/// The quit alert's title.
+pub const QUIT_TITLE: &str = "Transfers are still running";
+
+/// The quit alert's text: "5 files haven't finished.".
+pub fn quit_body(unfinished: u64) -> String {
+    if unfinished == 1 {
+        "1 file hasn't finished.".to_owned()
+    } else {
+        format!("{} files haven't finished.", format_count(unfinished))
+    }
+}
+
+// The banners.
+
+/// Above the panes after a crash or a quit with work left: "5 transfers didn't finish last time.".
+pub fn resume_banner(n: usize) -> String {
+    if n == 1 {
+        "1 transfer didn't finish last time.".to_owned()
+    } else {
+        format!(
+            "{} transfers didn't finish last time.",
+            format_count(n as u64)
+        )
+    }
+}
+
+/// Above the panes while the connection is down.
+pub fn offline_banner() -> String {
+    "You're offline. Transfers continue when the connection is back.".to_owned()
+}
+
+/// Above the panes when `site` refused its credentials.
+pub fn auth_banner(site: &str) -> String {
+    format!("Couldn't sign in to {site}. Its transfers are paused.")
+}
+
+/// Above the panes when a download has nowhere to go: `needed` bytes must be freed on `drive`.
+pub fn disk_full_banner(drive: &str, needed: u64) -> String {
+    format!(
+        "Drive {drive} is full. Free up {} and click Resume.",
+        format_size(needed)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
