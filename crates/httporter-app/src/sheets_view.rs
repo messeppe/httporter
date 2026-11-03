@@ -271,8 +271,13 @@ pub fn quit_alert(unfinished: u64) -> (String, String) {
 // ---- The banners ----
 
 /// "5 transfers didn't finish last time." (Resume, Discard).
-pub fn resume_banner(n: usize) -> String {
-    copy::resume_banner(n)
+pub fn resume_banner(n: usize, deletes: usize) -> String {
+    copy::resume_banner(n, deletes)
+}
+
+/// "Your PC's clock is off. … Transfers to {site} are paused until you click Resume." (Resume).
+pub fn clock_banner(site: &str) -> String {
+    copy::clock_banner(site)
 }
 
 /// "You're offline. Transfers continue when the connection is back."

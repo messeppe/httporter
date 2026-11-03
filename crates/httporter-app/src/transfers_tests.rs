@@ -66,14 +66,14 @@ fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 }
 
 /// The app with one or more Bunny sites, a real engine and a window.
-struct Bed {
+struct Bed<J: Journal + 'static = MemoryJournal> {
     ui: AppWindow,
     t: Arc<Transfers>,
     /// The storage of the first site.
     mock: Arc<MockProvider>,
     factory: Arc<FakeFactory>,
     creds: Arc<MemoryStore>,
-    journal: Arc<MemoryJournal>,
+    journal: Arc<J>,
     sites: Vec<SiteRecord>,
     /// Where the site database lives, to look at what was saved.
     db: PathBuf,
@@ -83,7 +83,7 @@ struct Bed {
     rt: Option<Runtime>,
 }
 
-impl Drop for Bed {
+impl<J: Journal + 'static> Drop for Bed<J> {
     fn drop(&mut self) {
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
@@ -93,13 +93,23 @@ impl Drop for Bed {
 
 /// What a test may do before the window and the engine exist: the saved sites, the folder of
 /// local files, and the journal a crash left.
-type BeforeInstall<'a> = &'a dyn Fn(&[SiteRecord], &Path, &MemoryJournal);
+type BeforeInstall<'a, J = MemoryJournal> = &'a dyn Fn(&[SiteRecord], &Path, &J);
 
 fn bed(mock: MockProvider) -> Bed {
     bed_with(mock, &["testzone"], &|_, _, _| {})
 }
 
 fn bed_with(mock: MockProvider, zones: &[&str], before: BeforeInstall<'_>) -> Bed {
+    bed_on(mock, zones, before, Arc::new(MemoryJournal::new()))
+}
+
+/// As [`bed_with`], over `journal` (a real SQLite one, say).
+fn bed_on<J: Journal + 'static>(
+    mock: MockProvider,
+    zones: &[&str],
+    before: BeforeInstall<'_, J>,
+    journal: Arc<J>,
+) -> Bed<J> {
     thread_local! {
         static PLATFORM_SET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -123,7 +133,6 @@ fn bed_with(mock: MockProvider, zones: &[&str], before: BeforeInstall<'_>) -> Be
     }
     let sites = session.sites();
     let local = tempfile::tempdir().unwrap();
-    let journal = Arc::new(MemoryJournal::new());
     before(&sites, local.path(), &journal);
     let engine = Engine::new(
         rt.handle().clone(),
@@ -158,7 +167,7 @@ fn bed_with(mock: MockProvider, zones: &[&str], before: BeforeInstall<'_>) -> Be
     }
 }
 
-impl Bed {
+impl<J: Journal + 'static> Bed<J> {
     fn rt(&self) -> &Runtime {
         self.rt.as_ref().unwrap()
     }
@@ -823,6 +832,8 @@ fn quit_while_busy_asks() {
 #[test]
 fn auth_stop_banner_opens_edit() {
     let mock = MockProvider::new(bunny_like());
+    // A refusal that names the secret: one with no hint is first checked against a listing of
+    // the file's folder (review I5), which this mock would answer.
     mock.fail_next(
         MockOp::Upload,
         ProviderError::Auth {
@@ -1164,5 +1175,458 @@ fn a_site_whose_secret_is_gone_says_so_in_the_f5_words() {
             &site
         ),
         "Couldn't read the password for testzone from Windows Credential Manager: locked"
+    );
+}
+
+// ---- The final fix wave (review C1, I3, I6, I7, M2) ----
+
+/// `n` file deletes for the bed's first site, through `provider`.
+fn deletes<J: Journal + 'static>(
+    b: &Bed<J>,
+    provider: Arc<dyn StorageProvider>,
+    n: usize,
+) -> Batch {
+    let site = &b.sites[0];
+    Batch {
+        site: site.id.clone(),
+        site_name: site.name.clone(),
+        host: site.host.clone(),
+        provider,
+        jobs: (0..n)
+            .map(|i| Job::Delete {
+                remote: rp(&format!("f{i}.txt")),
+                folder: false,
+            })
+            .collect(),
+        checksums: HashMap::new(),
+    }
+}
+
+/// Review C1: Cancel and Quit with a big queue on the real journal (SQLite in a file, a disk
+/// sync per commit) leaves nothing for the next start to offer again.
+#[test]
+fn cancel_and_quit_leaves_nothing_in_a_real_journal() {
+    let data = tempfile::tempdir().unwrap();
+    let journal =
+        Arc::new(httporter_platform::SqliteJournal::open(&data.path().join("journal.db")).unwrap());
+    let b = bed_on(
+        MockProvider::new(bunny_like()),
+        &["testzone"],
+        &|_, _, _| {},
+        journal.clone(),
+    );
+    // 10,000 deletes (an S3 folder of that many files), held in the queue.
+    b.t.engine.pause_all();
+    let storage: Arc<dyn StorageProvider> = b.mock.clone();
+    b.t.engine.submit(deletes(&b, storage, 10_000)).unwrap();
+    assert_eq!(b.t.engine.snapshot().queued_count, 10_000);
+    assert_eq!(journal.unfinished().unwrap().len(), 10_000);
+
+    b.t.quit(Quit::Cancel);
+    b.t.finish();
+    assert!(!b.t.engine.is_busy());
+    assert_eq!(journal.unfinished().unwrap().len(), 0, "nothing to resume");
+    assert_eq!(
+        b.mock.calls(MockOp::DeleteBatch) + b.mock.calls(MockOp::DeleteFile),
+        0
+    );
+}
+
+/// A journal in memory whose state changes can be held back, as a slow disk would.
+#[derive(Default)]
+struct SlowJournal {
+    inner: MemoryJournal,
+    held: StdMutex<bool>,
+    turned: std::sync::Condvar,
+}
+
+impl SlowJournal {
+    fn hold(&self, held: bool) {
+        *self.held.lock().unwrap() = held;
+        self.turned.notify_all();
+    }
+
+    fn wait_while_held(&self) {
+        let mut held = self.held.lock().unwrap();
+        while *held {
+            held = self.turned.wait(held).unwrap();
+        }
+    }
+}
+
+impl Journal for SlowJournal {
+    fn insert(&self, records: &mut [JobRecord]) -> Result<(), httporter_core::JournalError> {
+        self.inner.insert(records)
+    }
+    fn set_state(
+        &self,
+        id: i64,
+        state: JobState,
+        error: Option<&str>,
+    ) -> Result<(), httporter_core::JournalError> {
+        self.wait_while_held();
+        self.inner.set_state(id, state, error)
+    }
+    fn set_multipart(
+        &self,
+        id: i64,
+        mp: Option<&httporter_core::MultipartProgress>,
+    ) -> Result<(), httporter_core::JournalError> {
+        self.wait_while_held();
+        self.inner.set_multipart(id, mp)
+    }
+    fn unfinished(&self) -> Result<Vec<JobRecord>, httporter_core::JournalError> {
+        self.inner.unfinished()
+    }
+    fn clear_finished(&self) -> Result<(), httporter_core::JournalError> {
+        self.inner.clear_finished()
+    }
+    fn discard_unfinished(&self) -> Result<(), httporter_core::JournalError> {
+        self.inner.discard_unfinished()
+    }
+}
+
+/// Review C1: after Cancel All in the drawer, closing the window doesn't ask about "0 files":
+/// the quit alert counts transfers, not journal writes still on their way. Those are waited
+/// for, so nothing comes back at the next start.
+#[test]
+fn the_quit_alert_counts_transfers_not_journal_writes() {
+    let journal = Arc::new(SlowJournal::default());
+    let b = bed_on(
+        MockProvider::new(bunny_like()),
+        &["testzone"],
+        &|_, _, _| {},
+        journal.clone(),
+    );
+    b.t.engine.pause_all();
+    let storage: Arc<dyn StorageProvider> = b.mock.clone();
+    b.t.engine.submit(deletes(&b, storage, 3)).unwrap();
+    journal.hold(true);
+    b.ui.invoke_transfers_cancel_all();
+    let s = b.t.engine.snapshot();
+    assert_eq!((s.queued_count, s.active_count), (0, 0));
+    assert!(b.t.engine.is_busy(), "the cancels are not written yet");
+
+    request_close(&b.ui);
+    assert!(!b.ui.get_quit_open(), "no transfer is left to ask about");
+    // The window waits for the writes instead, then closes.
+    assert_eq!(lock(&b.t.state).quitting, Some(Quit::Pause));
+    journal.hold(false);
+    b.t.finish();
+    assert!(journal.inner.unfinished().unwrap().is_empty());
+}
+
+/// Review C1: the resume banner says when deletes are among what didn't finish, since Resume
+/// carries them out.
+#[test]
+fn the_resume_banner_names_the_deletes_among_what_is_left() {
+    let crashed: BeforeInstall<'_> = &|sites, local, journal| {
+        let site = sites[0].id.clone();
+        let mut records: Vec<JobRecord> = Vec::new();
+        for name in ["r1.txt", "r2.txt"] {
+            let path = local.join(name);
+            std::fs::write(&path, name).unwrap();
+            records.push(JobRecord {
+                id: 0,
+                batch: "b-1".into(),
+                site: site.clone(),
+                job: Job::Upload {
+                    local: path,
+                    remote: rp(name),
+                    size: name.len() as u64,
+                },
+                state: JobState::Queued,
+                error: None,
+                multipart: None,
+            });
+        }
+        for name in ["old/a.txt", "old/b.txt", "old"] {
+            records.push(JobRecord {
+                id: 0,
+                batch: "b-2".into(),
+                site: site.clone(),
+                job: Job::Delete {
+                    remote: rp(name),
+                    folder: name == "old",
+                },
+                state: JobState::Queued,
+                error: None,
+                multipart: None,
+            });
+        }
+        journal.insert(&mut records).unwrap();
+    };
+    let b = bed_with(MockProvider::new(bunny_like()), &["testzone"], crashed);
+    assert_eq!(
+        b.ui.get_resume_banner_text(),
+        "5 transfers didn't finish last time, including 3 deletes."
+    );
+}
+
+/// Forwards to a mock through `n` transfer slots made with it, as a real client sizes its own
+/// from the settings it was built with.
+struct Slotted {
+    inner: Arc<MockProvider>,
+    slots: tokio::sync::Semaphore,
+}
+
+impl Slotted {
+    fn new(inner: Arc<MockProvider>, n: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            slots: tokio::sync::Semaphore::new(n),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageProvider for Slotted {
+    fn capabilities(&self) -> &httporter_core::Capabilities {
+        self.inner.capabilities()
+    }
+    fn endpoint(&self) -> String {
+        self.inner.endpoint()
+    }
+    async fn list(&self, dir: &RemotePath) -> Result<httporter_core::Listing, ProviderError> {
+        self.inner.list(dir).await
+    }
+    async fn upload(
+        &self,
+        path: &RemotePath,
+        source: httporter_core::UploadSource,
+        opts: &httporter_core::UploadOptions,
+    ) -> Result<(), ProviderError> {
+        let _slot = self.slots.acquire().await.expect("never closed");
+        self.inner.upload(path, source, opts).await
+    }
+    async fn download(
+        &self,
+        path: &RemotePath,
+    ) -> Result<httporter_core::ByteStream, ProviderError> {
+        self.inner.download(path).await
+    }
+    async fn delete_file(&self, path: &RemotePath) -> Result<(), ProviderError> {
+        self.inner.delete_file(path).await
+    }
+    async fn delete_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
+        self.inner.delete_folder(dir).await
+    }
+    async fn create_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
+        self.inner.create_folder(dir).await
+    }
+    async fn delete_batch(&self, paths: &[RemotePath]) -> Vec<Result<(), ProviderError>> {
+        self.inner.delete_batch(paths).await
+    }
+    async fn reachable(&self) -> Result<(), ProviderError> {
+        self.inner.reachable().await
+    }
+}
+
+/// Review I3: new settings reach a site whose transfers are under way. Its lane gets a client
+/// built with them for the work still queued (the one in flight finishes on the old one), so a
+/// raised Simultaneous runs more at once and a new proxy reaches the queued jobs.
+#[test]
+fn new_settings_reach_transfers_under_way() {
+    let b = bed(MockProvider::new(bunny_like()));
+    b.t.apply_settings(TransferSettings {
+        simultaneous: 1,
+        ..TransferSettings::default()
+    });
+    let old = Arc::new(MockProvider::new(bunny_like()));
+    old.set_latency(MockOp::Upload, Duration::from_millis(400));
+    b.factory.serve("testzone", Slotted::new(old.clone(), 1));
+    let files: Vec<PathBuf> = (0..6).map(|i| b.file(&format!("f{i}.txt"), "x")).collect();
+    b.t.upload(files, None);
+    wait_for("the first upload", || {
+        (old.calls(MockOp::Upload) == 1).then_some(())
+    });
+
+    let new = Arc::new(MockProvider::new(bunny_like()));
+    new.set_latency(MockOp::Upload, Duration::from_millis(400));
+    b.factory.serve("testzone", Slotted::new(new.clone(), 4));
+    let changed = TransferSettings {
+        simultaneous: 4,
+        proxy: httporter_core::ProxyMode::Custom("http://proxy.example:8080".into()),
+        ..TransferSettings::default()
+    };
+    b.t.apply_settings(changed.clone());
+    b.wait_idle();
+
+    assert_eq!(old.calls(MockOp::Upload), 1, "only the one in flight");
+    assert_eq!(new.calls(MockOp::Upload), 5);
+    assert!(
+        new.max_in_flight(MockOp::Upload) >= 3,
+        "{} at once",
+        new.max_in_flight(MockOp::Upload)
+    );
+    let built = b.factory.full_configs();
+    assert_eq!(built.last().unwrap().proxy, changed.proxy);
+}
+
+/// Review M2: saving an edited site hands its new client to the transfers queued for it, not
+/// only to a site stopped by a failed sign-in.
+#[test]
+fn an_edited_sites_queued_transfers_use_its_new_client() {
+    let mock = MockProvider::new(bunny_like());
+    mock.set_latency(MockOp::Upload, Duration::from_millis(300));
+    let b = bed(mock);
+    let site = b.sites[0].clone();
+    b.t.apply_settings(TransferSettings {
+        simultaneous: 1,
+        ..TransferSettings::default()
+    });
+    let files: Vec<PathBuf> = (0..3).map(|i| b.file(&format!("f{i}.txt"), "x")).collect();
+    b.t.upload(files, None);
+    wait_for("the first upload", || {
+        (b.mock.calls(MockOp::Upload) == 1).then_some(())
+    });
+
+    let edited = Arc::new(MockProvider::new(bunny_like()));
+    b.factory.serve("testzone", edited.clone());
+    b.t.session.hub().invalidate(&site.id);
+    b.rt().block_on(b.t.site_edited(&site));
+    b.wait_idle();
+    assert_eq!(b.mock.calls(MockOp::Upload), 1, "only the one in flight");
+    assert_eq!(edited.calls(MockOp::Upload), 2);
+}
+
+/// Review I6: a second plan that needs the conflict sheet while one is already up is not lost:
+/// the first sheet stays, and the second is shown once the first is answered.
+#[test]
+fn a_second_conflict_sheet_waits_for_the_first() {
+    let b = bed(MockProvider::new(bunny_like())
+        .with_file("a.txt", b"old a")
+        .with_file("b.txt", b"old b"));
+    let a = b.file("a.txt", "new a");
+    let second = b.file("b.txt", "new b");
+    b.t.upload(vec![a], None);
+    let (_, conflicts, _, _) = b.wait_for_conflicts();
+    assert_eq!(conflicts[0].name, "a.txt");
+
+    // The second plan arrives while the first sheet is up: it waits.
+    b.t.upload(vec![second], None);
+    wait_for("the second plan to wait", || {
+        (lock(&b.t.state).waiting.len() == 1).then_some(())
+    });
+    let (_, conflicts, _, _) = b.wait_for_conflicts();
+    assert_eq!(conflicts[0].name, "a.txt", "the first sheet stays");
+
+    // A delete asked for meanwhile waits behind it.
+    let entries = b.t.session.remote_entries(&["a.txt".into()]);
+    b.t.delete(entries);
+    wait_for("the delete to wait", || {
+        (lock(&b.t.state).waiting.len() == 2).then_some(())
+    });
+    assert!(lock(&b.t.state).delete.is_none());
+
+    // The first sheet is answered: the second comes up, then the delete alert.
+    b.ui.invoke_conflicts_cancel();
+    let (_, conflicts, _, _) = b.wait_for_conflicts();
+    assert_eq!(conflicts[0].name, "b.txt");
+    assert_eq!(lock(&b.t.state).waiting.len(), 1);
+    b.ui.invoke_conflicts_cancel();
+    assert!(lock(&b.t.state).conflict.is_none());
+    assert!(lock(&b.t.state).delete.is_some(), "the delete alert is up");
+    assert!(lock(&b.t.state).waiting.is_empty());
+    b.ui.invoke_delete_cancel();
+    assert!(!lock(&b.t.state).asking());
+    assert_eq!(b.stored("a.txt").as_deref(), Some("old a"));
+    assert_eq!(b.stored("b.txt").as_deref(), Some("old b"));
+}
+
+/// Review I7: a download says which items get other names on this PC: those Windows can't
+/// store, then, in their own sentence, those whose names differ only in capital letters.
+#[test]
+fn download_renames_are_told() {
+    let renamed = [
+        (rp("docs/A.txt"), "A.txt".to_owned()),
+        (rp("docs/CON"), "_CON".to_owned()),
+        (rp("docs/a.txt"), "a (2).txt".to_owned()),
+        (rp("docs/a:b"), "a_b".to_owned()),
+        (rp("docs/what?.txt"), "what_.txt".to_owned()),
+    ];
+    assert_eq!(
+        renamed_note(&renamed).as_deref(),
+        Some(
+            "3 items get other names on this PC (Windows can't store their names). CON → _CON. \
+             2 items have names that differ only in capital letters, which Windows treats as the \
+             same, so they're numbered. a.txt → a (2).txt."
+        )
+    );
+    assert_eq!(
+        renamed_note(&[(rp("a:b"), "a_b".to_owned())]).as_deref(),
+        Some("1 item gets another name on this PC (Windows can't store its name): a:b → a_b.")
+    );
+    assert_eq!(renamed_note(&[]), None);
+}
+
+/// Review I7, through the app: a download with a name Windows can't store is planned with the
+/// renaming, which the status line tells.
+#[test]
+fn a_download_with_a_name_windows_cant_store_is_renamed() {
+    let b = bed(MockProvider::new(bunny_like()).with_file("a:b.txt", b"colon"));
+    let out = tempfile::tempdir().unwrap();
+    let entries = b.t.session.remote_entries(&["a:b.txt".into()]);
+    assert_eq!(entries.len(), 1);
+    b.t.download(entries, Some(out.path().to_owned()));
+    b.wait_idle();
+    wait_for("the download", || {
+        out.path().join("a_b.txt").exists().then_some(())
+    });
+    assert_eq!(std::fs::read(out.path().join("a_b.txt")).unwrap(), b"colon");
+}
+
+/// Review I4: a site that finds the PC's clock off stops once, with its own banner (not the
+/// sign-in one), and the banner's Resume carries on with the same site once the clock is set.
+#[test]
+fn a_clock_that_is_off_has_its_banner_and_resume_goes_on() {
+    let mock = MockProvider::new(bunny_like());
+    mock.fail_next(MockOp::Upload, ProviderError::ClockSkew, 1);
+    let b = bed(mock);
+    let file = b.file("a.txt", "a");
+    b.t.upload(vec![file], None);
+    wait_for("the clock stop", || {
+        matches!(b.t.engine.snapshot().state, EngineState::ClockSkew { .. }).then_some(())
+    });
+    b.t.tick(&b.ui);
+    assert_eq!(
+        b.ui.get_clock_banner_text(),
+        "Your PC's clock is off. Turn on “Set time automatically” in Windows Settings. \
+         Transfers to testzone are paused until you click Resume."
+    );
+    assert_eq!(b.ui.get_transfers_title(), "PC clock is off · testzone");
+    assert_eq!(b.ui.get_auth_banner_text(), "");
+    assert_eq!(b.t.engine.snapshot().files_failed, 0);
+    let resume = ElementHandle::find_by_accessible_label(&b.ui, "Resume")
+        .find(|e| e.accessible_role() == Some(AccessibleRole::Button))
+        .expect("the clock banner's Resume");
+    resume.invoke_accessible_default_action();
+    b.wait_stored("a.txt", "a");
+    b.wait_idle();
+    b.t.tick(&b.ui);
+    assert_eq!(b.ui.get_clock_banner_text(), "");
+    assert_eq!(
+        b.mock.calls(MockOp::Upload),
+        2,
+        "the same client, once more"
+    );
+}
+
+/// Review I5: a file the site refused alone is said as such in the Failed tab.
+#[test]
+fn a_file_refused_alone_says_so() {
+    let denied = ProviderError::Refused(httporter_s3::ACCESS_DENIED.into());
+    assert_eq!(
+        copy::describe_transfer_error(&denied),
+        "Access to this file was denied."
+    );
+    assert_eq!(
+        copy::transfer_message(httporter_transfer::messages::ACCESS_DENIED),
+        "Access to this file was denied."
+    );
+    // Other refusals keep their own words.
+    assert_eq!(
+        copy::describe_transfer_error(&ProviderError::Refused("Not here.".into())),
+        "Not here."
     );
 }

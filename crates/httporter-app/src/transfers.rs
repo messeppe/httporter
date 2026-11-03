@@ -17,7 +17,7 @@
 //! the one thing that lives on the UI thread only ([`install`] keeps it).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use httporter_core::{
-    Checksum, Direction, EngineSnapshot, EngineState, Entry, Job, JobId, JobState, Journal,
-    ProviderError, ProviderKind, RemotePath, Resolution, RetryPolicy, SiteId, SiteRecord,
-    StorageProvider, TransferSettings, with_retry,
+    Checksum, Direction, EngineSnapshot, EngineState, Entry, Job, JobId, Journal, ProviderError,
+    ProviderKind, RemotePath, Resolution, RetryPolicy, SiteId, SiteRecord, StorageProvider,
+    TransferSettings, with_retry,
 };
 use httporter_platform::win::{self, TaskbarProgress, TaskbarState};
 use httporter_transfer::{
@@ -54,8 +54,14 @@ const NOTIFY_AFTER: Duration = Duration::from_secs(20);
 /// is COM work. A change of state (paused, stopped, done) is drawn at once.
 const TASKBAR_EVERY: Duration = Duration::from_millis(250);
 
-/// How long closing waits for the work in flight to stop and the journal to catch up.
-const SETTLE_FOR: Duration = Duration::from_secs(3);
+/// How long closing waits, at most, for the work in flight to stop, the journal to catch up and
+/// the uploads left in parts to be given up (review C1). The journal writes its updates in
+/// chunks of one transaction each, so 13,793 cancels take well under a second; this is for a
+/// disk or a service that stopped answering.
+const SETTLE_FOR: Duration = Duration::from_secs(10);
+
+/// Closing that takes longer than this says "Saving…" in the status line meanwhile.
+const SAVING_AFTER: Duration = Duration::from_millis(300);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -140,14 +146,38 @@ impl Default for Feed {
     }
 }
 
+/// A question that waits for the one on screen to be answered (review I6): a second plan that
+/// needs the conflict sheet or the delete alert is never lost, nor shown over the first.
+enum Waiting {
+    Conflicts {
+        pending: Pending,
+        view: Box<sheets_view::ConflictSheetView>,
+        note: Option<String>,
+    },
+    Delete {
+        pending: PendingDelete,
+        /// Its title, text and button.
+        alert: (String, String, String),
+    },
+}
+
 #[derive(Default)]
 struct State {
     conflict: Option<Pending>,
     delete: Option<PendingDelete>,
+    /// Questions to ask after the one on screen, in the order they came.
+    waiting: VecDeque<Waiting>,
     new_folder: Option<FolderPlace>,
     affected: Vec<Affected>,
     feed: Feed,
     quitting: Option<Quit>,
+}
+
+impl State {
+    /// The conflict sheet or the delete alert is up.
+    fn asking(&self) -> bool {
+        self.conflict.is_some() || self.delete.is_some()
+    }
 }
 
 /// The transfer engine and what it is waiting on the user for. Shared as `Arc<Transfers>` by the
@@ -161,6 +191,9 @@ pub struct Transfers {
     /// stays usable while one is open; a second click on Upload or Download to… is ignored.
     picking: Arc<AtomicBool>,
     state: Mutex<State>,
+    /// Held while new settings are handed to the engine, so that an older change never lands
+    /// after a newer one.
+    applying: Mutex<()>,
 }
 
 /// Marks the picker closed when dropped (also if the picker panicked).
@@ -186,6 +219,7 @@ impl Transfers {
             link,
             picking: Arc::new(AtomicBool::new(false)),
             state: Mutex::new(State::default()),
+            applying: Mutex::new(()),
         })
     }
 
@@ -385,22 +419,26 @@ impl Transfers {
                 return;
             }
         };
+        // Names Windows can't store, or that clash ignoring case, are changed: the status line
+        // says so (review I7).
+        let note = renamed_note(&plan.renamed);
         let policy = self.session.conflict_policy(&site.id, false).await;
         let all = match policy_to_resolution(policy) {
             Some(all) => all,
             None if plan.conflicts.is_empty() => Resolution::Replace,
-            None => return self.ask(target, Planned::Download(plan, dir), None),
+            None => return self.ask(target, Planned::Download(plan, dir), note),
         };
         // What arrives is checked against the listing (ruling Q27).
         let checksums = plan.checksums.clone();
         let jobs = resolve_downloads(plan, all, &HashMap::new());
-        self.submit(target, jobs, checksums, Affected::Local(dir), None)
+        self.submit(target, jobs, checksums, Affected::Local(dir), note)
             .await;
     }
 
     // ---- The conflict sheet ----
 
-    /// Shows the conflict sheet for `planned` and keeps it until the sheet is answered.
+    /// Shows the conflict sheet for `planned` and keeps it until the sheet is answered. While
+    /// another question is up, it waits its turn (review I6).
     fn ask(&self, target: Target, planned: Planned, note: Option<String>) {
         let short = match SiteProvider::of(&target.site) {
             SiteProvider::Bunny => copy::BUNNY,
@@ -425,12 +463,66 @@ impl Transfers {
                 short,
             ),
         };
-        lock(&self.state).conflict = Some(Pending { target, planned });
+        let pending = Pending { target, planned };
+        {
+            let mut state = lock(&self.state);
+            if state.asking() {
+                state.waiting.push_back(Waiting::Conflicts {
+                    pending,
+                    view: Box::new(view),
+                    note,
+                });
+                drop(state);
+                self.link.status(copy::ASKED_NEXT.to_owned());
+                return;
+            }
+            state.conflict = Some(pending);
+        }
+        self.show_conflicts(view, note);
+    }
+
+    fn show_conflicts(&self, view: sheets_view::ConflictSheetView, note: Option<String>) {
         let _ = self.link.ui().upgrade_in_event_loop(move |ui| {
             sheets_view::apply_conflicts(&ui, &view);
             ui.set_conflicts_open(true);
             crate::binding::show_status(&ui, None, note.unwrap_or_default());
         });
+    }
+
+    fn show_delete_alert(&self, alert: (String, String, String)) {
+        let _ = self.link.ui().upgrade_in_event_loop(move |ui| {
+            crate::binding::show_status(&ui, None, String::new());
+            sheets_view::show_delete_alert(&ui, &alert);
+        });
+    }
+
+    /// The question on screen was answered: the next one waiting, if any, is asked.
+    fn ask_next(&self) {
+        let show = {
+            let mut state = lock(&self.state);
+            if state.asking() {
+                return;
+            }
+            match state.waiting.pop_front() {
+                None => return,
+                Some(Waiting::Conflicts {
+                    pending,
+                    view,
+                    note,
+                }) => {
+                    state.conflict = Some(pending);
+                    Ok((view, note))
+                }
+                Some(Waiting::Delete { pending, alert }) => {
+                    state.delete = Some(pending);
+                    Err(alert)
+                }
+            }
+        };
+        match show {
+            Ok((view, note)) => self.show_conflicts(*view, note),
+            Err(alert) => self.show_delete_alert(alert),
+        }
     }
 
     /// Continue on the conflict sheet: the default action `mode`, each row's own choice, and
@@ -471,10 +563,12 @@ impl Transfers {
                 }
             }
         });
+        self.ask_next();
     }
 
     fn conflicts_cancel(&self) {
         lock(&self.state).conflict = None;
+        self.ask_next();
     }
 
     // ---- Delete ----
@@ -510,15 +604,23 @@ impl Transfers {
                 }
             };
             let alert = sheets_view::delete_alert(&plan.summary, &site.name, site.provider);
-            lock(&this.state).delete = Some(PendingDelete {
+            let pending = PendingDelete {
                 target,
                 dir,
                 jobs: plan.jobs,
-            });
-            let _ = this.link.ui().upgrade_in_event_loop(move |ui| {
-                crate::binding::show_status(&ui, None, String::new());
-                sheets_view::show_delete_alert(&ui, &alert);
-            });
+            };
+            {
+                // A question already up keeps its place; this one waits (review I6).
+                let mut state = lock(&this.state);
+                if state.asking() {
+                    state.waiting.push_back(Waiting::Delete { pending, alert });
+                    drop(state);
+                    this.link.status(copy::ASKED_NEXT.to_owned());
+                    return;
+                }
+                state.delete = Some(pending);
+            }
+            this.show_delete_alert(alert);
         });
     }
 
@@ -532,10 +634,12 @@ impl Transfers {
             this.submit(target, jobs, HashMap::new(), affected, None)
                 .await;
         });
+        self.ask_next();
     }
 
     fn delete_cancel(&self) {
         lock(&self.state).delete = None;
+        self.ask_next();
     }
 
     // ---- New Folder ----
@@ -626,11 +730,12 @@ impl Transfers {
 
     // ---- Resuming what a crash or a quit left ----
 
-    /// Shows the resume banner when the journal holds transfers that didn't finish.
+    /// Shows the resume banner when the journal holds transfers that didn't finish, naming the
+    /// deletes among them (review C1).
     fn offer_resume(&self, ui: &AppWindow) {
-        let n = self.engine.unfinished_count();
-        let text = if n > 0 {
-            sheets_view::resume_banner(n)
+        let left = self.engine.unfinished();
+        let text = if left.total > 0 {
+            sheets_view::resume_banner(left.total, left.deletes)
         } else {
             String::new()
         };
@@ -683,47 +788,73 @@ impl Transfers {
         self.engine.auth_stopped_site()
     }
 
-    /// `site` was edited and saved (the hub has dropped its old client). If a failed sign-in had
-    /// stopped its transfers, they go on with the new client.
+    /// `site` was edited and saved (the hub has dropped its old client). Its transfers go on
+    /// with the new client (review M2): the queued ones of a running site, and all of them when a
+    /// failed sign-in had stopped it.
     pub async fn site_edited(&self, site: &SiteRecord) {
-        if !self.engine.is_auth_stopped(&site.id) {
+        if !self.engine.sites().contains(&site.id) {
             return;
         }
         if let Ok(provider) = self.session.connect(site).await {
-            self.engine.resume_site(&site.id, provider);
+            if self.engine.is_auth_stopped(&site.id) {
+                self.engine.resume_site(&site.id, provider);
+            } else {
+                self.engine.replace_provider(&site.id, provider);
+            }
+        }
+    }
+
+    /// Resume on the clock banner (review I4): the clock has been set, so the site stopped for
+    /// it goes on, with the client it had.
+    fn resume_clock(&self) {
+        if let Some((site, provider)) = self.engine.clock_skewed_site() {
+            self.engine.resume_site(&site, provider);
         }
     }
 
     /// `site` is being removed (Ruling Q23): its transfers are cancelled, and its records leave
-    /// the journal (the unfinished ones a crash left too), off the UI thread. The resume banner
-    /// then counts what is left.
+    /// the journal (the unfinished ones a crash left too). The uploads it had left in parts are
+    /// given up with its client (ruling Q49), so this runs before its password goes. The resume
+    /// banner then counts what is left. Blocks (the journal, the site's client): call it off the
+    /// UI thread.
     pub fn forget_site(self: &Arc<Self>, site: &SiteId) {
-        self.engine.cancel_site(site);
-        let (this, site) = (self.clone(), site.clone());
-        self.link.rt().spawn_blocking(move || {
-            let journal = &this.journal;
-            if let Ok(records) = journal.unfinished() {
-                for record in records.iter().filter(|record| record.site == site) {
-                    let _ = journal.set_state(record.id, JobState::Cancelled, None);
-                }
-            }
-            // The cancelled records go, with the other finished ones (as at every start).
-            let _ = journal.clear_finished();
-            let again = this.clone();
-            let _ = this
-                .link
-                .ui()
-                .upgrade_in_event_loop(move |ui| again.offer_resume(&ui));
+        let provider = self.engine.site_provider(site).or_else(|| {
+            let record = self.session.site(site)?;
+            self.session.hub().provider(&record).ok()
         });
+        self.engine.forget_site(site, provider);
+        // The cancelled records go, with the other finished ones (as at every start).
+        let _ = self.journal.clear_finished();
+        let again = self.clone();
+        let _ = self
+            .link
+            .ui()
+            .upgrade_in_event_loop(move |ui| again.offer_resume(&ui));
     }
 
-    /// Discard on the resume banner.
-    fn discard_journal(&self, ui: &AppWindow) {
+    /// Discard on the resume banner. The uploads left in parts are given up on their sites
+    /// (ruling Q49), through the clients of the sites that can still be opened.
+    fn discard_journal(self: &Arc<Self>, ui: &AppWindow) {
         ui.set_resume_banner_text(SharedString::new());
-        let engine = self.engine.clone();
-        self.link
-            .rt()
-            .spawn_blocking(move || engine.discard_journal(&|_| None));
+        let this = self.clone();
+        self.link.rt().spawn_blocking(move || {
+            let records = this.journal.unfinished().unwrap_or_default();
+            let mut sites: HashMap<SiteId, Option<SiteInfo>> = HashMap::new();
+            // Only the sites with an upload left in parts need their client.
+            let in_parts = records
+                .iter()
+                .filter(|record| matches!(record.job, Job::Upload { .. }))
+                .filter(|record| record.multipart.is_some());
+            for record in in_parts {
+                sites.entry(record.site.clone()).or_insert_with(|| {
+                    let site = this.session.site(&record.site)?;
+                    let provider = this.session.hub().provider(&site).ok()?;
+                    Some((site.name.clone(), site.host.clone(), provider))
+                });
+            }
+            let lookup = |id: &SiteId| sites.get(id).cloned().flatten();
+            this.engine.discard_journal(&lookup);
+        });
     }
 
     // ---- The engine's feed ----
@@ -852,64 +983,131 @@ impl Transfers {
 
     // ---- Settings ----
 
-    /// New Transfers settings from the Settings window: used at once by the engine and, as each is
-    /// rebuilt, by the sites' clients, and saved. Settings equal to those in use change nothing
-    /// (so closing the window without an edit writes nothing).
-    fn apply_settings(&self, settings: TransferSettings) {
+    /// New Transfers settings from the Settings window: used by the engine and the sites'
+    /// clients, and saved. Settings equal to those in use change nothing (so closing the window
+    /// without an edit writes nothing).
+    ///
+    /// The hub drops every client, and builds each again with the new settings when next asked.
+    /// The sites with transfers under way get theirs at once (review I3): built off the UI
+    /// thread, then handed to the engine for the work still queued, and only then are the
+    /// engine's new limits applied, so that no transfer starts on an old client under them (a
+    /// raised Simultaneous would otherwise queue inside the old client's own slots, and a new
+    /// proxy would never reach the queued jobs).
+    fn apply_settings(self: &Arc<Self>, settings: TransferSettings) {
         if settings == self.session.settings() {
             return;
         }
-        self.engine.set_settings(settings.clone());
         self.session.hub().set_settings(settings.clone());
-        let saved = self.session.save_settings(self.link.rt(), settings);
+        let saved = self.session.save_settings(self.link.rt(), settings.clone());
         let link = self.link.clone();
         self.link.rt().spawn(async move {
             if let Ok(Err(e)) = saved.await {
                 link.status(copy::settings_not_saved(e));
             }
         });
+        let sites = self.engine.sites();
+        if sites.is_empty() {
+            let _applying = lock(&self.applying);
+            self.engine.set_settings(settings);
+            return;
+        }
+        let this = self.clone();
+        self.link.rt().spawn_blocking(move || {
+            let fresh: Vec<(SiteId, Arc<dyn StorageProvider>)> = sites
+                .into_iter()
+                .filter_map(|id| {
+                    let record = this.session.site(&id)?;
+                    let provider = this.session.hub().provider(&record).ok()?;
+                    Some((id, provider))
+                })
+                .collect();
+            let _applying = lock(&this.applying);
+            if this.session.settings() != settings {
+                // Newer settings came meanwhile: theirs apply.
+                return;
+            }
+            for (site, provider) in fresh {
+                this.engine.replace_provider(&site, provider);
+            }
+            this.engine.set_settings(settings);
+        });
     }
 
     // ---- Closing ----
 
-    /// Whether closing the window must ask first: transfers are running or waiting.
+    /// Whether closing the window must ask first: transfers are running or waiting. Journal
+    /// writes still on their way are not transfers (review C1): closing waits for them instead.
     fn must_ask_before_closing(&self) -> bool {
-        lock(&self.state).quitting.is_none() && self.engine.is_busy()
+        lock(&self.state).quitting.is_none() && self.engine.has_work()
     }
 
-    /// The quit alert's answer: stop the event loop, after cancelling everything for Cancel.
-    fn quit(&self, how: Quit) {
-        lock(&self.state).quitting = Some(how);
-        if how == Quit::Cancel {
-            self.engine.cancel_all();
+    /// Whether closing the window must wait for the journal to catch up (or for uploads left in
+    /// parts to be given up) before the window goes: after Cancel All, say.
+    fn must_wait_before_closing(&self) -> bool {
+        lock(&self.state).quitting.is_none() && !self.settled(Quit::Pause)
+    }
+
+    /// Whether closing has nothing left to wait for: the work in flight has stopped (for Cancel,
+    /// nothing is left at all), the journal has every change, and the uploads cancelled have
+    /// been given up.
+    fn settled(&self, how: Quit) -> bool {
+        let stopped = match how {
+            Quit::Cancel => !self.engine.has_work(),
+            Quit::Pause => self.engine.snapshot().active_count == 0,
+        };
+        stopped && self.engine.pending_writes() == 0 && self.engine.pending_aborts() == 0
+    }
+
+    /// Waits up to `limit` for [`Self::settled`]; whether it got there.
+    fn wait_settled(&self, how: Quit, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if self.settled(how) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = slint::quit_event_loop();
     }
 
-    /// After the event loop has stopped: lets the work in flight stop and the journal catch up,
-    /// for at most a few seconds. After Pause and Quit (or a close with nothing running) the jobs
-    /// still queued stay in the journal for the resume banner; after Cancel and Quit nothing is
-    /// left.
+    /// The quit alert's answer, or a close that must wait (Pause): everything is paused, or
+    /// cancelled for Cancel, and the event loop stops once that is saved (review C1). The window
+    /// stays meanwhile, and says "Saving…" when it takes long enough to see; it closes after
+    /// [`SETTLE_FOR`] whatever happens.
+    fn quit(self: &Arc<Self>, how: Quit) {
+        lock(&self.state).quitting = Some(how);
+        match how {
+            Quit::Cancel => self.engine.cancel_all(),
+            Quit::Pause => self.engine.pause_all(),
+        }
+        if self.settled(how) {
+            let _ = slint::quit_event_loop();
+            return;
+        }
+        let this = self.clone();
+        self.link.rt().spawn_blocking(move || {
+            if !this.wait_settled(how, SAVING_AFTER) {
+                this.link.status(copy::SAVING.to_owned());
+                this.wait_settled(how, SETTLE_FOR);
+            }
+            let _ = slint::invoke_from_event_loop(|| {
+                let _ = slint::quit_event_loop();
+            });
+        });
+    }
+
+    /// After the event loop has stopped: lets the work in flight stop, the journal catch up and
+    /// the uploads cancelled be given up, for at most [`SETTLE_FOR`]. After Pause and Quit (or a
+    /// close with nothing running) the jobs still queued stay in the journal for the resume
+    /// banner; after Cancel and Quit nothing is left.
     pub fn finish(&self) {
-        let cancel = lock(&self.state).quitting == Some(Quit::Cancel);
-        if !cancel {
+        let how = lock(&self.state).quitting.unwrap_or(Quit::Pause);
+        if how == Quit::Pause {
             self.engine.pause_all();
         }
-        let deadline = Instant::now() + SETTLE_FOR;
-        while Instant::now() < deadline {
-            let settled = if cancel {
-                !self.engine.is_busy()
-            } else {
-                // With jobs left in the queue the engine stays busy, and the journal already
-                // holds them; without, busy means journal writes still on their way.
-                let s = self.engine.snapshot();
-                s.active_count == 0 && (s.queued_count > 0 || !self.engine.is_busy())
-            };
-            if settled {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        self.wait_settled(how, SETTLE_FOR);
     }
 }
 
@@ -1023,6 +1221,10 @@ fn install_sheets(ui: &AppWindow, transfers: &Arc<Transfers>) {
         let engine = transfers.engine.clone();
         move || engine.resume_all()
     });
+    ui.on_clock_banner_resume({
+        let transfers = transfers.clone();
+        move || transfers.resume_clock()
+    });
     // Edit Site… opens the site in Edit Site, which is `binding.rs`'s; saving it calls
     // `Transfers::site_edited`.
 }
@@ -1095,6 +1297,12 @@ fn install_close(ui: &AppWindow, transfers: &Arc<Transfers>, settings: SettingsS
                 return CloseRequestResponse::KeepWindowShown;
             }
             close_settings();
+            if transfers.must_wait_before_closing() {
+                // Nothing to ask about, but changes still to save (after Cancel All, say): the
+                // window closes once they are (review C1).
+                transfers.quit(Quit::Pause);
+                return CloseRequestResponse::KeepWindowShown;
+            }
             CloseRequestResponse::HideWindow
         }
     });
@@ -1136,27 +1344,28 @@ async fn paced(mut changes: watch::Receiver<u64>, mut draw: impl FnMut() -> bool
     }
 }
 
-/// The banners the engine's state calls for: offline, sign-in failed, or the disk full.
+/// The banners the engine's state calls for: offline, sign-in failed, the PC's clock off (review
+/// I4), or the disk full.
 fn show_banners(ui: &AppWindow, state: &EngineState) {
-    let (offline, auth, disk) = match state {
-        EngineState::Offline { .. } => {
-            (sheets_view::offline_banner(), String::new(), String::new())
+    let (mut offline, mut auth, mut clock, mut disk) =
+        (String::new(), String::new(), String::new(), String::new());
+    match state {
+        EngineState::Offline { .. } => offline = sheets_view::offline_banner(),
+        EngineState::AuthStopped { site } => auth = sheets_view::auth_banner(site),
+        EngineState::ClockSkew { site } => clock = sheets_view::clock_banner(site),
+        EngineState::DiskFull { drive, needed } => {
+            disk = sheets_view::disk_full_banner(drive, *needed);
         }
-        EngineState::AuthStopped { site } => {
-            (String::new(), sheets_view::auth_banner(site), String::new())
-        }
-        EngineState::DiskFull { drive, needed } => (
-            String::new(),
-            String::new(),
-            sheets_view::disk_full_banner(drive, *needed),
-        ),
-        _ => (String::new(), String::new(), String::new()),
-    };
+        EngineState::Idle | EngineState::Running | EngineState::Paused => {}
+    }
     if ui.get_offline_banner_text() != offline.as_str() {
         ui.set_offline_banner_text(offline.into());
     }
     if ui.get_auth_banner_text() != auth.as_str() {
         ui.set_auth_banner_text(auth.into());
+    }
+    if ui.get_clock_banner_text() != clock.as_str() {
+        ui.set_clock_banner_text(clock.into());
     }
     if ui.get_disk_banner_text() != disk.as_str() {
         ui.set_disk_banner_text(disk.into());
@@ -1179,6 +1388,36 @@ fn taskbar_state(s: &EngineSnapshot) -> TaskbarState {
         | EngineState::ClockSkew { .. }
         | EngineState::DiskFull { .. } => TaskbarState::Error { done, total },
     }
+}
+
+/// The status line for the items of a download that get other names on this PC (review I7):
+/// those whose names Windows can't store (`a:b`, `CON`), then, in their own sentence, those whose
+/// names differ only in capital letters, which Windows takes for the same name. Each sentence
+/// shows one of them.
+pub(crate) fn renamed_note(renamed: &[(RemotePath, String)]) -> Option<String> {
+    let mut unstorable: Vec<(&str, &str)> = Vec::new();
+    let mut same_name: Vec<(&str, &str)> = Vec::new();
+    for (path, name) in renamed {
+        let original = path.name().unwrap_or_default();
+        if httporter_transfer::safe_local_name(original) == original {
+            same_name.push((original, name));
+        } else {
+            unstorable.push((original, name));
+        }
+    }
+    let mut sentences = Vec::new();
+    if let Some(&(from, to)) = unstorable.first() {
+        sentences.push(copy::renamed_for_windows(unstorable.len(), from, to));
+    }
+    // An item of the group that keeps its name is listed too; the example is one that doesn't.
+    if let Some(&(from, to)) = same_name
+        .iter()
+        .find(|pair| pair.0 != pair.1)
+        .or(same_name.first())
+    {
+        sentences.push(copy::renamed_same_name(same_name.len(), from, to));
+    }
+    (!sentences.is_empty()).then(|| sentences.join(" "))
 }
 
 /// The status line for items a plan leaves out: how many, and the first with its reason.

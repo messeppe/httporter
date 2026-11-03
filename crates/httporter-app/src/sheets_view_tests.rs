@@ -433,11 +433,31 @@ fn remove_quit_and_banner_texts() {
     assert_eq!(quit_alert(1).1, "1 file hasn't finished.");
     assert_eq!(quit_alert(13_793).1, "13,793 files haven't finished.");
 
-    assert_eq!(resume_banner(1), "1 transfer didn't finish last time.");
-    assert_eq!(resume_banner(5), "5 transfers didn't finish last time.");
+    assert_eq!(resume_banner(1, 0), "1 transfer didn't finish last time.");
+    assert_eq!(resume_banner(5, 0), "5 transfers didn't finish last time.");
     assert_eq!(
-        resume_banner(1_204),
+        resume_banner(1_204, 0),
         "1,204 transfers didn't finish last time."
+    );
+    // Review C1: Resume carries the deletes out, so the banner names them.
+    assert_eq!(
+        resume_banner(1_204, 300),
+        "1,204 transfers didn't finish last time, including 300 deletes."
+    );
+    assert_eq!(
+        resume_banner(2, 1),
+        "2 transfers didn't finish last time, including 1 delete."
+    );
+    assert_eq!(resume_banner(1, 1), "1 delete didn't finish last time.");
+    assert_eq!(
+        resume_banner(3_000, 3_000),
+        "3,000 deletes didn't finish last time."
+    );
+    // Review I4.
+    assert_eq!(
+        clock_banner("media"),
+        "Your PC's clock is off. Turn on “Set time automatically” in Windows Settings. \
+         Transfers to media are paused until you click Resume."
     );
     assert_eq!(
         offline_banner(),
@@ -849,7 +869,7 @@ fn the_new_folder_sheet_checks_the_name_and_keeps_the_focus() {
 fn banners_show_with_text_and_their_buttons_answer() {
     let (w, log) = window();
     let shown = |text: &str| ElementHandle::find_by_accessible_label(&w, text).count();
-    let resume = resume_banner(5);
+    let resume = resume_banner(5, 0);
     assert_eq!(shown(&resume), 0);
     assert!(find(&w, AccessibleRole::Button, "Discard").is_none());
 

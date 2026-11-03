@@ -190,9 +190,16 @@ pub fn describe_transfer_error(error: &ProviderError) -> String {
         ProviderError::Auth { .. } => "Sign-in failed".to_owned(),
         ProviderError::NotFound => "Not found".to_owned(),
         ProviderError::ClockSkew => CLOCK_OFF.to_owned(),
+        ProviderError::Refused(message) if message == httporter_s3::ACCESS_DENIED => {
+            FILE_ACCESS_DENIED.to_owned()
+        }
         ProviderError::Refused(message) | ProviderError::Permanent(message) => message.clone(),
     }
 }
+
+/// Why a file failed when the site refused that file alone (a key or a bucket policy that
+/// allows some paths only), while its sign-in works (review I5).
+pub const FILE_ACCESS_DENIED: &str = "Access to this file was denied.";
 
 /// `text` as one short sentence: trimmed, at most [`DETAIL_MAX`] characters, starting with a
 /// capital and ending with a full stop.
@@ -901,6 +908,10 @@ pub fn remove_site_body(provider: &str) -> String {
 /// The quit alert's title.
 pub const QUIT_TITLE: &str = "Transfers are still running";
 
+/// The status line while closing waits for the list of transfers to be saved (and for uploads
+/// left in parts to be given up), when that takes long enough to see (review C1).
+pub const SAVING: &str = "Saving…";
+
 /// The quit alert's text: "5 files haven't finished.".
 pub fn quit_body(unfinished: u64) -> String {
     if unfinished == 1 {
@@ -912,15 +923,27 @@ pub fn quit_body(unfinished: u64) -> String {
 
 // The banners.
 
-/// Above the panes after a crash or a quit with work left: "5 transfers didn't finish last time.".
-pub fn resume_banner(n: usize) -> String {
-    if n == 1 {
-        "1 transfer didn't finish last time.".to_owned()
+/// Above the panes after a crash or a quit with work left: "5 transfers didn't finish last time.",
+/// naming the deletes among them, which Resume carries out: "1,204 transfers didn't finish last
+/// time, including 300 deletes." (review C1).
+pub fn resume_banner(n: usize, deletes: usize) -> String {
+    let transfers = if n == 1 {
+        "1 transfer didn't finish last time".to_owned()
     } else {
         format!(
-            "{} transfers didn't finish last time.",
+            "{} transfers didn't finish last time",
             format_count(n as u64)
         )
+    };
+    match deletes {
+        0 => format!("{transfers}."),
+        1 if n == 1 => "1 delete didn't finish last time.".to_owned(),
+        1 => format!("{transfers}, including 1 delete."),
+        d if d == n => format!(
+            "{} deletes didn't finish last time.",
+            format_count(d as u64)
+        ),
+        d => format!("{transfers}, including {} deletes.", format_count(d as u64)),
     }
 }
 
@@ -932,6 +955,12 @@ pub fn offline_banner() -> String {
 /// Above the panes when `site` refused its credentials.
 pub fn auth_banner(site: &str) -> String {
     format!("Couldn't sign in to {site}. Its transfers are paused.")
+}
+
+/// Above the panes when `site` found the PC's clock too far off to take its transfers (review
+/// I4): the clock words, and what Resume does once it is set.
+pub fn clock_banner(site: &str) -> String {
+    format!("{CLOCK_OFF} Transfers to {site} are paused until you click Resume.")
 }
 
 /// Above the panes when a download has nowhere to go: `needed` bytes must be freed on `drive`.
@@ -1018,6 +1047,37 @@ pub fn skipped_items(n: usize, first: &str, reason: &str) -> String {
     }
 }
 
+/// Items of a download that get other names on this PC because Windows can't store theirs, with
+/// one of them (review I7): "3 items get other names on this PC (Windows can't store their
+/// names). a:b → a_b".
+pub fn renamed_for_windows(n: usize, from: &str, to: &str) -> String {
+    if n == 1 {
+        format!(
+            "1 item gets another name on this PC (Windows can't store its name): {from} → {to}."
+        )
+    } else {
+        format!(
+            "{} items get other names on this PC (Windows can't store their names). {from} → {to}.",
+            format_count(n as u64)
+        )
+    }
+}
+
+/// Items of a download whose names are the same on this PC, where capital letters don't count
+/// (`A.txt` and `a.txt`), so all but one are numbered, with one of them (review I7).
+pub fn renamed_same_name(n: usize, from: &str, to: &str) -> String {
+    format!(
+        "{} items have names that differ only in capital letters, which Windows treats as the \
+         same, so they're numbered. {from} → {to}.",
+        format_count(n as u64)
+    )
+}
+
+/// The status line when a transfer needs the conflict sheet or the delete alert while one is
+/// already up: it is asked next (review I6).
+pub const ASKED_NEXT: &str =
+    "Another transfer needs an answer too. It's asked once you've answered this one.";
+
 /// New Folder failed.
 pub fn folder_not_created(name: &str, reason: impl Display) -> String {
     format!("Couldn't create the folder {name}: {reason}")
@@ -1098,6 +1158,7 @@ pub fn transfer_message(text: &str) -> String {
         messages::FILE_WORK_STOPPED => "Work on the file on this PC stopped before it finished.",
         messages::NO_ANSWER_FOR_FILE => "The server didn't answer for this file.",
         messages::DAMAGED_TWICE => "The file arrived damaged twice (checksum mismatch).",
+        messages::ACCESS_DENIED => FILE_ACCESS_DENIED,
         other => other,
     };
     words.to_owned()

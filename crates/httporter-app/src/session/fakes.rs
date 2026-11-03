@@ -285,6 +285,13 @@ impl StorageProvider for Gated {
     async fn reachable(&self) -> Result<(), ProviderError> {
         self.inner.reachable().await
     }
+    async fn abort_multipart(
+        &self,
+        path: &RemotePath,
+        upload_id: &str,
+    ) -> Result<(), ProviderError> {
+        self.inner.abort_multipart(path, upload_id).await
+    }
 }
 
 /// A credential store in memory that notes the thread every call was made on, and can hold the

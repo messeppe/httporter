@@ -392,10 +392,12 @@ export component AppWindow inherits Window {
     in property <string> resume-banner-text;
     in property <string> offline-banner-text;
     in property <string> auth-banner-text;
+    in property <string> clock-banner-text;
     in property <string> disk-banner-text;
     callback resume-banner-resume();
     callback resume-banner-discard();
     callback auth-banner-edit-site();
+    callback clock-banner-resume();
     callback disk-banner-resume();
 
     // The sidebar is shown. The toolbar button flips it; the app may set it too (to restore what
@@ -618,6 +620,18 @@ export component AppWindow inherits Window {
                                     enabled: root.sites-v2-ready;
                                     accessible-description: root.sites-v2-ready ? "" : @tr("Arrives later in this build.");
                                     clicked => { root.auth-banner-edit-site(); }
+                                }
+                            }
+                            // The PC's clock is off for the site it names (review I4): once it is
+                            // set, Resume carries on with the same site.
+                            if root.clock-banner-text != "": Banner {
+                                text: root.clock-banner-text;
+                                icon: Icons.clock;
+                                fg: Theme.orange;
+                                bg: Theme.orange-soft;
+                                CapsuleButton {
+                                    text: @tr("Resume");
+                                    clicked => { root.clock-banner-resume(); }
                                 }
                             }
                             if root.disk-banner-text != "": Banner {

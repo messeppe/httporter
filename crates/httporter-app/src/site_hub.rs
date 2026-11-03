@@ -284,4 +284,12 @@ impl StorageProvider for Interactive {
     async fn reachable(&self) -> Result<(), ProviderError> {
         self.0.reachable().await
     }
+
+    async fn abort_multipart(
+        &self,
+        path: &RemotePath,
+        upload_id: &str,
+    ) -> Result<(), ProviderError> {
+        self.0.abort_multipart(path, upload_id).await
+    }
 }

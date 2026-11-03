@@ -1031,15 +1031,18 @@ fn remove_site(ctx: &Ctx) {
     let Some(id) = lock(&ctx.sheet_state).removing.take() else {
         return;
     };
-    if let Some(transfers) = &ctx.transfers {
-        transfers.forget_site(&id);
-    }
     let selected = ctx.ui.upgrade().and_then(|ui| {
         let index = usize::try_from(ui.get_selected_site()).ok()?;
         ctx.session.sites().get(index).map(|site| site.id.clone())
     });
     let link = ctx.link();
+    let transfers = ctx.transfers.clone();
     ctx.rt.spawn_blocking(move || {
+        // First, while the site and its password are still there: its uploads left in parts
+        // are given up with its client (ruling Q49).
+        if let Some(transfers) = &transfers {
+            transfers.forget_site(&id);
+        }
         let removed = link.session.remove_site(&id);
         let ui = link.ui.clone();
         let _ =
