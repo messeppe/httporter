@@ -490,7 +490,8 @@ fn toolbar_buttons_follow_rules() {
     assert_eq!(counted(&counts), [0, 0, 0, 0]);
 
     // Each one on its own.
-    let flags: [(&str, fn(&AppWindow, bool)); 4] = [
+    type Flag = (&'static str, fn(&AppWindow, bool));
+    let flags: [Flag; 4] = [
         ("Upload", AppWindow::set_can_upload),
         ("Download", AppWindow::set_can_download),
         ("New folder", AppWindow::set_can_new_folder),

@@ -1451,10 +1451,13 @@ fn window_for_drags() -> AppWindow {
     w
 }
 
+/// A call of `row-pointer`: the pane, the row, whether Ctrl and Shift were held.
+type Pick = (i32, i32, bool, bool);
+
 struct Drops {
     to_remote: Rc<RefCell<Vec<i32>>>,
     to_local: Rc<RefCell<Vec<i32>>>,
-    picks: Rc<RefCell<Vec<(i32, i32, bool, bool)>>>,
+    picks: Rc<RefCell<Vec<Pick>>>,
 }
 
 fn watch_drops(w: &AppWindow) -> Drops {
