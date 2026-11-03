@@ -1863,11 +1863,14 @@ impl Inner {
         outcomes
     }
 
-    /// Takes a running lane offline and starts probing its site. The work in flight on it goes
-    /// back to the queue at once, its attempts unused (review M1), rather than wait on dead
-    /// connections until they time out.
+    /// Takes a running lane offline and starts probing its site. Nothing new starts on it; the
+    /// work in flight is left alone until the first probe gets no answer either
+    /// ([`Self::outage`]). A lane taken offline by one job whose requests a proxy keeps
+    /// resetting comes back at that probe, and the transfers in flight beside the job were never
+    /// touched (review N1): sending them back to the queue would restart each from byte 0, twice
+    /// for every such job.
     fn go_offline(self: &Arc<Self>, lane: usize) {
-        {
+        let cycle = {
             let mut guard = self.lock();
             let st = &mut *guard;
             if st.shut_down {
@@ -1880,11 +1883,28 @@ impl Inner {
             lane_ref.state = LaneState::Offline;
             lane_ref.network.clear();
             lane_ref.cycle += 1;
-            for (&unit, active) in &st.lanes[lane].units {
+            lane_ref.cycle
+        };
+        self.rt.spawn(offline::probe(self.clone(), lane, cycle));
+        self.bump();
+    }
+
+    /// The first probe of the lane's offline cycle `cycle` got no answer either: the site is out
+    /// of reach, not one job's requests. The work in flight on the lane goes back to the queue at
+    /// once, its attempts unused (review M1), rather than wait on dead connections until they
+    /// time out. Nothing changes when the lane has come back, or gone offline again, since.
+    pub(crate) fn outage(&self, lane: usize, cycle: u64) {
+        {
+            let mut guard = self.lock();
+            let st = &mut *guard;
+            let lane_ref = &st.lanes[lane];
+            if st.shut_down || lane_ref.state != LaneState::Offline || lane_ref.cycle != cycle {
+                return;
+            }
+            for (&unit, active) in &lane_ref.units {
                 interrupt(&mut st.jobs, unit, active, Stop::Requeue);
             }
         }
-        self.rt.spawn(offline::probe(self.clone(), lane));
         self.bump();
     }
 

@@ -222,6 +222,9 @@ struct Faults {
     damaged: usize,
     /// A file delete takes effect, then its answer never comes.
     hang_after_delete: bool,
+    /// Every upload of this remote path gets no answer (a proxy that resets this one file),
+    /// while everything else, the probe included, gets through.
+    stubborn: Option<String>,
 }
 
 /// Forwards to a mock, with faults a `MockProvider` can't make on its own, and counts the
@@ -310,6 +313,10 @@ impl StorageProvider for Faulty {
             .entry(path.as_str().to_owned())
             .or_default() += 1;
         self.down()?;
+        let stubborn = self.faults.lock().unwrap().stubborn.clone();
+        if stubborn.as_deref() == Some(path.as_str()) {
+            return Err(ProviderError::Network("connection reset".into()));
+        }
         let changed = self.faults.lock().unwrap().change_file.take();
         if let Some((bytes, keep_time)) = changed {
             if let UploadSource::File { path: local, .. } = &source {
@@ -488,8 +495,9 @@ async fn offline_pauses_and_resumes_without_failures() {
         .submit(batch(site.clone(), upload_jobs(dir.path(), 20, 10)))
         .unwrap();
 
-    // The first three tries fail at once: three errors within 10 s take the lane offline, and
-    // the fourth transfer, about to start, goes back to the queue untried (review M1).
+    // The first three tries fail at once: three errors within 10 s take the lane offline. The
+    // fourth transfer, already under way, is left to try (review N1); its error meets the lane
+    // offline, and it goes back to the queue as it was.
     wait_for(&engine, "the lane to go offline", |s| s.state == offline()).await;
     assert_eq!(start.elapsed(), Duration::ZERO);
 
@@ -504,7 +512,7 @@ async fn offline_pauses_and_resumes_without_failures() {
     );
     assert!(s.active.is_empty() && s.failed.is_empty());
     assert_eq!(s.eta, None);
-    assert_eq!(site.total_uploads(), 3, "no tries while offline");
+    assert_eq!(site.total_uploads(), 4, "no tries while offline");
     assert_eq!(site.probes(), 4, "a probe every 5 s");
     assert_eq!(count(&journal, JobState::Failed), 0);
 
@@ -1209,8 +1217,10 @@ async fn a_stubborn_batch_delete_fails_after_three_strikes_with_default_retries(
     assert!(mock.contents(&p("a.txt")).is_some() && mock.contents(&p("b.txt")).is_some());
 }
 
-/// Review M1: when a lane goes offline, the transfers in flight on it go back to the queue at
-/// once, their attempts unused, instead of sitting on dead connections until they time out.
+/// Review M1: when a lane's site is out of reach, the transfers in flight on it go back to the
+/// queue, their attempts unused, instead of sitting on dead connections until they time out.
+/// Since review N1 that is when the first probe gets no answer either, 5 s after the lane went
+/// offline: a site that answers it takes them back at once, untouched.
 #[tokio::test(start_paused = true)]
 async fn going_offline_sends_the_work_in_flight_back_to_the_queue() {
     let dir = tempfile::tempdir().unwrap();
@@ -1228,15 +1238,23 @@ async fn going_offline_sends_the_work_in_flight_back_to_the_queue() {
     // The connection drops: the next requests get no answer, three of them within 10 s.
     site.faults.lock().unwrap().down_until = Some(Instant::now() + Duration::from_secs(20));
     engine.submit(batch(site.clone(), rest)).unwrap();
+    let s = wait_for(&engine, "the lane to go offline", |s| s.state == offline()).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(1));
+    assert!(
+        s.active.iter().any(|view| view.path == "up/f0.txt"),
+        "left alone until a probe fails: {}",
+        brief(&s)
+    );
     let s = wait_for(&engine, "the lane to go offline, nothing in flight", |s| {
         s.state == offline() && s.active.is_empty()
     })
     .await;
     assert_eq!(
         start.elapsed(),
-        Duration::from_secs(1),
-        "at once, not after 60 s"
+        Duration::from_secs(6),
+        "at the first probe that got no answer, not after 60 s"
     );
+    assert_eq!(site.probes(), 1);
     assert_eq!((s.queued_count, s.files_failed), (4, 0), "{}", brief(&s));
     assert_eq!(mock.max_in_flight(MockOp::Upload), 1);
 
@@ -1245,6 +1263,59 @@ async fn going_offline_sends_the_work_in_flight_back_to_the_queue() {
     assert_eq!((s.files_done, s.files_failed), (4, 0), "{}", brief(&s));
     assert_eq!(site.uploads_of("up/f0.txt"), 2);
     assert_eq!(count(&journal, JobState::Done), 4);
+}
+
+/// Review N1: a file a proxy resets every time takes its lane offline twice before it strikes
+/// out (ruling Q50), while the site answers every probe. The upload in flight beside it is left
+/// alone through both spells: sent once, never restarted from byte 0 (Bunny can't resume one,
+/// nor can an S3 single PUT), and done.
+#[tokio::test(start_paused = true)]
+async fn a_stubborn_job_leaves_the_upload_beside_it_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(with(4));
+    let mock = Arc::new(MockProvider::new(Capabilities::default()));
+    mock.set_latency(MockOp::Upload, Duration::from_secs(60));
+    let site = Arc::new(Faulty::new(
+        mock.clone(),
+        Faults {
+            stubborn: Some("up/f1.txt".into()),
+            ..Faults::default()
+        },
+    ));
+    let mut jobs = upload_jobs(dir.path(), 2, 10);
+    let stubborn = jobs.split_off(1);
+    let start = Instant::now();
+    engine.submit(batch(site.clone(), jobs)).unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(engine.snapshot().active_count, 1);
+    engine.submit(batch(site.clone(), stubborn)).unwrap();
+
+    let s = wait_for(&engine, "the stubborn job to fail", |s| s.files_failed == 1).await;
+    // Tries at 1, 2 and 4 s (offline), 9, 10 and 12 s (offline), 17, 18 and 20 s: the third
+    // strike. Both probes, at 9 and 17 s, got an answer.
+    assert_eq!(start.elapsed(), Duration::from_secs(20));
+    assert_eq!(site.uploads_of("up/f1.txt"), 9);
+    assert_eq!(site.probes(), 2);
+    assert_eq!(s.failed[0].path, "up/f1.txt");
+    assert_eq!(s.failed[0].error.as_deref(), Some("No connection"));
+    assert_eq!(
+        site.uploads_of("up/f0.txt"),
+        1,
+        "the upload beside it was never sent again"
+    );
+    assert_eq!(s.active_count, 1, "{}", brief(&s));
+
+    let s = wait_idle(&engine).await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(60),
+        "done when first sent"
+    );
+    assert_eq!((s.files_done, s.files_failed), (1, 1), "{}", brief(&s));
+    assert_eq!(site.uploads_of("up/f0.txt"), 1);
+    assert_eq!(mock.calls(MockOp::Upload), 1);
+    assert_eq!(count(&journal, JobState::Done), 1);
+    assert_eq!(count(&journal, JobState::Failed), 1);
 }
 
 /// A journal in memory that counts how its updates arrive: one at a time, or together.

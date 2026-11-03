@@ -580,12 +580,13 @@ where
 
 /// What an unexplained refusal of one file's request (`error`, S3 `AccessDenied` with no hint)
 /// means (review I5). It may be the sign-in failing, or a key or a bucket policy that allows some
-/// paths only: the file's folder is listed to tell. Refused as well, the sign-in is broken, and
-/// the site stops ([`Failure::Provider`] with `error`). Listed (or found missing), the sign-in
-/// works, and only this file fails, with [`messages::ACCESS_DENIED`]; stopping the site would
-/// loop, since Edit Site's test would pass and the same file be refused again. With no answer to
-/// the listing nothing is known, and the site stops as for any refusal. A site already stopped
-/// isn't asked again.
+/// paths only: the file's folder is listed to tell. Listed, or found missing (S3 answers so for
+/// a folder with no key under it yet, the folder an upload makes), the sign-in works, and only
+/// this file fails, with [`messages::ACCESS_DENIED`]; stopping the site would loop, since Edit
+/// Site's test would pass and the same file be refused again. Any other answer to the listing
+/// (refused as well, a server error, a request to slow down) or none tells nothing for sure
+/// (re-review of I5), and the site stops as for any refusal ([`Failure::Provider`] with
+/// `error`). A site already stopped isn't asked again.
 async fn denied_or_auth(inner: &Arc<Inner>, spec: &UnitSpec, error: ProviderError) -> Failure {
     let Some(remote) = spec.work.remote() else {
         return error.into();
@@ -595,8 +596,8 @@ async fn denied_or_auth(inner: &Arc<Inner>, spec: &UnitSpec, error: ProviderErro
     }
     let dir = remote.parent().unwrap_or_else(RemotePath::root);
     match spec.provider.list(&dir).await {
-        Err(ProviderError::Auth { .. } | ProviderError::Network(_)) => error.into(),
-        _ => Failure::Reason(messages::ACCESS_DENIED.to_owned()),
+        Ok(_) | Err(ProviderError::NotFound) => Failure::Reason(messages::ACCESS_DENIED.to_owned()),
+        Err(_) => error.into(),
     }
 }
 

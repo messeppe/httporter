@@ -1,11 +1,13 @@
 //! When a site can't be reached or the disk is full.
 //!
 //! A lane goes offline after [`OFFLINE_AFTER`] network errors within [`OFFLINE_WINDOW`], or when
-//! one job uses up its retries on network errors. Going offline sends the work in flight on it
-//! back to the queue at once. While it is offline nothing new starts on it,
+//! one job uses up its retries on network errors. While it is offline nothing new starts on it,
 //! and a job that fails with a network error goes back to the queue as it was, without using up
 //! an attempt. The site is probed every [`PROBE_EVERY`] with `StorageProvider::reachable`; the
-//! first answer puts the lane back to work.
+//! first answer puts the lane back to work. The work in flight is left alone until the first
+//! probe gets no answer either; then it goes back to the queue at once (reviews M1, N1), so a
+//! job whose own requests keep failing on a site that answers never restarts the transfers
+//! beside it.
 //!
 //! A download that finds its disk full stops every lane, with the drive and the download bytes
 //! still to come on it, until the user resumes.
@@ -62,8 +64,13 @@ impl NetworkErrors {
 }
 
 /// Asks an offline lane's site every [`PROBE_EVERY`] whether it answers, until it does, the lane
-/// is no longer offline (an edited site, say), or the engine stops.
-pub(crate) async fn probe(inner: Arc<Inner>, lane: usize) {
+/// is no longer offline (an edited site, say), or the engine stops. `cycle` is the lane's
+/// offline cycle this probing is for.
+///
+/// When the first probe gets no answer either, the site is out of reach, and the work in flight
+/// on the lane goes back to the queue ([`Inner::outage`], review N1).
+pub(crate) async fn probe(inner: Arc<Inner>, lane: usize, cycle: u64) {
+    let mut first = true;
     loop {
         tokio::time::sleep(PROBE_EVERY).await;
         let Some(provider) = inner.offline_provider(lane) else {
@@ -72,6 +79,10 @@ pub(crate) async fn probe(inner: Arc<Inner>, lane: usize) {
         if provider.reachable().await.is_ok() {
             inner.back_online(lane);
             return;
+        }
+        if first {
+            first = false;
+            inner.outage(lane, cycle);
         }
     }
 }

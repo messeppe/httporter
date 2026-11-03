@@ -1920,6 +1920,11 @@ async fn an_auth_stop_on_one_site_leaves_other_sites_running() {
     assert_eq!((s.queued_count, s.files_failed), (10, 0), "{}", brief(&s));
     assert_eq!(b.calls(MockOp::Upload), 10);
     assert!(a.calls(MockOp::Upload) <= 2, "one round, then the stop");
+    // The last of the Done states may still be on their way to the journal.
+    wait_for(&engine, "the journal to catch up", |_| {
+        engine.pending_writes() == 0
+    })
+    .await;
     assert_eq!(count(&journal, JobState::Done), 10);
     assert_eq!(count(&journal, JobState::Queued), 10);
 }
@@ -2003,6 +2008,45 @@ async fn a_file_the_key_may_not_touch_fails_alone() {
     .await;
     assert_eq!((s.files_failed, s.queued_count), (0, 3), "{}", brief(&s));
     assert_eq!(count(&journal, JobState::Failed), 0);
+}
+
+/// Review I5, follow-up: only a folder that lists tells that the sign-in works. A server error
+/// or a request to slow down, in answer to the listing, tells nothing: the site stops, as for
+/// any refusal, rather than fail the file as "denied".
+#[tokio::test(start_paused = true)]
+async fn a_refused_file_whose_folder_does_not_list_stops_the_site() {
+    let answers = [
+        ProviderError::Server {
+            status: 503,
+            detail: "slow down".into(),
+        },
+        ProviderError::RateLimited { retry_after: None },
+    ];
+    for answer in answers {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, journal) = engine(with(1));
+        let mock = Arc::new(MockProvider::new(Capabilities::default()));
+        mock.fail_next(MockOp::Upload, refused(), 1);
+        mock.fail_next(MockOp::List, answer.clone(), 1);
+        engine
+            .submit(batch(mock.clone(), upload_jobs(dir.path(), 3, 10)))
+            .unwrap();
+        let stopped = EngineState::AuthStopped {
+            site: SITE_NAME.into(),
+        };
+        let s = wait_for(&engine, "the auth stop", |s| {
+            s.state == stopped && s.active.is_empty()
+        })
+        .await;
+        assert_eq!(
+            (s.files_failed, s.queued_count),
+            (0, 3),
+            "{answer:?}: {}",
+            brief(&s)
+        );
+        assert_eq!(mock.calls(MockOp::List), 1);
+        assert_eq!(count(&journal, JobState::Failed), 0);
+    }
 }
 
 /// Reviews I3 and M2: a new client for a site (new settings, an edited site) takes the work
