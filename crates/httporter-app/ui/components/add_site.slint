@@ -369,7 +369,9 @@ export component AddSiteSheet inherits Rectangle {
     }
 
     function submit() {
-        if (!root.can-add) {
+        // Not while a run is going. (The account key form decides for itself below: with no zone
+        // ticked, Return finds the zones rather than doing nothing.)
+        if (root.busy || (!root.account-mode && !root.can-add)) {
             return;
         }
         if (root.account-mode) {

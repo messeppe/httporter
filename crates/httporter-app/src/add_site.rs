@@ -764,3 +764,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "add_site_form_tests.rs"]
+mod form_tests;

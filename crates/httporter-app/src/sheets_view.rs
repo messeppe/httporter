@@ -428,3 +428,7 @@ pub fn install(ui: &AppWindow) {
     ui.on_resume_banner_discard(|| {});
     ui.on_disk_banner_resume(|| {});
 }
+
+#[cfg(test)]
+#[path = "sheets_view_tests.rs"]
+mod tests;
