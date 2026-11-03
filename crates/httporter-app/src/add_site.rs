@@ -6,13 +6,21 @@
 //!
 //! The password passes through here but is never logged, printed or stored: the `Debug` output of
 //! the form types leaves it out.
+//!
+//! Besides the Bunny zone password form above, the sheet has two more kinds of form: signing in
+//! with a Bunny account key (which lists the account's zones to add) and the S3 services. They are
+//! described by [`SiteForm`], checked by [`validate`] and, for S3, previewed by
+//! [`s3_endpoint_preview`]. The sheet's controls for them are turned off in this build, behind the
+//! window's `sites-v2-ready` flag (Ruling Q10), until Task 24 saves what they collect.
 
 use std::fmt;
 
-use slint::SharedString;
+use httporter_bunny::{REGIONS, ZoneList};
+use httporter_core::S3Preset;
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::AppWindow;
 use crate::copy;
+use crate::{AppWindow, SiteDraft, ZoneChoice};
 
 /// What the user typed, exactly as the sheet reports it.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -101,11 +109,8 @@ impl AddSiteForm {
     /// exactly as typed.
     pub fn validate(&self, region_codes: &[&str]) -> Result<ValidSite, FieldError> {
         let zone = self.zone.trim();
-        if zone.is_empty() {
-            return Err(FieldError::Zone(copy::ZONE_MISSING.into()));
-        }
-        if zone.chars().any(char::is_whitespace) {
-            return Err(FieldError::Zone(copy::ZONE_HAS_SPACES.into()));
+        if let Some(problem) = zone_problem(zone) {
+            return Err(FieldError::Zone(problem.into()));
         }
         let region_code = usize::try_from(self.region_index)
             .ok()
@@ -122,6 +127,324 @@ impl AddSiteForm {
             password: self.password.clone(),
         })
     }
+}
+
+/// What is wrong with an already trimmed zone name, if anything.
+fn zone_problem(zone: &str) -> Option<&'static str> {
+    if zone.is_empty() {
+        Some(copy::ZONE_MISSING)
+    } else if zone.chars().any(char::is_whitespace) {
+        Some(copy::ZONE_HAS_SPACES)
+    } else {
+        None
+    }
+}
+
+// ---- Every kind of site ----
+
+/// The names [`validate`] gives the fields it finds wrong; they are the sheet's field names.
+pub mod field {
+    pub const ZONE: &str = "zone";
+    pub const REGION: &str = "region";
+    pub const PASSWORD: &str = "password";
+    pub const ACCOUNT_KEY: &str = "account-key";
+    pub const ACCOUNT_ID: &str = "account-id";
+    pub const ENDPOINT: &str = "endpoint";
+    pub const BUCKET: &str = "bucket";
+    pub const KEY_ID: &str = "key-id";
+    pub const SECRET: &str = "secret";
+}
+
+/// What the Add Site sheet collected, by kind of sign-in. Its `Debug` output leaves out the
+/// password, the account key and the secret access key.
+#[derive(Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Saving a site of any kind is wired in Task 24 (Ruling Q10).
+pub enum SiteForm {
+    /// A Bunny storage zone and its password.
+    BunnyPassword {
+        zone: String,
+        /// Index into `REGIONS` (negative when nothing is chosen).
+        region_index: i32,
+        password: String,
+    },
+    /// A Bunny account key, from which the zones to add are listed.
+    BunnyAccount { key: String },
+    /// A bucket on an S3-compatible service.
+    S3 {
+        preset: S3Preset,
+        region: String,
+        account_id: String,
+        /// The address typed for MinIO and other services.
+        endpoint: String,
+        path_style: bool,
+        bucket: String,
+        key_id: String,
+        secret: String,
+    },
+}
+
+impl fmt::Debug for SiteForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BunnyPassword {
+                zone, region_index, ..
+            } => f
+                .debug_struct("BunnyPassword")
+                .field("zone", zone)
+                .field("region_index", region_index)
+                .field("password", &"<hidden>")
+                .finish(),
+            Self::BunnyAccount { .. } => f
+                .debug_struct("BunnyAccount")
+                .field("key", &"<hidden>")
+                .finish(),
+            Self::S3 {
+                preset,
+                region,
+                account_id,
+                endpoint,
+                path_style,
+                bucket,
+                key_id,
+                ..
+            } => f
+                .debug_struct("S3")
+                .field("preset", preset)
+                .field("region", region)
+                .field("account_id", account_id)
+                .field("endpoint", endpoint)
+                .field("path_style", path_style)
+                .field("bucket", bucket)
+                .field("key_id", key_id)
+                .field("secret", &"<hidden>")
+                .finish(),
+        }
+    }
+}
+
+/// The S3 preset behind a tile of the provider grid, which lists Bunny first and then the S3
+/// services in the order of [`S3Preset`]; `None` for Bunny (0) or an index outside the grid.
+pub fn preset_for_tile(index: i32) -> Option<S3Preset> {
+    const PRESETS: [S3Preset; 7] = [
+        S3Preset::AwsS3,
+        S3Preset::CloudflareR2,
+        S3Preset::BackblazeB2,
+        S3Preset::Wasabi,
+        S3Preset::DigitalOceanSpaces,
+        S3Preset::Minio,
+        S3Preset::Other,
+    ];
+    usize::try_from(index.checked_sub(1)?)
+        .ok()
+        .and_then(|i| PRESETS.get(i).copied())
+}
+
+impl SiteForm {
+    /// The S3 form behind the sheet's `add-site-test-s3` and `add-site-save-s3` callbacks (the
+    /// draft of the visible fields, and the secret access key); `None` when the draft's provider
+    /// is Bunny.
+    #[allow(dead_code)] // Saving an S3 site is wired in Task 24 (Ruling Q10).
+    pub fn from_s3_draft(draft: &SiteDraft, secret: &str) -> Option<Self> {
+        Some(Self::S3 {
+            preset: preset_for_tile(draft.provider)?,
+            region: draft.region.to_string(),
+            account_id: draft.account_id.to_string(),
+            endpoint: draft.endpoint.to_string(),
+            path_style: draft.path_style,
+            bucket: draft.bucket.to_string(),
+            key_id: draft.key_id.to_string(),
+            secret: secret.to_owned(),
+        })
+    }
+}
+
+/// Checks a form of any kind and returns every problem found, each with the name of its field
+/// (see [`field`]) and the text to show under it. `editing` is true when the form changes a saved
+/// site: a secret left empty then means "keep the saved one".
+///
+/// S3 addresses are checked by `httporter_s3::endpoint`, whose own sentences are the messages.
+#[allow(dead_code)] // Saving a site of any kind is wired in Task 24 (Ruling Q10).
+pub fn validate(form: &SiteForm, editing: bool) -> Result<(), Vec<(&'static str, String)>> {
+    let mut problems: Vec<(&'static str, String)> = Vec::new();
+    let mut flag = |name: &'static str, message: &str| problems.push((name, message.to_owned()));
+    match form {
+        SiteForm::BunnyPassword {
+            zone,
+            region_index,
+            password,
+        } => {
+            if let Some(problem) = zone_problem(zone.trim()) {
+                flag(field::ZONE, problem);
+            }
+            let known = usize::try_from(*region_index).is_ok_and(|i| i < REGIONS.len());
+            if !known {
+                flag(field::REGION, copy::CHOOSE_REGION);
+            }
+            if password.is_empty() && !editing {
+                flag(field::PASSWORD, copy::PASSWORD_MISSING);
+            }
+        }
+        SiteForm::BunnyAccount { key } => {
+            if key.trim().is_empty() && !editing {
+                flag(field::ACCOUNT_KEY, copy::ACCOUNT_KEY_MISSING);
+            }
+        }
+        SiteForm::S3 {
+            preset,
+            region,
+            account_id,
+            endpoint,
+            path_style,
+            bucket,
+            key_id,
+            secret,
+        } => {
+            if let Err(message) =
+                httporter_s3::endpoint(*preset, region, account_id, endpoint, *path_style)
+            {
+                let wrong = endpoint_error_field(*preset, account_id, endpoint, *path_style);
+                flag(wrong, &message);
+            }
+            if bucket.trim().is_empty() {
+                flag(field::BUCKET, copy::BUCKET_MISSING);
+            }
+            if key_id.trim().is_empty() {
+                flag(field::KEY_ID, copy::KEY_ID_MISSING);
+            }
+            if secret.is_empty() && !editing {
+                flag(field::SECRET, copy::SECRET_MISSING);
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// The field an error of `httporter_s3::endpoint` is about.
+#[allow(dead_code)] // Used by `validate`.
+fn endpoint_error_field(
+    preset: S3Preset,
+    account_id: &str,
+    endpoint: &str,
+    path_style: bool,
+) -> &'static str {
+    match preset {
+        S3Preset::CloudflareR2 => field::ACCOUNT_ID,
+        // These two take the address as typed and the region only if one is given, so an empty
+        // region always passes: when the address alone fails, the address is the problem.
+        S3Preset::Minio | S3Preset::Other => {
+            if httporter_s3::endpoint(preset, "", account_id, endpoint, path_style).is_err() {
+                field::ENDPOINT
+            } else {
+                field::REGION
+            }
+        }
+        S3Preset::AwsS3
+        | S3Preset::BackblazeB2
+        | S3Preset::Wasabi
+        | S3Preset::DigitalOceanSpaces => field::REGION,
+    }
+}
+
+/// The address the sheet shows for an S3 service and bucket, for example
+/// `https://my-bucket.s3.eu-west-1.amazonaws.com/`; empty while the fields cannot name one yet
+/// (no region, a malformed address, …). The sheet shows no error for that: [`validate`] does,
+/// when the user presses a button.
+pub fn s3_endpoint_preview(
+    preset: S3Preset,
+    region: &str,
+    account_id: &str,
+    endpoint: &str,
+    bucket: &str,
+    path_style: bool,
+) -> String {
+    match httporter_s3::endpoint(preset, region, account_id, endpoint, path_style) {
+        Ok(found) => httporter_s3::bucket_url(&found, bucket.trim()).to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// The preview for what the sheet reports through `add-site-s3-changed`.
+fn preview_of(draft: &SiteDraft) -> String {
+    match preset_for_tile(draft.provider) {
+        Some(preset) => s3_endpoint_preview(
+            preset,
+            &draft.region,
+            &draft.account_id,
+            &draft.endpoint,
+            &draft.bucket,
+            draft.path_style,
+        ),
+        None => String::new(),
+    }
+}
+
+/// Puts the zones of a Bunny account in the sheet's account key list: first the ones that can be
+/// added, each starting checked, then the ones that can't, greyed out with their reason. Row `i`
+/// of the sheet is `list.zones[i]` for `i < list.zones.len()`, which is how the `[bool]` of
+/// `add-site-zones-chosen` is read.
+#[allow(dead_code)] // Find Zones is answered with it in Task 24 (Ruling Q10).
+pub fn show_zones(ui: &AppWindow, list: &ZoneList) {
+    let usable = list.zones.iter().map(|zone| {
+        let hostnames: Vec<&str> = zone
+            .pull_zones
+            .iter()
+            .flat_map(|pull_zone| pull_zone.hostnames.iter().map(String::as_str))
+            .collect();
+        ZoneChoice {
+            name: zone.name.as_str().into(),
+            region: region_city(&zone.region).into(),
+            hostnames: hostnames.join(", ").into(),
+            usable: true,
+            reason: SharedString::new(),
+        }
+    });
+    let unusable = list.unusable.iter().map(|zone| ZoneChoice {
+        name: zone.name.as_str().into(),
+        region: SharedString::new(),
+        hostnames: SharedString::new(),
+        usable: false,
+        reason: zone.reason.as_str().into(),
+    });
+    let rows: Vec<ZoneChoice> = usable.chain(unusable).collect();
+    let checked: Vec<bool> = (0..rows.len()).map(|i| i < list.zones.len()).collect();
+    ui.set_add_site_zone_count(i32::try_from(list.zones.len()).unwrap_or(i32::MAX));
+    ui.set_add_site_zones(ModelRc::new(VecModel::from(rows)));
+    ui.set_add_site_zone_checked(ModelRc::new(VecModel::from(checked)));
+}
+
+/// Puts the bucket names the service listed in the sheet's bucket list.
+#[allow(dead_code)] // The Choose… button is answered with it in Task 24 (Ruling Q10).
+pub fn show_buckets(ui: &AppWindow, names: &[String]) {
+    let names: Vec<SharedString> = names.iter().map(|name| name.as_str().into()).collect();
+    ui.set_add_site_buckets(ModelRc::new(VecModel::from(names)));
+}
+
+/// The city a Bunny region code stands for ("Singapore"); the code itself when it is not known.
+#[allow(dead_code)] // Used by `show_zones`.
+fn region_city(code: &str) -> &str {
+    REGIONS
+        .iter()
+        .find(|(known, _)| *known == code)
+        .map_or(code, |(_, city)| city)
+}
+
+/// Wires the callbacks of the sheet that need no session: the address preview of an S3 service.
+/// The rest (Find Zones, the zone and bucket lists, Import, saving an S3 site) are answered in
+/// Task 24; until then the controls that raise them are turned off by `sites-v2-ready`
+/// (Ruling Q10).
+pub fn install(ui: &AppWindow) {
+    ui.on_add_site_s3_changed({
+        let weak = ui.as_weak();
+        move |draft| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_add_site_endpoint(preview_of(&draft).into());
+            }
+        }
+    });
 }
 
 /// Shows `error` under its field on the open sheet and clears the other two; `None` clears all.

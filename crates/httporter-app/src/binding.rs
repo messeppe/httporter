@@ -698,6 +698,15 @@ fn install_with(
         move || ctx.cancel_sheet()
     });
 
+    // The Add Site sheet's S3 address preview; the rest of its new callbacks wait for Task 24.
+    crate::add_site::install(ui);
+
+    // The transfer drawer: its idle state and callback stubs until the engine is wired (Task 23).
+    crate::drawer_view::install(ui);
+
+    // The sheets, alerts and banners: callback stubs until the engine is wired (Task 23).
+    crate::sheets_view::install(ui);
+
     if !sites.is_empty() {
         ui.set_selected_site(0);
         ctx.remote(RemoteOp::Select(0));

@@ -1,0 +1,651 @@
+// Transfer drawer (mockup `.drawer`, see Transfers.dc.html): a card at the bottom of the main area,
+// never a window of its own. Collapsed it is one line, the state in words and "Show Transfers".
+// Expanded it has the progress ring, the title and counts, the speed, the Active / Queued / Failed /
+// Done tabs with Pause and Cancel, and a virtualized list of rows with a kind icon, the path, the
+// size, a progress bar and a cancel button.
+//
+// It only shows what the app tells it and says what the user pressed: the row buttons hand back the
+// job's id. Keyboard: Tab reaches Show / Hide Transfers, the tabs, the buttons and each row's
+// buttons; Space or Return presses one. The right-click menu of a queued row has Move to Top and
+// Pause / Resume.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { FileKind, TransferRow } from "../types.slint";
+import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
+import { VCenter } from "layout.slint";
+
+// Round progress (mockup `.ring`): a track with a dot for each tenth of a turn that is done,
+// clockwise from the top. Dots, not an arc, because the software renderer draws no paths.
+export component ProgressRing inherits Rectangle {
+    // 0 to 100.
+    in property <float> percent;
+    in property <length> diameter: 34px;
+    property <length> stroke: root.diameter * 4 / 34;
+
+    width: root.diameter;
+    height: root.diameter;
+    border-radius: root.diameter / 2;
+    border-width: root.stroke;
+    border-color: Theme.chip;
+    accessible-role: progress-indicator;
+    accessible-label: @tr("{} percent done", Math.round(root.percent));
+
+    for k in 36: Rectangle {
+        property <angle> theta: k * 10deg;
+
+        width: root.stroke;
+        height: root.stroke;
+        x: root.diameter / 2 + (root.diameter - root.stroke) / 2 * Math.sin(self.theta) - root.stroke / 2;
+        y: root.diameter / 2 - (root.diameter - root.stroke) / 2 * Math.cos(self.theta) - root.stroke / 2;
+        border-radius: root.stroke / 2;
+        background: Theme.accent;
+        visible: k * 100 / 36 < root.percent;
+    }
+}
+
+// A button with no face of its own, in the accent colour (mockup `.btn.quiet`): Show Transfers and
+// Hide Transfers. Reachable with Tab, activated with Space or Return.
+component QuietButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    height: 28px;
+    border-radius: self.height / 2;
+    background: area.has-hover ? Theme.hover : transparent;
+    forward-focus: key-focus;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 4px;
+        alignment: center;
+
+        Text {
+            text: root.text;
+            color: Theme.accent-text;
+            font-size: Theme.font-body;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        VCenter {
+            Image {
+                source: root.icon;
+                colorize: Theme.accent-text;
+                width: 14px;
+                height: 14px;
+                accessible-role: none;
+            }
+        }
+    }
+
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// One tab of the strip (mockup `.tabs button`). Reachable with Tab, selected with Space or Return.
+component TabButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected: false;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    height: 24px;
+    border-radius: 6px;
+    background: root.selected ? Theme.control : (area.has-hover ? Theme.hover : transparent);
+    border-width: root.selected ? 0.5px : 0px;
+    border-color: Theme.control-border;
+    forward-focus: key-focus;
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        Text {
+            text: root.text;
+            color: Theme.label;
+            font-size: 12px;
+            font-weight: root.selected ? Theme.weight-semibold : 400;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// The number and the unit of one speed in the header (mockup `.stats`): the number in the label
+// colour, the unit in the secondary one.
+component Stat inherits HorizontalLayout {
+    in property <string> value;
+    in property <string> unit;
+
+    spacing: 3px;
+
+    Text {
+        text: root.value;
+        color: Theme.label;
+        font-size: 12px;
+        font-weight: Theme.weight-semibold;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.unit;
+        color: Theme.label2;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+}
+
+// The icon, the tint and the spoken name for each kind of file.
+export global KindStyle {
+    pure public function icon(kind: FileKind) -> image {
+        return kind == FileKind.folder ? Icons.folder : kind == FileKind.code ? Icons.code : kind == FileKind.image ? Icons.image : Icons.doc;
+    }
+    pure public function tint(kind: FileKind) -> color {
+        return kind == FileKind.folder ? Theme.folder : kind == FileKind.image ? Theme.green : Theme.label2;
+    }
+}
+
+// One row of the list (mockup `.qrow`): kind icon and path, then the progress bar (Active), the
+// reason (Failed) or "Paused" (Queued), the size, the percentage or Retry, and the cancel button.
+// A queued row also has the right-click menu.
+component TransferItem inherits Rectangle {
+    in property <TransferRow> item;
+    // 0 Active, 1 Queued, 2 Failed, 3 Done.
+    in property <int> tab;
+    in property <int> index;
+    in property <int> count;
+    callback cancel();
+    callback retry();
+    callback move-to-top();
+    callback pause();
+    callback resume();
+
+    property <int> percent: Math.round(root.item.percent);
+
+    height: 30px;
+    accessible-role: list-item;
+    accessible-label: root.tab == 0 ? @tr("{}, {}, {} percent", root.item.name, root.item.size, root.percent)
+        : root.tab == 1 ? (root.item.paused ? @tr("{}, {}, paused", root.item.name, root.item.size) : @tr("{}, {}, waiting", root.item.name, root.item.size))
+        : root.tab == 2 ? @tr("{}, {}, failed: {}", root.item.name, root.item.size, root.item.detail)
+        : @tr("{}, {}, done", root.item.name, root.item.size);
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+
+    ContextMenuArea {
+        enabled: root.tab == 1;
+        width: parent.width;
+        height: parent.height;
+
+        Menu {
+            MenuItem {
+                title: @tr("Move to Top");
+                activated => { root.move-to-top(); }
+            }
+            MenuItem {
+                title: root.item.paused ? @tr("Resume") : @tr("Pause");
+                activated => {
+                    if (root.item.paused) {
+                        root.resume();
+                    } else {
+                        root.pause();
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            width: parent.width;
+            height: parent.height;
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 12px;
+
+            Rectangle {
+                horizontal-stretch: 1;
+                min-width: 0px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    VCenter {
+                        Image {
+                            source: KindStyle.icon(root.item.kind);
+                            colorize: KindStyle.tint(root.item.kind);
+                            width: 14px;
+                            height: 14px;
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        text: root.item.name;
+                        color: Theme.label;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        accessible-role: none;
+                    }
+                }
+            }
+
+            // The progress bar (mockup `.bar`), or what is to be said instead of one.
+            Rectangle {
+                width: root.tab == 2 ? 240px : 160px;
+
+                if root.tab == 0: VCenter {
+                    Rectangle {
+                        height: 6px;
+                        border-radius: 3px;
+                        background: Theme.chip;
+                        clip: true;
+
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * Math.min(Math.max(root.item.percent, 0), 100) / 100;
+                            border-radius: 3px;
+                            background: Theme.accent;
+                        }
+                    }
+                }
+                if root.tab == 1 || root.tab == 2: Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.item.detail;
+                    color: root.tab == 2 ? Theme.red : Theme.label2;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+
+            Text {
+                text: root.item.size;
+                width: 70px;
+                color: Theme.label2;
+                font-size: 12px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+
+            Rectangle {
+                width: 60px;
+
+                if root.tab == 0: Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: @tr("{}%", root.percent);
+                    color: Theme.label2;
+                    font-size: 12px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+                if root.tab == 2: VCenter {
+                    CapsuleButton {
+                        height: 22px;
+                        text: @tr("Retry");
+                        clicked => { root.retry(); }
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 24px;
+
+                if root.tab == 0 || root.tab == 1: VCenter {
+                    ToolButton {
+                        width: 24px;
+                        height: 22px;
+                        icon: Icons.x;
+                        label: @tr("Cancel {}", root.item.name);
+                        clicked => { root.cancel(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // The hairline under the row (mockup: border-bottom).
+    Rectangle {
+        y: parent.height - self.height;
+        height: 1px;
+        background: Theme.sep;
+    }
+}
+
+export component TransferDrawer inherits Rectangle {
+    // Expanded or collapsed. The Show / Hide Transfers button flips it.
+    in-out property <bool> open: false;
+    // The tab shown: 0 Active, 1 Queued, 2 Failed, 3 Done.
+    in-out property <int> tab: 0;
+    // The engine has work (running, paused or stopped), not idle.
+    in property <bool> running;
+    in property <bool> paused;
+    in property <string> collapsed-text;
+    in property <string> title;
+    in property <string> line;
+    // The numbers of the speeds, without their units, and the time left (empty when not known).
+    in property <string> files-per-s;
+    in property <string> mb-per-s;
+    in property <string> eta;
+    // Overall progress, 0 to 100.
+    in property <float> percent;
+    // "Active 32", "Queued 5,349", "Failed 0", "Done 8,412".
+    in property <[string]> tab-titles;
+    in property <[TransferRow]> active-rows;
+    in property <[TransferRow]> queued-rows;
+    in property <[TransferRow]> failed-rows;
+    in property <[TransferRow]> done-rows;
+
+    callback toggle();
+    callback pause();
+    callback resume();
+    callback cancel-all();
+    // The row buttons carry the job's id.
+    callback cancel(int);
+    callback retry(int);
+    callback retry-failed();
+    callback move-to-top(int);
+    callback pause-row(int);
+    callback resume-row(int);
+
+    property <[TransferRow]> shown-rows: root.tab == 0 ? root.active-rows : (root.tab == 1 ? root.queued-rows : (root.tab == 2 ? root.failed-rows : root.done-rows));
+    // The list shows up to six rows and leaves room for one line when it is empty.
+    property <length> list-height: Math.min(Math.max(root.shown-rows.length, 1), 6) * 30px;
+    // The header: 10 px of padding round the ring's row (34 px), 8 px, and the tabs' row (28 px).
+    property <length> head-height: 90px;
+
+    background: Theme.content;
+    border-radius: Theme.radius-md;
+    border-width: 0.5px;
+    border-color: Theme.sep-strong;
+    clip: true;
+    height: root.open ? root.head-height + root.list-height + 1px : 48px;
+    accessible-role: groupbox;
+    accessible-label: @tr("Transfers");
+
+    // Collapsed: the state in words, and Show Transfers.
+    if !root.open: HorizontalLayout {
+        width: parent.width;
+        height: parent.height;
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 10px;
+
+        VCenter {
+            if root.running: ProgressRing {
+                diameter: 20px;
+                percent: root.percent;
+            }
+            if !root.running: Image {
+                source: Icons.check;
+                colorize: Theme.green;
+                width: 16px;
+                height: 16px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.collapsed-text;
+            horizontal-stretch: 1;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            font-weight: root.running ? Theme.weight-semibold : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        VCenter {
+            QuietButton {
+                text: @tr("Show Transfers");
+                icon: Icons.chev-u;
+                clicked => {
+                    root.open = true;
+                    root.toggle();
+                }
+            }
+        }
+    }
+
+    // Expanded: the header, then the list.
+    if root.open: VerticalLayout {
+        width: parent.width;
+        height: parent.height;
+
+        VerticalLayout {
+            height: root.head-height;
+            padding: 10px;
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 8px;
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                VCenter {
+                    ProgressRing {
+                        diameter: 34px;
+                        percent: root.percent;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    alignment: center;
+
+                    Text {
+                        text: root.title;
+                        color: Theme.label;
+                        font-size: Theme.font-body;
+                        font-weight: Theme.weight-semibold;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.line;
+                        color: Theme.label2;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+                if root.running: VCenter {
+                    HorizontalLayout {
+                        spacing: 16px;
+
+                        Stat {
+                            value: root.files-per-s;
+                            unit: @tr("files/s");
+                        }
+                        Stat {
+                            value: root.mb-per-s;
+                            unit: @tr("MB/s");
+                        }
+                        if root.eta != "": HorizontalLayout {
+                            spacing: 3px;
+
+                            Text {
+                                text: @tr("about");
+                                color: Theme.label2;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.eta;
+                                color: Theme.label;
+                                font-size: 12px;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: @tr("left");
+                                color: Theme.label2;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                VCenter {
+                    QuietButton {
+                        text: @tr("Hide Transfers");
+                        icon: Icons.chev-d;
+                        clicked => {
+                            root.open = false;
+                            root.toggle();
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                if root.tab == 2 && root.failed-rows.length > 0: CapsuleButton {
+                    text: @tr("Retry All");
+                    icon: Icons.refresh;
+                    clicked => { root.retry-failed(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                // The tabs (mockup `.tabs`): a capsule tray with the chosen tab raised.
+                Rectangle {
+                    height: 28px;
+                    border-radius: 8px;
+                    background: Theme.chip;
+                    accessible-role: tab-list;
+
+                    HorizontalLayout {
+                        padding: 2px;
+                        spacing: 2px;
+
+                        for name[i] in root.tab-titles: TabButton {
+                            text: name;
+                            selected: i == root.tab;
+                            clicked => { root.tab = i; }
+                        }
+                    }
+                }
+                if !root.paused: CapsuleButton {
+                    text: @tr("Pause");
+                    icon: Icons.pause;
+                    enabled: root.running;
+                    clicked => { root.pause(); }
+                }
+                if root.paused: CapsuleButton {
+                    text: @tr("Resume");
+                    clicked => { root.resume(); }
+                }
+                CapsuleButton {
+                    text: @tr("Cancel");
+                    enabled: root.running;
+                    clicked => { root.cancel-all(); }
+                }
+            }
+        }
+
+        // The list, with a hairline above it. The list view insets its content by 2 px on every
+        // side; it reaches out by that much so that the rows run edge to edge.
+        Rectangle {
+            height: root.list-height + 1px;
+
+            Rectangle {
+                height: 1px;
+                background: Theme.sep;
+            }
+            Rectangle {
+                y: 1px;
+                height: parent.height - 1px;
+                clip: true;
+
+                if root.shown-rows.length == 0: Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.tab == 0 ? @tr("Nothing is transferring.") : (root.tab == 1 ? @tr("Nothing is waiting.") : (root.tab == 2 ? @tr("Nothing has failed.") : @tr("Nothing has finished yet.")));
+                    color: Theme.label2;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                ListView {
+                    x: -2px;
+                    y: -2px;
+                    width: parent.width + 4px;
+                    height: parent.height + 4px;
+                    accessible-label: root.tab-titles[root.tab];
+                    accessible-item-count: root.shown-rows.length;
+
+                    for entry[i] in root.shown-rows: TransferItem {
+                        item: entry;
+                        tab: root.tab;
+                        index: i;
+                        count: root.shown-rows.length;
+                        cancel => { root.cancel(entry.id); }
+                        retry => { root.retry(entry.id); }
+                        move-to-top => { root.move-to-top(entry.id); }
+                        pause => { root.pause-row(entry.id); }
+                        resume => { root.resume-row(entry.id); }
+                    }
+                }
+            }
+        }
+    }
+}

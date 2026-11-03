@@ -25,6 +25,36 @@ export struct SiteItem {
     healthy: bool,
 }
 
+// One row of the transfer drawer. `id` is the job's id in the engine (what the row's buttons hand
+// back), `percent` runs 0 to 100, and `detail` is the Failed tab's reason or a queued row's
+// "Paused". `paused` is a queued job paused on its own: its menu then offers Resume.
+export struct TransferRow {
+    id: int,
+    name: string,
+    kind: FileKind,
+    size: string,
+    percent: float,
+    detail: string,
+    paused: bool,
+}
+
+// Whether the two files of a conflict hold the same contents (the conflict sheet's Contents column);
+// `unknown` when neither side had a digest to tell by.
+export enum ConflictContents { identical, different, unknown }
+
+// One row of the conflict sheet. `source` and `target` are the sides as "357.2 KB · Today 09:58":
+// the side the files come from and the side they go to. `contents` is the word for `same`, and
+// `action` is the row's choice: 0 Replace, 1 Skip, 2 Keep both.
+export struct ConflictRow {
+    name: string,
+    kind: FileKind,
+    source: string,
+    target: string,
+    contents: string,
+    same: ConflictContents,
+    action: int,
+}
+
 // Where a pane is in the window, in logical pixels, for telling what a point is over (a dragged
 // file's position, see src/drop_hook.rs). `list-top` is the top edge of the list, where its first
 // row starts when it is not scrolled; `scroll-y` is how far it is scrolled down (0 or more).
@@ -37,4 +67,48 @@ export struct PaneBounds {
     row-height: length,
     scroll-y: length,
     rows: int,
+}
+
+// One storage zone in the list the Add Site sheet shows after Find Zones (Bunny account key). The
+// sheet writes "{name} · {region} · {hostnames}" for a zone that can be added and greys out the
+// others with their `reason`. Which zones are ticked lives apart from the zones, in the sheet's
+// `[bool]` of the same length.
+export struct ZoneChoice {
+    name: string,
+    // The city of the zone's region, for example "Singapore".
+    region: string,
+    // The hostnames of the pull zones in front of it, joined with ", "; empty for none.
+    hostnames: string,
+    // False for a zone the account has but that can't be added.
+    usable: bool,
+    reason: string,
+}
+
+// The fields of the Add Site sheet that are not secret. The app hands one to the sheet to start
+// from (editing or duplicating a site, `provider` being the tile of the provider grid: 0 Bunny,
+// then the S3 services in the order of the grid), and the sheet reports one back with the
+// secret in a separate string, so that no secret is ever kept in a struct that is passed around.
+export struct SiteDraft {
+    provider: int,
+    name: string,
+    zone: string,
+    // Position in the Bunny region list.
+    region-index: int,
+    // The S3 region as typed.
+    region: string,
+    account-id: string,
+    endpoint: string,
+    path-style: bool,
+    bucket: string,
+    key-id: string,
+}
+
+// The messages under the S3 fields of the Add Site sheet; an empty one shows nothing.
+export struct S3Errors {
+    region: string,
+    account-id: string,
+    endpoint: string,
+    bucket: string,
+    key-id: string,
+    secret: string,
 }

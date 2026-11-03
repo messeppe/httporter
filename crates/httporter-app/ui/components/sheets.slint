@@ -1,0 +1,1052 @@
+// Sheets, alerts and banners (mockups `Conflicts.dc.html`, `DeleteAlert.dc.html`).
+//
+// - The conflict sheet and the New Folder sheet hang from the toolbar, centred under it.
+// - The delete, Remove Site and quit alerts are small cards in the middle of the window.
+// - The banners are strips above the panes that say what is wrong and offer a way out.
+//
+// Everything here only shows what the app tells it and says what the user pressed; nothing is
+// decided here. A sheet or alert is modal, like the Add Site sheet: the scrim swallows the
+// pointer, the keyboard focus stays inside (Tab and Shift+Tab wrap around), Escape cancels and
+// Return presses the default button. In the alerts the default button is the harmless one (Cancel,
+// Keep Running); the delete button is in the destructive style and never the default.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { ConflictContents, ConflictRow } from "../types.slint";
+import { CapsuleButton } from "buttons.slint";
+import { Chip } from "chips.slint";
+import { KindStyle } from "drawer.slint";
+import { ErrorLine, Field, FormRow, RegionPicker } from "form_controls.slint";
+import { VCenter } from "layout.slint";
+
+// The column widths of the conflict table, shared by its header and its rows.
+global Cols {
+    out property <length> date: 164px;
+    out property <length> contents: 92px;
+    out property <length> action: 150px;
+}
+
+// The scrim and the keyboard trap of a modal dialog. The dialog goes in as the children and
+// places itself in the window. It reports the keys it takes: Escape (`cancel`), Return when no
+// control took it (`confirm`, the default button) and Tab and Shift+Tab at the ends of the Tab
+// order (`focus-first`, `focus-last`). The dialog says where the focus is with `at-first-stop` and
+// `at-last-stop`.
+component Modal inherits Rectangle {
+    // The focus is on the first control of the dialog.
+    in property <bool> at-first-stop;
+    // The focus is on the last control of the dialog.
+    in property <bool> at-last-stop;
+    callback cancel();
+    callback confirm();
+    callback focus-first();
+    callback focus-last();
+
+    background: Theme.scrim;
+
+    // Swallows the pointer: nothing behind the dialog sees a click, hover or scroll.
+    TouchArea {
+        scroll-event(event) => { accept }
+    }
+
+    // Not a Tab stop itself; it takes the focus when blank space on the dialog is clicked.
+    trap := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel();
+                return accept;
+            }
+            if (event.text == Key.Return && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta) {
+                // A held Return (for example the one that opened the dialog) must not press the
+                // default button over and over.
+                if (!event.repeat) {
+                    root.confirm();
+                }
+                return accept;
+            }
+            if (event.text == Key.Tab && !event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && root.at-last-stop) {
+                root.focus-first();
+                return accept;
+            }
+            if ((event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && (root.at-first-stop || trap.has-focus)) {
+                root.focus-last();
+                return accept;
+            }
+            return reject;
+        }
+
+        @children
+    }
+}
+
+// A sheet that hangs from the toolbar (the way a macOS sheet hangs from the title bar): flat at
+// the top, rounded below. It fills its parent and draws the sheet centred under the toolbar, as
+// high as its content and as wide as `sheet-width` allows.
+component AttachedSheet inherits Rectangle {
+    in property <length> sheet-width: 460px;
+    // What assistive technology calls the sheet.
+    in property <string> label;
+
+    sheet := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: Theme.toolbar-height;
+        width: min(root.sheet-width, parent.width - 32px);
+        height: content.preferred-height;
+        // The card reaches up past the top edge by its corner radius, so that this clip cuts the
+        // rounded top corners off.
+        clip: true;
+
+        Rectangle {
+            y: -Theme.radius-xl;
+            height: parent.height + Theme.radius-xl;
+            background: Theme.sheet;
+            border-radius: Theme.radius-xl;
+            border-width: 0.5px;
+            border-color: Theme.sep-strong;
+            accessible-role: form;
+            accessible-label: root.label;
+
+            content := VerticalLayout {
+                y: Theme.radius-xl;
+                height: sheet.height;
+                @children
+            }
+        }
+    }
+}
+
+// An alert (mockup `.alert`): a compact card in the middle of the window with a tinted tile, a
+// bold title, a line of text and then whatever the alert puts under them (the children). It fills
+// its parent and draws the card centred.
+component AlertCard inherits Rectangle {
+    in property <image> icon;
+    in property <color> tint;
+    in property <color> tint-soft;
+    in property <string> title;
+    in property <string> body;
+
+    card := Rectangle {
+        width: min(340px, parent.width - 32px);
+        height: content.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.sheet;
+        border-radius: Theme.radius-xl;
+        border-width: 0.5px;
+        border-color: Theme.sep-strong;
+        drop-shadow-blur: 64px;
+        drop-shadow-offset-y: 24px;
+        drop-shadow-color: Theme.shadow-sheet;
+        accessible-role: form;
+        accessible-label: root.title;
+        accessible-description: root.body;
+
+        content := VerticalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            padding-top: 22px;
+            padding-bottom: 16px;
+            spacing: 10px;
+
+            HorizontalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: 56px;
+                    height: 56px;
+                    border-radius: 14px;
+                    background: root.tint-soft;
+
+                    Image {
+                        source: root.icon;
+                        colorize: root.tint;
+                        width: 30px;
+                        height: 30px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        accessible-role: none;
+                    }
+                }
+            }
+            Text {
+                text: root.title;
+                color: Theme.label;
+                font-size: Theme.font-body;
+                font-weight: Theme.weight-bold;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            Text {
+                text: root.body;
+                color: Theme.label2;
+                font-size: 12px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+            @children
+        }
+    }
+}
+
+// A checkbox with a label (mockup `.check`). Space toggles it; Return is left to the dialog's
+// default button.
+component CheckRow inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: Theme.font-body;
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback toggled(bool);
+
+    function toggle() {
+        if (root.enabled) {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+
+    height: 20px;
+    forward-focus: key-focus;
+    opacity: root.enabled ? 1 : 0.5;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.toggle(); }
+
+    HorizontalLayout {
+        spacing: 8px;
+
+        VCenter {
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 4px;
+                background: root.checked ? Theme.accent : Theme.field;
+                border-width: 1px;
+                border-color: root.checked ? Theme.accent : Theme.field-border;
+
+                Image {
+                    source: Icons.check;
+                    colorize: Theme.on-accent;
+                    width: 10px;
+                    height: 10px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    visible: root.checked;
+                    accessible-role: none;
+                }
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.label;
+            font-size: root.font-size;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside like the buttons' ring.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: 8px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && event.text == Key.Space) {
+                if (!event.repeat) {
+                    root.toggle();
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggle(); }
+    }
+}
+
+// A segmented control (mockup `.seg`): one option is chosen. One Tab stop; Left and Right (or Up
+// and Down) move the choice.
+export component Segmented inherits Rectangle {
+    in property <[string]> options;
+    // What assistive technology calls the group.
+    in property <string> label;
+    in-out property <int> current: 0;
+    out property <bool> has-focus: key-focus.has-focus;
+    // The user chose another option.
+    callback selected(int);
+
+    function select(index: int) {
+        if (index >= 0 && index < root.options.length && index != root.current) {
+            root.current = index;
+            root.selected(index);
+        }
+    }
+
+    height: 28px;
+    background: Theme.chip;
+    border-radius: 8px;
+    forward-focus: key-focus;
+    accessible-role: radio-group;
+    accessible-label: root.label;
+
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+
+        for option[i] in root.options: Rectangle {
+            border-radius: 6px;
+            background: i == root.current ? Theme.control : transparent;
+            border-width: i == root.current ? 0.5px : 0px;
+            border-color: Theme.control-border;
+            accessible-role: radio-button;
+            accessible-checkable: true;
+            accessible-checked: i == root.current;
+            accessible-label: option;
+            accessible-action-default => { root.select(i); }
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+
+                Text {
+                    text: option;
+                    color: Theme.label;
+                    font-size: Theme.font-body;
+                    font-weight: i == root.current ? Theme.weight-semibold : 400;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+
+            TouchArea {
+                clicked => {
+                    key-focus.focus();
+                    root.select(i);
+                }
+            }
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.LeftArrow || event.text == Key.UpArrow) {
+                root.select(root.current - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow || event.text == Key.DownArrow) {
+                root.select(root.current + 1);
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+// The action menu of one conflict row (mockup `select.input`): Replace, Skip or Keep both. The
+// app (or the sheet's default action) may change `action` too, so the picker follows it.
+component ActionPicker inherits Rectangle {
+    // The file, for assistive technology.
+    in property <string> name;
+    // 0 Replace, 1 Skip, 2 Keep both.
+    in property <int> action;
+    // Skip is said as "Skip (identical)": the default action leaves an identical file alone.
+    in property <bool> skip-is-identical;
+    // The user chose an action.
+    callback chosen(int);
+
+    height: 26px;
+
+    init => { picker.current-index = root.action; }
+    changed action => { picker.current-index = root.action; }
+
+    picker := RegionPicker {
+        width: parent.width;
+        height: parent.height;
+        model: [@tr("Replace"), root.skip-is-identical ? @tr("Skip (identical)") : @tr("Skip"), @tr("Keep both")];
+        label: @tr("Action for {}", root.name);
+        selected(index) => { root.chosen(index); }
+    }
+}
+
+// One row of the conflict table (mockup `.row`): the file, its two sides, whether they hold the
+// same contents, and the action to take.
+component ConflictItem inherits Rectangle {
+    in property <ConflictRow> item;
+    in property <int> index;
+    in property <int> count;
+    // The sheet's default action: 0 Replace if different, 1 Replace all, 2 Skip all, 3 Keep both.
+    in property <int> mode;
+    callback chosen(int);
+
+    height: 36px;
+    background: Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent;
+    accessible-role: list-item;
+    accessible-label: root.item.name;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 0px;
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                VCenter {
+                    Image {
+                        source: KindStyle.icon(root.item.kind);
+                        colorize: KindStyle.tint(root.item.kind);
+                        width: 14px;
+                        height: 14px;
+                        accessible-role: none;
+                    }
+                }
+                Text {
+                    text: root.item.name;
+                    color: Theme.label;
+                    font-size: Theme.font-body;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+        }
+        Text {
+            width: Cols.date;
+            text: root.item.source;
+            color: Theme.label2;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            width: Cols.date;
+            text: root.item.target;
+            color: Theme.label2;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle {
+            width: Cols.contents;
+
+            HorizontalLayout {
+                alignment: start;
+
+                VCenter {
+                    Chip {
+                        text: root.item.contents;
+                        fg: root.item.same == ConflictContents.different ? Theme.orange : Theme.label2;
+                        bg: root.item.same == ConflictContents.different ? Theme.orange-soft : Theme.chip;
+                    }
+                }
+            }
+        }
+        VCenter {
+            ActionPicker {
+                width: Cols.action;
+                name: root.item.name;
+                action: root.item.action;
+                skip-is-identical: root.mode == 0 && root.item.same == ConflictContents.identical;
+                chosen(action) => { root.chosen(action); }
+            }
+        }
+    }
+}
+
+// The sheet that asks what to do with files that already exist where a transfer would put them
+// (mockup `Conflicts.dc.html`). The default action applies to every row at once (the app sets the
+// rows' actions through `mode-changed`); a row's own menu overrides it. Continue gives back the
+// default action and whether to remember it; the rows' actions are read from `rows`.
+export component ConflictSheet inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    in property <string> for-all-label;
+    // "7 differ · 5 identical (same SHA-256)".
+    in property <string> summary;
+    // The headings of the two sides' columns, the side the files come from first.
+    in property <string> col-source;
+    in property <string> col-target;
+    in property <string> remember-label;
+    in property <string> cancel-label;
+    in-out property <[ConflictRow]> rows;
+    // The default action was changed: 0 Replace if different, 1 Replace all, 2 Skip all, 3 Keep
+    // both. The app answers by setting the rows' actions to match.
+    callback mode-changed(int);
+    // Continue was pressed: the default action and whether to remember it.
+    callback continued(int, bool);
+    callback cancelled();
+
+    property <int> mode: 0;
+    property <bool> remember: true;
+    // As many rows as fit under the toolbar with the rest of the sheet (about 330 px), and at
+    // least three.
+    property <length> table-height: min(root.rows.length * 36px, max(108px, root.height - Theme.toolbar-height - 330px));
+
+    init => { mode-control.focus(); }
+
+    Modal {
+        at-first-stop: mode-control.has-focus;
+        at-last-stop: continue-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.continued(root.mode, root.remember); }
+        focus-first => { mode-control.focus(); }
+        focus-last => { continue-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 820px;
+            label: root.title;
+
+            // Header: the warning tile, the title and what the sheet is for.
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 20px;
+                padding-bottom: 12px;
+                spacing: 14px;
+
+                Rectangle {
+                    width: 44px;
+                    height: 44px;
+                    border-radius: 11px;
+                    background: Theme.orange-soft;
+
+                    Image {
+                        source: Icons.warn;
+                        colorize: Theme.orange;
+                        width: 26px;
+                        height: 26px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        accessible-role: none;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+
+                    Text {
+                        text: root.title;
+                        color: Theme.label;
+                        font-size: 17px;
+                        font-weight: Theme.weight-semibold;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: root.body;
+                        color: Theme.label2;
+                        font-size: Theme.font-body;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // Body: the default action and the table of files.
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-bottom: 12px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    VCenter {
+                        Text {
+                            text: root.for-all-label;
+                            color: Theme.label2;
+                            font-size: Theme.font-body;
+                        }
+                    }
+                    VCenter {
+                        mode-control := Segmented {
+                            options: [@tr("Replace if different"), @tr("Replace all"), @tr("Skip all"), @tr("Keep both")];
+                            label: @tr("Default action");
+                            current <=> root.mode;
+                            selected(index) => { root.mode-changed(index); }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    VCenter {
+                        Text {
+                            text: root.summary;
+                            color: Theme.label2;
+                            font-size: 12px;
+                            horizontal-alignment: right;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 27px + root.table-height;
+                    background: Theme.content;
+                    border-radius: Theme.radius-md;
+                    border-width: 0.5px;
+                    border-color: Theme.sep-strong;
+                    clip: true;
+
+                    // Column headings.
+                    Rectangle {
+                        height: 27px;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            spacing: 8px;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                text: @tr("Name");
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                width: Cols.date;
+                                text: root.col-source;
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                width: Cols.date;
+                                text: root.col-target;
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                width: Cols.contents;
+                                text: @tr("Contents");
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                width: Cols.action;
+                                text: @tr("Action");
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Theme.sep;
+                        }
+                    }
+
+                    // The rows. The list view insets its content by 2 px on every side; it reaches
+                    // out by that much so that the rows run edge to edge.
+                    Rectangle {
+                        y: 27px;
+                        height: parent.height - 27px;
+                        clip: true;
+
+                        ListView {
+                            x: -2px;
+                            y: -2px;
+                            width: parent.width + 4px;
+                            height: parent.height + 4px;
+                            accessible-label: @tr("Files that already exist");
+                            accessible-item-count: root.rows.length;
+
+                            for entry[i] in root.rows: ConflictItem {
+                                item: entry;
+                                index: i;
+                                count: root.rows.length;
+                                mode: root.mode;
+                                chosen(action) => { root.rows[i].action = action; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Footer: remember to the left, Cancel and the default button, Continue, to the right.
+            Rectangle {
+                height: 1px;
+                background: Theme.sep;
+            }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+
+                VCenter {
+                    CheckRow {
+                        text: root.remember-label;
+                        checked <=> root.remember;
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                cancel-button := CapsuleButton {
+                    text: root.cancel-label;
+                    clicked => { root.cancelled(); }
+                }
+                continue-button := CapsuleButton {
+                    text: @tr("Continue");
+                    primary: true;
+                    clicked => { root.continued(root.mode, root.remember); }
+                }
+            }
+        }
+    }
+}
+
+// The New Folder sheet: one field, named at first `initial-name` with all of it selected so that
+// typing replaces it. Create hands the name back and leaves the sheet open; the app checks it,
+// shows what is wrong in `error` or closes the sheet. Editing the name clears the message.
+export component NewFolderSheet inherits Rectangle {
+    in property <string> initial-name;
+    in-out property <string> error;
+    callback create(string);
+    callback cancelled();
+
+    function submit() {
+        root.create(name-field.text);
+    }
+
+    // A message sends the user back to the field.
+    changed error => {
+        if (root.error != "") {
+            name-field.focus();
+        }
+    }
+
+    init => {
+        root.error = "";
+        name-field.text = root.initial-name;
+        name-field.focus();
+        name-field.select-all();
+    }
+
+    Modal {
+        at-first-stop: name-field.has-focus;
+        at-last-stop: create-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.submit(); }
+        focus-first => { name-field.focus(); }
+        focus-last => { create-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 440px;
+            label: @tr("New Folder");
+
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 20px;
+
+                Text {
+                    text: @tr("New Folder");
+                    color: Theme.label;
+                    font-size: 17px;
+                    font-weight: Theme.weight-semibold;
+                    accessible-role: none;
+                }
+            }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 16px;
+                padding-bottom: 14px;
+
+                FormRow {
+                    label: @tr("Name");
+                    name-field := Field {
+                        label: @tr("Name");
+                        error: root.error;
+                        edited => { root.error = ""; }
+                        accepted => { root.submit(); }
+                    }
+                    if root.error != "": ErrorLine { text: root.error; }
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.sep;
+            }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+                alignment: end;
+
+                cancel-button := CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                create-button := CapsuleButton {
+                    text: @tr("Create");
+                    primary: true;
+                    clicked => { root.submit(); }
+                }
+            }
+        }
+    }
+}
+
+// The delete alert (mockup `DeleteAlert.dc.html`): what goes and that it can't be undone. Cancel
+// is the default button (Return and Escape press it, and it has the focus); the delete button is
+// red and never the default. The CDN purge choice is shown turned off until Publish exists.
+export component DeleteAlert inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    // "Delete 48 Files".
+    in property <string> delete-label;
+    callback confirmed();
+    callback cancelled();
+
+    init => { cancel-button.focus(); }
+
+    Modal {
+        at-first-stop: delete-button.has-focus;
+        at-last-stop: cancel-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.cancelled(); }
+        focus-first => { delete-button.focus(); }
+        focus-last => { cancel-button.focus(); }
+
+        AlertCard {
+            icon: Icons.trash;
+            tint: Theme.red;
+            tint-soft: Theme.red-soft;
+            title: root.title;
+            body: root.body;
+
+            VerticalLayout {
+                spacing: 2px;
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    CheckRow {
+                        text: @tr("Also purge these URLs from the CDN");
+                        font-size: 12px;
+                        enabled: false;
+                    }
+                }
+                Text {
+                    text: @tr("CDN purge arrives with Publish.");
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    horizontal-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+
+                delete-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: root.delete-label;
+                    destructive: true;
+                    clicked => { root.confirmed(); }
+                }
+                cancel-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: @tr("Cancel");
+                    primary: true;
+                    clicked => { root.cancelled(); }
+                }
+            }
+        }
+    }
+}
+
+// The Remove Site alert: forgetting a site is not undoable either, so it is laid out like the
+// delete alert, with Cancel as the default.
+export component RemoveSiteAlert inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    callback confirmed();
+    callback cancelled();
+
+    init => { cancel-button.focus(); }
+
+    Modal {
+        at-first-stop: remove-button.has-focus;
+        at-last-stop: cancel-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.cancelled(); }
+        focus-first => { remove-button.focus(); }
+        focus-last => { cancel-button.focus(); }
+
+        AlertCard {
+            icon: Icons.cloud;
+            tint: Theme.red;
+            tint-soft: Theme.red-soft;
+            title: root.title;
+            body: root.body;
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                remove-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: @tr("Remove");
+                    destructive: true;
+                    clicked => { root.confirmed(); }
+                }
+                cancel-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: @tr("Cancel");
+                    primary: true;
+                    clicked => { root.cancelled(); }
+                }
+            }
+        }
+    }
+}
+
+// The alert for closing the window while transfers are still running: pause them for next time,
+// give them up, or carry on. Keep Running is the default (Return and Escape press it).
+export component QuitAlert inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    callback pause-and-quit();
+    callback cancel-and-quit();
+    callback keep-running();
+
+    init => { keep-button.focus(); }
+
+    Modal {
+        at-first-stop: pause-button.has-focus;
+        at-last-stop: keep-button.has-focus;
+        cancel => { root.keep-running(); }
+        confirm => { root.keep-running(); }
+        focus-first => { pause-button.focus(); }
+        focus-last => { keep-button.focus(); }
+
+        AlertCard {
+            icon: Icons.warn;
+            tint: Theme.orange;
+            tint-soft: Theme.orange-soft;
+            title: root.title;
+            body: root.body;
+
+            VerticalLayout {
+                spacing: 8px;
+
+                pause-button := CapsuleButton {
+                    text: @tr("Pause and Quit");
+                    clicked => { root.pause-and-quit(); }
+                }
+                CapsuleButton {
+                    text: @tr("Cancel and Quit");
+                    destructive: true;
+                    clicked => { root.cancel-and-quit(); }
+                }
+                keep-button := CapsuleButton {
+                    text: @tr("Keep Running");
+                    primary: true;
+                    clicked => { root.keep-running(); }
+                }
+            }
+        }
+    }
+}
+
+// A strip above the panes (the look of the error banner): a mark, one message, and the children,
+// which are its buttons, at the right. The message is a live region, so assistive technology
+// announces it when it appears.
+export component Banner inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <color> fg;
+    in property <color> bg;
+
+    background: root.bg;
+    border-radius: Theme.radius-sm;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 8px;
+
+        VCenter {
+            Image {
+                source: root.icon;
+                colorize: root.fg;
+                width: 16px;
+                height: 16px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: root.fg;
+            font-size: Theme.font-body;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            accessible-live-region: polite;
+        }
+        VCenter {
+            HorizontalLayout {
+                spacing: 8px;
+                @children
+            }
+        }
+    }
+}

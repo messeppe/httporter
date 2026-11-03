@@ -135,9 +135,9 @@ export component Sidebar inherits Rectangle {
                     padding-right: 8px;
 
                     Text {
-                        text: @tr("No sites yet");
+                        text: @tr("No sites yet. Add one to start browsing and publishing.");
                         color: Theme.label2;
-                        font-size: Theme.font-small;
+                        font-size: 12px;
                         wrap: word-wrap;
                     }
                 }
@@ -145,6 +145,18 @@ export component Sidebar inherits Rectangle {
                     site: site;
                     selected: i == root.selected-site;
                     clicked => { root.site-selected(i); }
+                }
+                if root.sites.length == 0: SectionTitle { text: @tr("Publish"); }
+                if root.sites.length == 0: HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+
+                    Text {
+                        text: @tr("Publish profiles appear here after you add a site.");
+                        color: Theme.label2;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
                 }
             }
         }

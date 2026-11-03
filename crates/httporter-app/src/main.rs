@@ -15,11 +15,15 @@ use slint::Model;
 mod add_site;
 mod binding;
 mod copy;
+mod drawer_view;
 mod drop_hook;
 mod format;
+mod import;
 mod local_fs;
 mod selection;
 mod session;
+mod settings_view;
+mod sheets_view;
 mod sort;
 mod viewmodel;
 

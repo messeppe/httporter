@@ -242,7 +242,7 @@ pub fn local_crumbs(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-fn slint_kind(kind: FileKindData) -> FileKind {
+pub(crate) fn slint_kind(kind: FileKindData) -> FileKind {
     match kind {
         FileKindData::Folder => FileKind::Folder,
         FileKindData::Code => FileKind::Code,
