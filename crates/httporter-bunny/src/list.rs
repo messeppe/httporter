@@ -1,5 +1,12 @@
 //! Directory listings: at most five at once, each try with its own time limit
 //! ([`crate::BunnyConfig::list_timeout`]) and retries ([`crate::BunnyConfig::list_retry`]).
+//!
+//! What the live probe (Task 7) showed about them:
+//! - a listing is one JSON array with every child, however many: a folder of 1,050 files came
+//!   back whole (about 530 KB). There are no pages (`page=` belongs to the account API);
+//! - an empty folder is `200 []`, and so is a folder that is not there, a file listed as a
+//!   folder, or a folder under a missing parent. Bunny never answers 404 to a listing, so an
+//!   empty answer is checked against the parent (see [`BunnyStorage::list_dir`]).
 
 use httporter_core::{Entry, Listing, ProviderError, RemotePath, RequestInfo, with_retry};
 use reqwest::Version;
@@ -12,16 +19,39 @@ use crate::client::{
 use crate::model::{BunnyObject, to_entry};
 
 impl BunnyStorage {
-    /// The direct children of `dir`.
+    /// The direct children of `dir`, or [`ProviderError::NotFound`] when there is no such
+    /// folder.
+    ///
+    /// Bunny answers `[]` both for an empty folder and for one that is not there, so an empty
+    /// answer for anything but the root costs one more listing: the parent's, which shows the
+    /// folder only if it exists. Empty folders are rare, so this is cheap where it matters.
     pub(crate) async fn list_dir(&self, dir: &RemotePath) -> Result<Listing, ProviderError> {
         let url = self.dir_url(dir);
         let url = url.as_str();
         let (objects, info) =
             with_retry(&self.list_retry, move |_| self.fetch_listing(url)).await?;
+        if objects.is_empty() && !self.has_folder(dir).await? {
+            return Err(ProviderError::NotFound);
+        }
         Ok(Listing {
             entries: to_entries(objects, dir)?,
             info,
         })
+    }
+
+    /// Whether the parent of `dir` lists a folder of exactly that name (names are
+    /// case-sensitive on Bunny, and a file of the same name is not the folder). The root is
+    /// always there.
+    pub(crate) async fn has_folder(&self, dir: &RemotePath) -> Result<bool, ProviderError> {
+        let (Some(parent), Some(name)) = (dir.parent(), dir.name()) else {
+            return Ok(true);
+        };
+        let url = self.dir_url(&parent);
+        let url = url.as_str();
+        let (siblings, _) = with_retry(&self.list_retry, move |_| self.fetch_listing(url)).await?;
+        Ok(siblings
+            .iter()
+            .any(|object| object.is_directory && object.object_name == name))
     }
 
     /// One attempt at fetching and parsing a directory listing.

@@ -23,7 +23,7 @@ use httporter_core::{
     MAX_RETRY_AFTER, ProviderError, ProxyMode, RemotePath, RetryPolicy, StorageProvider,
     TransferSettings, UploadOptions, UploadSource, encode_segment, with_retry,
 };
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
+use reqwest::header::{CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
 use reqwest::{RequestBuilder, StatusCode, redirect};
 use tokio::sync::Semaphore;
 
@@ -244,7 +244,9 @@ impl BunnyStorage {
                 server_side_copy: false,
                 recursive_delete: true,
                 batch_delete_max: 1,
-                empty_folders: EmptyFolders::Unknown,
+                // Live probe (Task 7): a folder made with `create_folder`, or one whose last
+                // file goes, stays and lists as `[]`.
+                empty_folders: EmptyFolders::Supported,
                 list_concurrency: LIST_CONCURRENCY,
                 delete_concurrency,
                 transfer_concurrency_max: TRANSFER_CONCURRENCY_MAX,
@@ -314,6 +316,41 @@ impl BunnyStorage {
             Err(map_status(status, retry_after, Op::Delete))
         }
     }
+
+    /// One attempt at making the folder `dir`, whose URL is `url`.
+    async fn create_folder_once(&self, url: &str, dir: &RemotePath) -> Result<(), ProviderError> {
+        let mut response = self
+            .with_key(self.client.put(url))
+            // Declared, so the empty body goes with a length rather than none.
+            .header(CONTENT_LENGTH, 0)
+            .body(Vec::new())
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        let retry_after = parse_retry_after(response.headers());
+        // Read the answer whatever it says (ledger 143); only the body tells a busy 400.
+        let body = read_capped(&mut response, ERROR_BODY_MAX)
+            .await
+            .map_err(network_error)?;
+        if status.is_success() {
+            return Ok(());
+        }
+        if status != StatusCode::BAD_REQUEST {
+            return Err(map_status(status, retry_after, Op::CreateFolder));
+        }
+        match map_400(&body, Op::CreateFolder) {
+            busy @ ProviderError::Server { .. } => Err(busy),
+            // The folder may already be there: only the parent's listing can tell.
+            rejected => {
+                if self.has_folder(dir).await? {
+                    Ok(())
+                } else {
+                    Err(rejected)
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -360,12 +397,25 @@ impl StorageProvider for BunnyStorage {
         with_retry(&self.retry, move |_| self.delete_once(url)).await
     }
 
-    /// Bunny has no request that makes an empty folder; one appears with its first file.
-    /// Refused while [`EmptyFolders::Unknown`]; the live probe (Task 7) may change this.
-    async fn create_folder(&self, _dir: &RemotePath) -> Result<(), ProviderError> {
-        Err(ProviderError::Refused(
-            "Bunny Storage creates a folder with its first file.".into(),
-        ))
+    /// `PUT /{zone}/{dir}/` with an empty body. Bunny answers `201 "Directory created."` and
+    /// makes the missing parents too; the folder then lists, and stays while it is empty (live
+    /// probe B1, Task 7). The zone root is always there.
+    ///
+    /// A folder that is already there is refused with `400 "Unable to upload file. Invalid path
+    /// specified."`, the same words as for a path the service won't take, so a 400 is settled
+    /// by the parent's listing: when it shows the folder, the folder is there, which is all the
+    /// caller asked for. Bunny's busy 400 is retried like any other.
+    ///
+    /// A file of the same name does not stop the `PUT`: Bunny then lists a file and a folder
+    /// under one name. As for S3 (ruling Q34), keeping them apart is the planner's job, which
+    /// knows the listing it works from; checking here would cost a listing per folder.
+    async fn create_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
+        if dir.is_root() {
+            return Ok(());
+        }
+        let url = self.dir_url(dir);
+        let url = url.as_str();
+        with_retry(&self.retry, move |_| self.create_folder_once(url, dir)).await
     }
 
     /// `GET https://{host}/` without the password: any answer at all means the service is
@@ -389,8 +439,12 @@ impl StorageProvider for BunnyStorage {
 pub(crate) enum Op {
     List,
     Download,
-    Upload { with_checksum: bool },
+    Upload {
+        with_checksum: bool,
+    },
     Delete,
+    /// `PUT /{zone}/{dir}/`, see `create_folder`.
+    CreateFolder,
     Account,
 }
 
@@ -413,7 +467,7 @@ pub(crate) fn map_status(
             Op::Upload {
                 with_checksum: true,
             } => ProviderError::ChecksumMismatch,
-            Op::Upload { .. } | Op::Download | Op::Account => {
+            Op::Upload { .. } | Op::Download | Op::CreateFolder | Op::Account => {
                 ProviderError::Permanent(format!("request rejected by server ({status})"))
             }
         },
@@ -435,8 +489,18 @@ fn server_busy() -> ProviderError {
 }
 
 /// What a 400 answering an upload means. Bunny says "Unable to process request" when it is
-/// overloaded, which is worth another try; any other 400 rejected the upload itself.
+/// overloaded, which is worth another try; any other 400 rejected the upload itself. A
+/// `Checksum` that does not match the body gets `{"HttpCode":400,"Message":"Unable to upload
+/// file: Exception when writing file: Checksum missmatch, skipping commit"}` (live probe, Task 7),
+/// and the file is not stored.
 pub(crate) fn map_upload_400(body: &[u8], with_checksum: bool) -> ProviderError {
+    map_400(body, Op::Upload { with_checksum })
+}
+
+/// What a 400 answering `op` means, from its body: busy when Bunny says "Unable to process
+/// request" (overloaded, worth another try), otherwise what [`map_status`] makes of a 400 for
+/// `op`, with the server's words added when that is a plain rejection.
+pub(crate) fn map_400(body: &[u8], op: Op) -> ProviderError {
     let body = String::from_utf8_lossy(body);
     if body
         .to_ascii_lowercase()
@@ -444,7 +508,7 @@ pub(crate) fn map_upload_400(body: &[u8], with_checksum: bool) -> ProviderError 
     {
         return server_busy();
     }
-    match map_status(StatusCode::BAD_REQUEST, None, Op::Upload { with_checksum }) {
+    match map_status(StatusCode::BAD_REQUEST, None, op) {
         // Without a checksum there is nothing to blame, so say what the server said. It is
         // server text, never anything we sent.
         ProviderError::Permanent(message) => match snippet(&body) {
@@ -622,7 +686,13 @@ mod tests {
         let auth = ProviderError::Auth {
             hint: AuthHint::Unknown,
         };
-        for op in [Op::List, Op::Download, Op::Delete, Op::Account] {
+        for op in [
+            Op::List,
+            Op::Download,
+            Op::Delete,
+            Op::CreateFolder,
+            Op::Account,
+        ] {
             assert_eq!(map_status(status(401), None, op), auth);
             assert_eq!(map_status(status(403), None, op), auth);
             assert_eq!(map_status(status(404), None, op), ProviderError::NotFound);
@@ -658,6 +728,7 @@ mod tests {
         );
         for op in [
             Op::Download,
+            Op::CreateFolder,
             Op::Account,
             Op::Upload {
                 with_checksum: false,
@@ -691,6 +762,35 @@ mod tests {
         }
         assert!(busy.is_retryable());
         assert!(busy.is_slow_down());
+    }
+
+    /// Bunny's own words for a `Checksum` that does not match, as the live probe (Task 7) saw
+    /// them: an upload failure, not the busy answer, although both begin "Unable to".
+    #[test]
+    fn bunnys_checksum_mismatch_answer_is_a_mismatch_not_busy() {
+        let body = r#"{"HttpCode":400,"Message":"Unable to upload file: Exception when writing file: Checksum missmatch, skipping commit"}"#;
+        assert_eq!(
+            map_upload_400(body.as_bytes(), true),
+            ProviderError::ChecksumMismatch
+        );
+    }
+
+    /// Bunny's answer to a folder `PUT` it won't take (the folder is there already, or the path
+    /// is not allowed) is a plain rejection that quotes it; its busy answer stays busy.
+    #[test]
+    fn a_create_folder_400_quotes_the_server_unless_busy() {
+        let body = r#"{"HttpCode":400,"Message":"Unable to upload file. Invalid path specified."}"#;
+        match map_400(body.as_bytes(), Op::CreateFolder) {
+            ProviderError::Permanent(message) => {
+                assert!(message.starts_with(REJECTED), "{message}");
+                assert!(message.contains("Invalid path specified."), "{message}");
+            }
+            other => panic!("expected Permanent, got {other:?}"),
+        }
+        assert_eq!(
+            map_400(b"Unable to process request", Op::CreateFolder),
+            busy()
+        );
     }
 
     #[test]
