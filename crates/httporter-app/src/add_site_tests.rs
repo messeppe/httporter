@@ -3,7 +3,8 @@
 //! behind) and how it presents itself to assistive technology.
 
 use crate::add_site::{FieldError, show_field_error};
-use crate::keyboard_tests::{center, click, row_starting, site, tab, tap};
+use crate::keyboard_tests::{center, click, site, tab, tap};
+use crate::pane_tests::row_starting;
 use crate::{AppWindow, ProviderTile};
 use i_slint_backend_testing as testing;
 use i_slint_backend_testing::{AccessibleLiveness, AccessibleRole, ElementHandle, ElementQuery};
@@ -661,8 +662,17 @@ fn the_password_field_is_declared_as_a_password_input() {
             .any(|l| l.starts_with("label: @tr(\"Password\")")),
         "the password input type belongs to the Password field"
     );
-    // And the text field component hands that type to its input, so nothing is shown in clear.
-    assert!(lines.contains(&"input-type: root.input-type;"));
+    // And the text field component (in the form controls file) hands that type to its input, so
+    // nothing is shown in clear.
+    let controls = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/components/form_controls.slint"),
+    )
+    .unwrap();
+    assert!(
+        controls
+            .lines()
+            .any(|l| l.split("//").next().unwrap().trim() == "input-type: root.input-type;")
+    );
 }
 
 // ---- Errors and the connection result ----
@@ -1370,7 +1380,7 @@ fn the_placeholder_is_set_in_the_secondary_label_colour() {
     // `label3` is only about 3:1 on the field; the placeholder carries real information (what
     // the site name will be), so it uses `label2`.
     let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/components/add_site.slint");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/components/form_controls.slint");
     let source = std::fs::read_to_string(path).unwrap();
     let lines: Vec<_> = source.lines().map(str::trim).collect();
     let at = lines

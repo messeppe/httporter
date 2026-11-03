@@ -14,10 +14,24 @@ export component Toolbar inherits Rectangle {
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
     in property <bool> can-publish: false;
+    // File actions (the mockup's second capsule group): each is turned off unless the app says it
+    // may be pressed.
+    in property <bool> can-upload: false;
+    in property <bool> can-download: false;
+    in property <bool> can-new-folder: false;
+    in property <bool> can-delete: false;
+    // Why Delete is off, when that is a matter of which pane is in use (read out after its label).
+    in property <string> delete-note;
+    // Why the file actions are off for now (read out after their labels).
+    in property <string> actions-note;
     callback toggle-sidebar();
     callback go-back();
     callback go-forward();
     callback publish();
+    callback upload();
+    callback download();
+    callback new-folder();
+    callback delete();
 
     height: Theme.toolbar-height;
     background: Theme.chrome;
@@ -97,6 +111,50 @@ export component Toolbar inherits Rectangle {
         }
 
         Rectangle { horizontal-stretch: 1; }
+
+        // Upload, Download, New folder and Delete (mockup `.tgroup` "File actions").
+        VCenter {
+            Rectangle {
+                background: Theme.control;
+                border-radius: self.height / 2;
+                border-width: 0.5px;
+                border-color: Theme.control-border;
+                height: 32px;
+
+                HorizontalLayout {
+                    padding: 2px;
+                    spacing: 2px;
+                    ToolButton {
+                        icon: Icons.up;
+                        label: @tr("Upload");
+                        description: root.can-upload ? "" : root.actions-note;
+                        enabled: root.can-upload;
+                        clicked => { root.upload(); }
+                    }
+                    ToolButton {
+                        icon: Icons.down;
+                        label: @tr("Download");
+                        description: root.can-download ? "" : root.actions-note;
+                        enabled: root.can-download;
+                        clicked => { root.download(); }
+                    }
+                    ToolButton {
+                        icon: Icons.newfolder;
+                        label: @tr("New folder");
+                        description: root.can-new-folder ? "" : root.actions-note;
+                        enabled: root.can-new-folder;
+                        clicked => { root.new-folder(); }
+                    }
+                    ToolButton {
+                        icon: Icons.trash;
+                        label: @tr("Delete");
+                        description: root.delete-note != "" ? root.delete-note : (root.can-delete ? "" : root.actions-note);
+                        enabled: root.can-delete;
+                        clicked => { root.delete(); }
+                    }
+                }
+            }
+        }
 
         VCenter {
             CapsuleButton {

@@ -14,6 +14,7 @@
 //! "Loading…" and keeps its rows), then the listed one.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -25,8 +26,10 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 use crate::add_site::{AddSiteForm, ValidSite, show_field_error};
+use crate::copy;
+use crate::selection::{ActivePane, Selection, ToolbarInputs, ToolbarState, toolbar_state};
 use crate::session::{
-    LocalView, RemoteView, Session, SiteItemData, SiteProvider, Ticket, endpoint_preview, items,
+    LocalView, RemoteView, Session, SiteItemData, SiteProvider, Ticket, endpoint_preview,
 };
 use crate::sort::SortKey;
 use crate::viewmodel::{RowData, sort_key_for_column, to_slint_rows};
@@ -148,9 +151,35 @@ struct Shown {
     local: u64,
     remote_error: Option<String>,
     local_error: Option<String>,
+    /// The rows of each pane as the window shows them, and which of them are selected (the
+    /// window's rows carry the same in their `selected`). A view sets them with its rows
+    /// ([`adopt`]); clicks change the selection ([`Ctx::select`]).
+    remote_rows: Vec<RowData>,
+    local_rows: Vec<RowData>,
+    remote_selection: Selection,
+    local_selection: Selection,
+    /// The transfer engine can act on the toolbar's commands. Until Task 23 sets it, every
+    /// `can-*` stays false (see [`refresh_toolbar`]).
+    transfers_ready: bool,
 }
 
 impl Shown {
+    /// The selection and the rows of `pane`.
+    fn pane(&mut self, pane: ActivePane) -> (&mut Selection, &[RowData]) {
+        match pane {
+            ActivePane::ThisPc => (&mut self.local_selection, &self.local_rows),
+            ActivePane::Cloud => (&mut self.remote_selection, &self.remote_rows),
+        }
+    }
+
+    /// As [`Shown::pane`], to read.
+    fn view(&self, pane: ActivePane) -> (&Selection, &[RowData]) {
+        match pane {
+            ActivePane::ThisPc => (&self.local_selection, &self.local_rows),
+            ActivePane::Cloud => (&self.remote_selection, &self.remote_rows),
+        }
+    }
+
     /// The banner: the app's notice, then the cloud pane's error, then This PC's, one per line.
     fn banner(&self, notice: Option<String>) -> String {
         [
@@ -273,6 +302,59 @@ impl Ctx {
         }
     }
 
+    /// Changes the selection of `pane` (0 This PC, 1 the cloud pane) with `change`, which is given
+    /// the selection and the pane's row count, then brings the rows' `selected`, the status bar's
+    /// summary and the toolbar up to date.
+    fn select(&self, pane: i32, change: impl FnOnce(&mut Selection, usize)) {
+        let Some(pane) = ActivePane::from_index(pane) else {
+            return;
+        };
+        let Some(ui) = self.ui.upgrade() else { return };
+        // Using a pane makes it the one the toolbar and the status bar follow. Set before taking
+        // the lock: the window answers a change of it with `active-pane-changed`.
+        ui.set_local_pane_active(pane == ActivePane::ThisPc);
+        let mut shown = lock(&self.shown);
+        let (selection, rows) = shown.pane(pane);
+        let before = selection.rows();
+        change(selection, rows.len());
+        show_selection(&ui, &shown, pane, &before);
+        ui.set_status_message(SharedString::new());
+        refresh_toolbar(&ui, &shown);
+    }
+
+    /// A row was pressed, or the keyboard landed on it.
+    fn pointer(&self, pane: i32, row: i32, ctrl: bool, shift: bool) {
+        let Ok(row) = usize::try_from(row) else {
+            return;
+        };
+        self.select(pane, move |selection, n| {
+            if row < n {
+                selection.pointer(row, ctrl, shift);
+            }
+        });
+    }
+
+    /// The rubber band moved over rows `from` to `to` (both negative when it covers none).
+    fn band(&self, pane: i32, from: i32, to: i32, additive: bool) {
+        self.select(pane, move |selection, n| {
+            match (usize::try_from(from), usize::try_from(to)) {
+                (Ok(from), Ok(to)) if from < n && to < n => selection.band(from, to, additive),
+                _ if additive => {}
+                _ => selection.clear(),
+            }
+        });
+    }
+
+    fn select_all(&self, pane: i32) {
+        self.select(pane, |selection, n| selection.select_all(n));
+    }
+
+    /// The pane last used or focused changed: the toolbar follows it.
+    fn active_pane_changed(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        refresh_toolbar(&ui, &lock(&self.shown));
+    }
+
     /// The version of the view on screen in the cloud pane, for a click on its rows or crumbs.
     fn remote_seen(&self) -> u64 {
         lock(&self.shown).remote
@@ -314,30 +396,37 @@ impl Ctx {
     }
 
     /// Add Site (also Return in a field of the sheet): tests the connection, and saves the site
-    /// only if that works ([`Session::add_site`]). The sheet stays busy meanwhile, and Cancel
-    /// gives the whole run up.
+    /// only if that works. The sheet stays busy meanwhile. Cancel gives the test up; once the
+    /// test has passed, the save is a task of its own that Cancel does not reach, so a site whose
+    /// password is being written is always saved, listed and shown (see [`show_added`]).
     fn save_site(&self, form: AddSiteForm) {
         let Some(ui) = self.ui.upgrade() else { return };
         let Some(site) = validated(&ui, &form) else {
             return;
         };
         let run = self.begin_sheet_run(&ui);
-        let (session, runs, weak) = (
+        let (session, runs, weak, rt) = (
             self.session.clone(),
             self.sheet_run.clone(),
             self.ui.clone(),
+            self.rt.clone(),
         );
         let task = self.rt.spawn(async move {
-            let added = session.add_site(&site).await;
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                let latest = runs.load(Ordering::SeqCst) == run;
-                show_added(&ui, &session, latest, added);
+            let tested = session.test_connection(&site).await;
+            if !tested.ok {
+                post_added(&weak, &runs, run, &session, Err(tested.text));
+                return;
+            }
+            rt.spawn(async move {
+                let added = session.save_site(&site).await;
+                post_added(&weak, &runs, run, &session, added);
             });
         });
         self.sheet.replace(task);
     }
 
-    /// The sheet was cancelled: give up its test or save and let it be used again.
+    /// The sheet was cancelled: give up its test (a save that has begun is not given up) and let it
+    /// be used again.
     fn cancel_sheet(&self) {
         self.sheet_run.fetch_add(1, Ordering::SeqCst);
         self.sheet.abort();
@@ -345,6 +434,22 @@ impl Ctx {
             ui.set_add_site_busy(false);
         }
     }
+}
+
+/// Hands what became of Add Site to the window (from a task). Whether the run is still the
+/// latest is decided when the window gets to it.
+fn post_added(
+    ui: &Weak<AppWindow>,
+    runs: &Arc<AtomicU64>,
+    run: u64,
+    session: &Arc<Session>,
+    added: Result<SiteRecord, String>,
+) {
+    let (runs, session) = (runs.clone(), session.clone());
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let latest = runs.load(Ordering::SeqCst) == run;
+        show_added(&ui, &session, latest, added);
+    });
 }
 
 /// Shows what became of Add Site. `latest` is false when the sheet has been cancelled or
@@ -397,7 +502,20 @@ fn validated(ui: &AppWindow, form: &AddSiteForm) -> Option<ValidSite> {
 
 /// Wires every callback of `ui` to `session`, fills the window with the session's starting state
 /// and selects the first site, if there is one. Returns the shared session.
+///
+/// The toolbar's commands stay off (every `can-*` false) until Task 23 has the transfer engine
+/// act on them and installs with `transfers_ready`.
 pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
+    install_with(ui, rt, session, false)
+}
+
+/// As [`install`], with the toolbar's commands switched on (`transfers_ready`) or off.
+fn install_with(
+    ui: &AppWindow,
+    rt: Handle,
+    session: Session,
+    transfers_ready: bool,
+) -> Arc<Session> {
     let regions: Vec<SharedString> = REGIONS.iter().map(|(_, city)| (*city).into()).collect();
     ui.set_region_names(ModelRc::new(VecModel::from(regions)));
     let session = Arc::new(session);
@@ -407,8 +525,11 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         let mut shown = lock(&shown);
         shown.local = local.version;
         shown.local_error = local.error.clone();
+        shown.transfers_ready = transfers_ready;
         apply_local(ui, &local, Change::Listed);
+        adopt(ui, &mut shown, ActivePane::ThisPc, &local.rows);
         ui.set_error_text(shown.banner(session.notice()).into());
+        refresh_toolbar(ui, &shown);
     }
     let sites = session.site_items();
     sync_sites(ui, &sites);
@@ -494,6 +615,51 @@ pub fn install(ui: &AppWindow, rt: Handle, session: Session) -> Arc<Session> {
         }
     });
 
+    ui.on_row_pointer({
+        let ctx = ctx.clone();
+        move |pane, row, ctrl, shift| ctx.pointer(pane, row, ctrl, shift)
+    });
+    ui.on_band_select({
+        let ctx = ctx.clone();
+        move |pane, from, to, additive| ctx.band(pane, from, to, additive)
+    });
+    ui.on_select_all({
+        let ctx = ctx.clone();
+        move |pane| ctx.select_all(pane)
+    });
+    ui.on_active_pane_changed({
+        let ctx = ctx.clone();
+        move || ctx.active_pane_changed()
+    });
+    ui.on_upload({
+        let ctx = ctx.clone();
+        move || upload(&ctx)
+    });
+    ui.on_download({
+        let ctx = ctx.clone();
+        move || download(&ctx)
+    });
+    ui.on_download_to({
+        let ctx = ctx.clone();
+        move || download_to(&ctx)
+    });
+    ui.on_new_folder({
+        let ctx = ctx.clone();
+        move || new_folder(&ctx)
+    });
+    ui.on_delete({
+        let ctx = ctx.clone();
+        move || delete(&ctx)
+    });
+    ui.on_show_in_explorer({
+        let ctx = ctx.clone();
+        move |index| {
+            if let Some(index) = row(index) {
+                show_in_explorer(&ctx, index);
+            }
+        }
+    });
+
     ui.on_go_back({
         let ctx = ctx.clone();
         move || ctx.travel(true)
@@ -566,8 +732,12 @@ fn show_remote(
         shown.remote = view.version;
         shown.remote_error = view.error.clone();
         apply_remote(ui, view, change);
+        if change != Change::Loading {
+            adopt(ui, &mut shown, ActivePane::Cloud, &view.rows);
+        }
     }
     ui.set_error_text(shown.banner(session.notice()).into());
+    refresh_toolbar(ui, &shown);
     drop(shown);
     sync_sites(ui, &session.site_items());
 }
@@ -597,8 +767,12 @@ fn show_local(
         shown.local = view.version;
         shown.local_error = view.error.clone();
         apply_local(ui, view, change);
+        if change != Change::Loading {
+            adopt(ui, &mut shown, ActivePane::ThisPc, &view.rows);
+        }
     }
     ui.set_error_text(shown.banner(session.notice()).into());
+    refresh_toolbar(ui, &shown);
 }
 
 /// Another site was picked in the sidebar. The pane title follows the sidebar at once, so the
@@ -609,9 +783,13 @@ fn start_opening_site(ui: &AppWindow, shown: &Mutex<Shown>, notice: Option<Strin
     ui.set_remote_rows(ModelRc::default());
     ui.set_remote_crumbs(ModelRc::default());
     ui.set_remote_selected(-1);
+    ui.set_remote_selection_text(SharedString::new());
     let mut shown = lock(shown);
     shown.remote_error = None;
+    shown.remote_rows.clear();
+    shown.remote_selection.clear();
     ui.set_error_text(shown.banner(notice).into());
+    refresh_toolbar(ui, &shown);
 }
 
 fn strings(list: &[String]) -> ModelRc<SharedString> {
@@ -619,31 +797,220 @@ fn strings(list: &[String]) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(list))
 }
 
-/// Where the row that was selected in `old` is in `rows` (found by name), or -1.
-fn reselect(old: &ModelRc<FileRow>, selected: i32, rows: &[RowData]) -> i32 {
-    usize::try_from(selected)
-        .ok()
-        .and_then(|index| old.row_data(index))
-        .and_then(|row| rows.iter().position(|r| r.name == row.name.as_str()))
-        .and_then(|index| i32::try_from(index).ok())
-        .unwrap_or(-1)
-}
-
-/// The selection for a pane's new rows: none in a new folder; otherwise (a refresh, a new sort,
-/// or a failed listing that left the folder as it was) the same row as before.
-fn selection(
+/// The selection for a pane's new rows, as the indexes of the rows to mark and the row the
+/// keyboard is on (-1 for none): nothing in a new folder; otherwise (a refresh, a new sort, or a
+/// failed listing that left the folder as it was) the same rows as before, found by name.
+fn carried_selection(
     change: Change,
     failed: bool,
     old: &ModelRc<FileRow>,
-    selected: i32,
+    focus: i32,
     rows: &[RowData],
-) -> i32 {
+) -> (Vec<usize>, i32) {
     if change == Change::Listed && !failed {
-        -1
-    } else {
-        reselect(old, selected, rows)
+        return (Vec::new(), -1);
+    }
+    let old_focus = usize::try_from(focus).ok().and_then(|i| old.row_data(i));
+    let old_picked: Vec<FileRow> = old.iter().filter(|row| row.selected).collect();
+    if old_focus.is_none() && old_picked.is_empty() {
+        return (Vec::new(), -1);
+    }
+    let index: HashMap<&str, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| (row.name.as_str(), i))
+        .collect();
+    let find = |row: &FileRow| index.get(row.name.as_str()).copied();
+    let picked = old_picked.iter().filter_map(find).collect();
+    let focus = old_focus
+        .as_ref()
+        .and_then(find)
+        .and_then(|i| i32::try_from(i).ok())
+        .unwrap_or(-1);
+    (picked, focus)
+}
+
+/// Sets `selected` on the rows of `model` listed in `picked`.
+fn mark_selected(model: &ModelRc<FileRow>, picked: &[usize]) {
+    for &index in picked {
+        if let Some(mut row) = model.row_data(index) {
+            row.selected = true;
+            model.set_row_data(index, row);
+        }
     }
 }
+
+/// The rows and the row the keyboard is on, of a pane as the window shows them.
+fn pane_model(ui: &AppWindow, pane: ActivePane) -> (ModelRc<FileRow>, i32) {
+    match pane {
+        ActivePane::ThisPc => (ui.get_local_rows(), ui.get_local_selected()),
+        ActivePane::Cloud => (ui.get_remote_rows(), ui.get_remote_selected()),
+    }
+}
+
+/// The selection a window's rows carry in their `selected`, with `focus` as the keyboard's row.
+fn selection_of(model: &ModelRc<FileRow>, focus: i32) -> Selection {
+    let picked = model
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.selected)
+        .map(|(i, _)| i);
+    let focus = usize::try_from(focus)
+        .ok()
+        .filter(|&i| i < model.row_count());
+    let mut selection = Selection::default();
+    selection.restore(picked, focus);
+    selection
+}
+
+/// A view has put new rows in `pane`: `shown` takes up their data and the selection they carry
+/// (the window's rows hold it in their `selected`), and the status bar's summary follows.
+fn adopt(ui: &AppWindow, shown: &mut Shown, pane: ActivePane, rows: &[RowData]) {
+    let (model, focus) = pane_model(ui, pane);
+    let selection = selection_of(&model, focus);
+    match pane {
+        ActivePane::ThisPc => {
+            shown.local_rows = rows.to_vec();
+            shown.local_selection = selection;
+        }
+        ActivePane::Cloud => {
+            shown.remote_rows = rows.to_vec();
+            shown.remote_selection = selection;
+        }
+    }
+    show_summary(ui, shown, pane);
+}
+
+/// The rows in either of two sorted lists but not in both.
+fn differing(a: &[usize], b: &[usize]) -> Vec<usize> {
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::new();
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+    out
+}
+
+/// Puts the status bar's summary of the rows selected in `pane` in the window.
+fn show_summary(ui: &AppWindow, shown: &Shown, pane: ActivePane) {
+    let (selection, rows) = shown.view(pane);
+    let picked: Vec<&RowData> = selection
+        .rows()
+        .into_iter()
+        .filter_map(|i| rows.get(i))
+        .collect();
+    let text = SharedString::from(copy::selection_summary(&picked));
+    // What a drag of the selection carries (the ghost counts it).
+    let count = i32::try_from(picked.len()).unwrap_or(i32::MAX);
+    match pane {
+        ActivePane::ThisPc => {
+            ui.set_local_selection_text(text);
+            ui.set_local_selected_count(count);
+        }
+        ActivePane::Cloud => {
+            ui.set_remote_selection_text(text);
+            ui.set_remote_selected_count(count);
+        }
+    }
+}
+
+/// Makes the window show `shown`'s selection of `pane`: the rows' `selected` (only those that
+/// differ from `before`, the rows that were selected), the row the keyboard is on, and the
+/// summary.
+fn show_selection(ui: &AppWindow, shown: &Shown, pane: ActivePane, before: &[usize]) {
+    let (selection, _) = shown.view(pane);
+    let after = selection.rows();
+    let (model, _) = pane_model(ui, pane);
+    for index in differing(before, &after) {
+        if let Some(mut row) = model.row_data(index) {
+            row.selected = after.binary_search(&index).is_ok();
+            model.set_row_data(index, row);
+        }
+    }
+    let focus = selection
+        .focus()
+        .and_then(|i| i32::try_from(i).ok())
+        .unwrap_or(-1);
+    match pane {
+        ActivePane::ThisPc => ui.set_local_selected(focus),
+        ActivePane::Cloud => ui.set_remote_selected(focus),
+    }
+    show_summary(ui, shown, pane);
+}
+
+/// Sets which of the toolbar's commands may be pressed (and the notes that say why not). Until
+/// the transfer engine is wired in (`transfers_ready`), none may: the buttons are off, not inert.
+fn refresh_toolbar(ui: &AppWindow, shown: &Shown) {
+    let state = if shown.transfers_ready {
+        toolbar_state(ToolbarInputs {
+            active: if ui.get_local_pane_active() {
+                ActivePane::ThisPc
+            } else {
+                ActivePane::Cloud
+            },
+            local_selected: shown.local_selection.count(),
+            remote_selected: shown.remote_selection.count(),
+            // A site is open once it is chosen, connected and not in the middle of a listing.
+            site_open: ui.get_selected_site() >= 0
+                && ui.get_connection_ok()
+                && !ui.get_remote_loading(),
+            // Read-only sites arrive in I4.
+            read_only: false,
+            at_drive_list: ui.get_local_crumbs().row_count() == 0,
+        })
+    } else {
+        ToolbarState::default()
+    };
+    ui.set_can_upload(state.can_upload);
+    ui.set_can_download(state.can_download);
+    ui.set_can_new_folder(state.can_new_folder);
+    ui.set_can_delete(state.can_delete);
+    ui.set_delete_note(state.delete_note.into());
+    ui.set_actions_note(if shown.transfers_ready {
+        SharedString::new()
+    } else {
+        copy::TRANSFERS_LATER.into()
+    });
+}
+
+// ---- The toolbar's commands and the context menus' ----
+//
+// Stubs for Task 23, which wires them to the transfer engine and the file dialogs (Ruling Q6).
+// Until it sets `transfers_ready` every `can-*` is false, so the buttons, the menu items and the
+// shortcuts that reach these are off.
+
+/// Upload: the This PC selection into the cloud pane's folder, or the file picker with none.
+fn upload(_ctx: &Ctx) {}
+
+/// Download: the cloud selection into the This PC pane's folder (asks at the list of drives).
+fn download(_ctx: &Ctx) {}
+
+/// Download to…: the cloud selection into a folder asked for.
+fn download_to(_ctx: &Ctx) {}
+
+/// New folder, in the pane in use.
+fn new_folder(_ctx: &Ctx) {}
+
+/// Delete the cloud selection (after the alert).
+fn delete(_ctx: &Ctx) {}
+
+/// Show row `row` of the This PC pane in Explorer.
+fn show_in_explorer(_ctx: &Ctx, _row: usize) {}
 
 /// Puts a cloud view on screen (everything but the banner, which [`Shown`] puts together). A
 /// loading view only marks the pane: its rows stay until the listing is in.
@@ -653,16 +1020,18 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
         return;
     }
     let failed = view.error.is_some();
-    let selected = selection(
+    let (picked, focus) = carried_selection(
         change,
         failed,
         &ui.get_remote_rows(),
         ui.get_remote_selected(),
         &view.rows,
     );
-    ui.set_remote_rows(to_slint_rows(&view.rows));
+    let rows = to_slint_rows(&view.rows);
+    mark_selected(&rows, &picked);
+    ui.set_remote_rows(rows);
     ui.set_remote_crumbs(strings(&view.crumbs));
-    ui.set_remote_selected(selected);
+    ui.set_remote_selected(focus);
     ui.set_connection_text(view.connection.as_str().into());
     ui.set_connection_ok(view.connection_ok);
     ui.set_endpoint_text(view.endpoint.as_str().into());
@@ -671,7 +1040,7 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     ui.set_remote_can_go_back(view.can_back);
     ui.set_remote_can_go_forward(view.can_forward);
     if change.counts() && !failed {
-        ui.set_remote_status(items(view.rows.len()).into());
+        ui.set_remote_status(copy::items(view.rows.len()).into());
         ui.set_status_message(SharedString::new());
     }
 }
@@ -683,16 +1052,18 @@ fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
         return;
     }
     let failed = view.error.is_some();
-    let selected = selection(
+    let (picked, focus) = carried_selection(
         change,
         failed,
         &ui.get_local_rows(),
         ui.get_local_selected(),
         &view.rows,
     );
-    ui.set_local_rows(to_slint_rows(&view.rows));
+    let rows = to_slint_rows(&view.rows);
+    mark_selected(&rows, &picked);
+    ui.set_local_rows(rows);
     ui.set_local_crumbs(strings(&view.crumbs));
-    ui.set_local_selected(selected);
+    ui.set_local_selected(focus);
     ui.set_local_can_go_back(view.can_back);
     ui.set_local_can_go_forward(view.can_forward);
     if change.counts() && !failed {
@@ -727,7 +1098,7 @@ fn sync_sites(ui: &AppWindow, items: &[SiteItemData]) {
             name: item.name.as_str().into(),
             subtitle: item.subtitle.as_str().into(),
             provider: slint_tile(item.provider),
-            mono: item.mono.as_str().into(),
+            mono: item.provider.mono().into(),
             healthy: item.healthy,
         })
         .collect();

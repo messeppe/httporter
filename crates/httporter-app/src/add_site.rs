@@ -12,6 +12,7 @@ use std::fmt;
 use slint::SharedString;
 
 use crate::AppWindow;
+use crate::copy;
 
 /// What the user typed, exactly as the sheet reports it.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -101,17 +102,17 @@ impl AddSiteForm {
     pub fn validate(&self, region_codes: &[&str]) -> Result<ValidSite, FieldError> {
         let zone = self.zone.trim();
         if zone.is_empty() {
-            return Err(FieldError::Zone("Enter the storage zone name.".into()));
+            return Err(FieldError::Zone(copy::ZONE_MISSING.into()));
         }
         if zone.chars().any(char::is_whitespace) {
-            return Err(FieldError::Zone("Zone names can't contain spaces.".into()));
+            return Err(FieldError::Zone(copy::ZONE_HAS_SPACES.into()));
         }
         let region_code = usize::try_from(self.region_index)
             .ok()
             .and_then(|index| region_codes.get(index))
-            .ok_or_else(|| FieldError::Region("Choose a region.".into()))?;
+            .ok_or_else(|| FieldError::Region(copy::CHOOSE_REGION.into()))?;
         if self.password.is_empty() {
-            return Err(FieldError::Password("Enter the zone's password.".into()));
+            return Err(FieldError::Password(copy::PASSWORD_MISSING.into()));
         }
         let name = self.name.trim();
         Ok(ValidSite {

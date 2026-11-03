@@ -3,19 +3,22 @@
 
 slint::include_modules!();
 
+use std::error::Error;
 use std::sync::Arc;
 
 use chrono::Local;
-use drop_hook::{DropBatch, PaneLayout, PaneSide};
+use drop_hook::{PaneGeometry, PaneLayout, PaneSide};
 use httporter_platform::{KeyringStore, Store, default_db_path};
-use session::{RealFactory, Session, items};
+use session::{RealFactory, Session};
 use slint::Model;
 
 mod add_site;
 mod binding;
+mod copy;
 mod drop_hook;
 mod format;
 mod local_fs;
+mod selection;
 mod session;
 mod sort;
 mod viewmodel;
@@ -24,8 +27,51 @@ mod viewmodel;
 mod add_site_tests;
 #[cfg(test)]
 mod keyboard_tests;
+#[cfg(test)]
+mod lint_tests;
+#[cfg(test)]
+mod pane_tests;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
+    let result = run();
+    if let Err(error) = &result {
+        report_startup_failure(error.as_ref(), show_message_box);
+    }
+    result
+}
+
+/// Tells the user why the app is closing. Release builds have no console (see the
+/// `windows_subsystem` attribute), so the error returned from `main` would go unseen: they show
+/// it in a message box. Debug builds keep the console, where `main`'s error is printed.
+fn report_startup_failure(error: &dyn Error, show: impl FnOnce(&str)) {
+    if !cfg!(debug_assertions) {
+        show(&copy::startup_error_text(error));
+    }
+}
+
+/// An OK box with an error mark, titled with the app's name, and no window of ours as its owner.
+fn show_message_box(text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+
+    let (text, title) = (wide(text), wide(copy::APP_NAME));
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call, and a null owner
+    // window is allowed.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+/// `text` as the NUL-terminated UTF-16 that Windows wants.
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
     // Software renderer on the winit backend: lowest memory use. A SLINT_BACKEND
     // environment variable overrides this, which tools/measure.ps1 -Backend relies on.
     if std::env::var_os("SLINT_BACKEND").is_none() {
@@ -56,10 +102,7 @@ fn open_session() -> Result<Session, httporter_platform::StoreError> {
         Ok(store) => (store, None),
         Err(e) => (
             Store::open_in_memory()?,
-            Some(format!(
-                "Couldn't open the site database at {}: {e}. Sites added now won't be kept.",
-                path.display()
-            )),
+            Some(copy::database_unavailable(&path, e)),
         ),
     };
     let session = Session::new(store, Arc::new(KeyringStore), Arc::new(RealFactory), || {
@@ -72,35 +115,76 @@ fn open_session() -> Result<Session, httporter_platform::StoreError> {
 }
 
 /// Files dragged in from Explorer: the cloud pane lights up while they are over it (if a site is
-/// selected; the window sees to that). Dropping is only acknowledged in the status line for now;
-/// uploads arrive in I2.
+/// selected; the window sees to that), and so does the folder row they are over. Dropping is only
+/// acknowledged in the status line for now; Task 23 turns it into an upload. Files released where
+/// the window cannot tell, or over no pane, are ignored.
 fn install_drop(ui: &AppWindow) {
     let hover_ui = ui.as_weak();
     let drop_ui = ui.as_weak();
+    let lost_ui = ui.as_weak();
     let layout_ui = ui.as_weak();
     drop_hook::install_drop_hook(
         ui.window(),
-        move |over_remote| {
+        move |target| {
             if let Some(ui) = hover_ui.upgrade() {
+                let (over_remote, row) = match target {
+                    Some((PaneSide::Remote, row)) => (true, row),
+                    _ => (false, None),
+                };
                 ui.set_drop_hover_remote(over_remote);
+                let folder = remote_folder(&ui, row);
+                ui.set_drop_hover_row(folder.map_or(-1, |(row, _)| row));
             }
         },
         move |batch| {
             if let Some(ui) = drop_ui.upgrade() {
                 let site = selected_site_name(&ui);
-                ui.set_status_message(drop_status(&batch, site.as_deref()).into());
+                let folder = match batch.side {
+                    PaneSide::Remote => remote_folder(&ui, batch.row).map(|(_, name)| name),
+                    PaneSide::Local => None,
+                };
+                let status = copy::drop_status(&batch, site.as_deref(), folder.as_deref());
+                ui.set_status_message(status.into());
+            }
+        },
+        move || {
+            if let Some(ui) = lost_ui.upgrade() {
+                ui.set_status_message(copy::DROP_NOT_LOCATED.into());
             }
         },
         move || {
             layout_ui
                 .upgrade()
                 .map_or_else(PaneLayout::default, |ui| PaneLayout {
-                    split_x: ui.get_pane_split(),
-                    stacked: ui.get_panes_stacked(),
-                    remote_y: ui.get_remote_pane_y(),
+                    local: geometry(&ui.get_local_bounds()),
+                    remote: geometry(&ui.get_remote_bounds()),
                 })
         },
     );
+}
+
+/// A pane's place in the window as the hook wants it.
+fn geometry(bounds: &PaneBounds) -> PaneGeometry {
+    PaneGeometry {
+        x: bounds.x,
+        y: bounds.y,
+        w: bounds.width,
+        h: bounds.height,
+        list_top: bounds.list_top,
+        row_height: bounds.row_height,
+        scroll_y: bounds.scroll_y,
+        rows: usize::try_from(bounds.rows).unwrap_or(0),
+    }
+}
+
+/// The row of the cloud pane and its name, when `row` is a folder there. A file row is not a
+/// target: files dropped on one go to the folder the pane shows.
+fn remote_folder(ui: &AppWindow, row: Option<usize>) -> Option<(i32, String)> {
+    let index = row?;
+    let row = ui.get_remote_rows().row_data(index)?;
+    row.folder
+        .then(|| i32::try_from(index).ok().map(|i| (i, row.name.to_string())))
+        .flatten()
 }
 
 /// The name of the site selected in the sidebar, if any.
@@ -111,26 +195,24 @@ fn selected_site_name(ui: &AppWindow) -> Option<String> {
         .map(|site| site.name.to_string())
 }
 
-/// The status line for a drop on a pane, naming the selected site (placeholder text until uploads
-/// exist). With no site selected there is no cloud pane to point to, so the text says to add one.
-fn drop_status(batch: &DropBatch, site: Option<&str>) -> String {
-    let dropped = items(batch.paths.len());
-    match (batch.side, site) {
-        (PaneSide::Remote, Some(site)) => {
-            format!("Uploading arrives in the next build (I2): {dropped} dropped on {site}.")
-        }
-        (PaneSide::Remote, None) => {
-            format!("Uploading arrives in the next build (I2): {dropped} dropped.")
-        }
-        (PaneSide::Local, Some(site)) => format!("Drop files on the {site} pane to upload them."),
-        (PaneSide::Local, None) => "Add a site, then drop files on its pane to upload them.".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use slint::Model;
+
+    #[test]
+    fn release_startup_failure_shows_a_message() {
+        let error: Box<dyn Error> = "no display".into();
+        let shown = std::cell::RefCell::new(None);
+        report_startup_failure(error.as_ref(), |text| {
+            *shown.borrow_mut() = Some(text.to_owned());
+        });
+        // Only release builds have no console to print the error to, so only they show it.
+        let expected =
+            (!cfg!(debug_assertions)).then(|| "HTTPorter couldn't start.\n\nno display".to_owned());
+        assert_eq!(shown.into_inner(), expected);
+        assert_eq!(wide("OK"), [79, 75, 0]);
+    }
 
     #[test]
     fn window_builds_with_defaults() {
@@ -138,42 +220,6 @@ mod tests {
         let w = AppWindow::new().unwrap();
         assert_eq!(w.get_connection_text(), "");
         assert_eq!(w.get_sites().row_count(), 0);
-    }
-
-    fn batch(side: PaneSide, n: usize) -> DropBatch {
-        DropBatch {
-            side,
-            paths: (0..n).map(|i| format!(r"C:\f{i}").into()).collect(),
-        }
-    }
-
-    #[test]
-    fn a_drop_on_the_cloud_pane_is_counted_and_one_on_this_pc_points_to_the_site() {
-        let site = Some("example-shop.com");
-        assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 1), site),
-            "Uploading arrives in the next build (I2): 1 item dropped on example-shop.com."
-        );
-        assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 3), site),
-            "Uploading arrives in the next build (I2): 3 items dropped on example-shop.com."
-        );
-        assert_eq!(
-            drop_status(&batch(PaneSide::Local, 3), site),
-            "Drop files on the example-shop.com pane to upload them."
-        );
-    }
-
-    #[test]
-    fn with_no_site_the_drop_status_names_none() {
-        assert_eq!(
-            drop_status(&batch(PaneSide::Remote, 2), None),
-            "Uploading arrives in the next build (I2): 2 items dropped."
-        );
-        assert_eq!(
-            drop_status(&batch(PaneSide::Local, 2), None),
-            "Add a site, then drop files on its pane to upload them."
-        );
     }
 
     #[test]
@@ -192,6 +238,7 @@ mod tests {
             size: "".into(),
             modified: "".into(),
             folder: true,
+            selected: false,
         };
         assert!(site.healthy && row.folder);
         for provider in [
