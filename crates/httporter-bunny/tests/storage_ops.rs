@@ -489,18 +489,130 @@ async fn the_root_is_not_a_file_for_any_operation() {
     assert!(s.received_requests().await.unwrap().is_empty());
 }
 
-/// Until the live probe (Task 7) shows how Bunny keeps empty folders, none is made.
+/// What Bunny answers a folder `PUT` it won't take, as the live probe (Task 7) saw it: for a
+/// folder that is already there, and for a path it does not allow.
+const INVALID_PATH: &str =
+    r#"{"HttpCode":400,"Message":"Unable to upload file. Invalid path specified."}"#;
+
+/// The parent's listing, with one object called `name`.
+fn parent_listing(name: &str, is_directory: bool) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_string(format!(
+        r#"[{{"ObjectName":"{name}","Length":0,"IsDirectory":{is_directory},"LastChanged":"2026-11-03T07:49:00.859","Checksum":null}}]"#
+    ))
+}
+
+/// Live probe B1 (Task 7): `PUT /{zone}/{dir}/` with an empty body makes the folder, parents
+/// included, and it stays while empty.
 #[tokio::test]
-async fn create_folder_refused_while_unknown() {
+async fn create_folder_puts_the_folder_url_with_an_empty_body() {
     let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/testzone/new/a%20b/"))
+        .and(header("AccessKey", "secret"))
+        .and(header("Content-Length", "0"))
+        .and(body_bytes(Vec::new()))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_string(r#"{"HttpCode":201,"Message":"Directory created."}"#),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
     let storage = storage(&s);
-    assert_eq!(storage.capabilities().empty_folders, EmptyFolders::Unknown);
-    let err = storage.create_folder(&rp("new")).await.unwrap_err();
+    assert_eq!(
+        storage.capabilities().empty_folders,
+        EmptyFolders::Supported
+    );
+    storage.create_folder(&rp("new/a b")).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_folder_of_the_root_sends_nothing() {
+    let s = MockServer::start().await;
+    storage(&s)
+        .create_folder(&RemotePath::root())
+        .await
+        .unwrap();
+    assert!(s.received_requests().await.unwrap().is_empty());
+}
+
+/// Bunny refuses a folder that is already there with the words it uses for a bad path; the
+/// parent's listing shows the folder, so that is a success.
+#[tokio::test]
+async fn create_folder_that_is_already_there_is_fine() {
+    let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/testzone/new/sub/"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(INVALID_PATH))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/testzone/new/"))
+        .respond_with(parent_listing("sub", true))
+        .expect(1)
+        .mount(&s)
+        .await;
+    storage(&s).create_folder(&rp("new/sub")).await.unwrap();
+}
+
+/// The same 400 when the parent does not show the folder (here only a file of that name) is a
+/// real refusal, and says what the server said. It is not retried.
+#[tokio::test]
+async fn create_folder_refused_for_another_reason_says_why() {
+    let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/testzone/new/sub/"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(INVALID_PATH))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/testzone/new/"))
+        .respond_with(parent_listing("sub", false))
+        .expect(1)
+        .mount(&s)
+        .await;
+    match storage(&s).create_folder(&rp("new/sub")).await {
+        Err(ProviderError::Permanent(message)) => {
+            assert!(message.contains("Invalid path specified."), "{message}");
+        }
+        other => panic!("expected Permanent, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn create_folder_busy_400_is_retried() {
+    let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("Unable to process request"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&s)
+        .await;
+    storage(&s).create_folder(&rp("new")).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_folder_with_a_wrong_password_is_auth() {
+    let s = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let err = storage(&s).create_folder(&rp("new")).await.unwrap_err();
     assert_eq!(
         err,
-        ProviderError::Refused("Bunny Storage creates a folder with its first file.".into())
+        ProviderError::Auth {
+            hint: AuthHint::Unknown
+        }
     );
-    assert!(s.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -324,9 +324,123 @@ async fn list_encodes_segments() {
         .expect(1)
         .mount(&s)
         .await;
+    // The folder is empty, so its parent is asked whether it exists.
+    Mock::given(method("GET"))
+        .and(path("/testzone/"))
+        .respond_with(listing(&[("x y#", true)]))
+        .expect(1)
+        .mount(&s)
+        .await;
     let dir = RemotePath::parse("x y#").unwrap();
     let l = storage(&s).list(&dir).await.unwrap();
     assert!(l.entries.is_empty());
+}
+
+/// A listing answer with `(name, is_directory)` objects, shaped like Bunny's.
+fn listing(objects: &[(&str, bool)]) -> ResponseTemplate {
+    let objects: Vec<serde_json::Value> = objects
+        .iter()
+        .map(|(name, is_directory)| {
+            serde_json::json!({
+                "Guid": "00000000-0000-0000-0000-000000000001",
+                "StorageZoneName": "testzone",
+                "Path": "/testzone/",
+                "ObjectName": name,
+                "Length": 0,
+                "LastChanged": "2026-11-03T07:49:00.859",
+                "IsDirectory": is_directory,
+                "Checksum": null,
+                "ContentType": "",
+                "ReplicatedZones": null,
+            })
+        })
+        .collect();
+    ResponseTemplate::new(200).set_body_json(objects)
+}
+
+/// Live probe (Task 7): Bunny answers `200 []` for a folder that is not there, exactly as for
+/// an empty one. The parent's listing tells them apart: only a folder it shows by that very
+/// name exists (names are case-sensitive, and a file of that name is not the folder).
+#[tokio::test]
+async fn an_empty_answer_is_a_missing_folder_unless_the_parent_lists_it() {
+    for (parent, exists) in [
+        (vec![("b", true)], true),
+        (vec![], false),
+        (vec![("B", true)], false),
+        (vec![("b", false)], false),
+        (vec![("other", true), ("b", false), ("b", true)], true),
+    ] {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/testzone/a/b/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .expect(1)
+            .mount(&s)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/testzone/a/"))
+            .respond_with(listing(&parent))
+            .expect(1)
+            .mount(&s)
+            .await;
+        let result = storage(&s).list(&rp("a/b")).await;
+        if exists {
+            assert!(result.unwrap().entries.is_empty(), "{parent:?}");
+        } else {
+            assert_eq!(result.unwrap_err(), ProviderError::NotFound, "{parent:?}");
+        }
+    }
+}
+
+/// A folder with something in it, and the root, need no second listing.
+#[tokio::test]
+async fn a_listing_with_entries_or_of_the_root_asks_nothing_more() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/testzone/a/"))
+        .respond_with(listing(&[("f.txt", false)]))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/testzone/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let storage = storage(&s);
+    assert_eq!(storage.list(&rp("a")).await.unwrap().entries.len(), 1);
+    assert!(
+        storage
+            .list(&RemotePath::root())
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+}
+
+/// The parent's listing is a listing like any other: its failures are the answer.
+#[tokio::test]
+async fn a_failing_parent_listing_fails_the_listing() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/testzone/a/b/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/testzone/a/"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&s)
+        .await;
+    let err = storage(&s).list(&rp("a/b")).await.unwrap_err();
+    assert_eq!(
+        err,
+        ProviderError::Auth {
+            hint: AuthHint::Unknown
+        }
+    );
 }
 
 #[tokio::test]
@@ -566,7 +680,7 @@ async fn capabilities_match_bunny_limits() {
             server_side_copy: false,
             recursive_delete: true,
             batch_delete_max: 1,
-            empty_folders: EmptyFolders::Unknown,
+            empty_folders: EmptyFolders::Supported,
             list_concurrency: 5,
             delete_concurrency: 16,
             transfer_concurrency_max: 96,

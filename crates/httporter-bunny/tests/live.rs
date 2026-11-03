@@ -1150,3 +1150,34 @@ async fn encoded_parentheses_and_plus_accepted() {
     })
     .await;
 }
+
+/// The client as the findings above left it: `create_folder` (twice, the second time onto a
+/// folder that is there), an empty folder, a missing one and a file asked for as a folder.
+#[tokio::test]
+#[ignore = "live: needs .env.test and the Bunny test zone"]
+async fn client_folders_after_the_findings() {
+    probe("client", |live| async move {
+        let made = live.path("made/inner");
+        let first = live.storage.create_folder(&made).await;
+        live.observe("client: create_folder made/inner", format!("{first:?}"));
+        let again = live.storage.create_folder(&made).await;
+        live.observe(
+            "client: create_folder made/inner again",
+            format!("{again:?}"),
+        );
+        let empty = live.storage.list(&made).await;
+        live.observe("client: listing the new empty folder", live.listed(&empty));
+        let missing = live.storage.list(&live.path("made/nope")).await;
+        live.observe("client: listing a missing folder", live.listed(&missing));
+        live.put_text("made/f.txt", "f").await;
+        let file = live.storage.list(&live.path("made/f.txt")).await;
+        live.observe("client: listing a file as a folder", live.listed(&file));
+
+        assert_eq!(first, Ok(()), "create_folder makes the folder");
+        assert_eq!(again, Ok(()), "a folder that is there is fine");
+        assert!(empty.is_ok_and(|l| l.entries.is_empty()));
+        assert_eq!(missing.err(), Some(ProviderError::NotFound));
+        assert_eq!(file.err(), Some(ProviderError::NotFound));
+    })
+    .await;
+}
