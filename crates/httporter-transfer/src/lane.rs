@@ -15,14 +15,14 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use httporter_core::{
-    BodyMeter, Checksum, ChecksumKind, Job, JobId, ProviderError, RemotePath, RetryPolicy,
-    StorageProvider, TransferSettings, UploadOptions, UploadSource, content_type_for,
+    AuthHint, BodyMeter, Checksum, ChecksumKind, FileStamp, Job, JobId, ProviderError, RemotePath,
+    RetryPolicy, StorageProvider, TransferSettings, UploadOptions, UploadSource, content_type_for,
 };
 use md5::Md5;
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
-use crate::engine::{Inner, Slab};
+use crate::engine::{Inner, Net, Slab};
 use crate::limiter::AdaptiveLimiter;
 use crate::local::{LocalError, LocalFiles, blocking};
 use crate::messages;
@@ -69,6 +69,9 @@ pub(crate) enum LaneState {
     Running,
     /// The site refused its credentials: nothing starts until `resume_site`.
     AuthStopped,
+    /// The site found the PC's clock too far off: nothing starts until `resume_site`, once the
+    /// clock is set (review I4).
+    ClockSkew,
     /// The site can't be reached: nothing starts until a probe gets an answer (see
     /// [`crate::offline`]).
     Offline,
@@ -120,6 +123,8 @@ pub(crate) struct Lane {
     pub(crate) paths: ActivePaths,
     /// The latest network errors, which take the lane offline when they come too close.
     pub(crate) network: NetworkErrors,
+    /// How many times the lane has gone offline: a job's strikes are counted once per cycle.
+    pub(crate) cycle: u64,
 }
 
 impl Lane {
@@ -141,6 +146,7 @@ impl Lane {
             state: LaneState::Running,
             paths: ActivePaths::default(),
             network: NetworkErrors::default(),
+            cycle: 0,
         };
         lane.configure(settings);
         lane
@@ -360,6 +366,19 @@ pub(crate) enum Work {
     },
 }
 
+impl Work {
+    /// The remote path of a single job's work; `None` for file deletes sent together.
+    fn remote(&self) -> Option<&RemotePath> {
+        match self {
+            Self::Upload { remote, .. }
+            | Self::Download { remote, .. }
+            | Self::Delete { remote, .. }
+            | Self::CreateFolder { remote, .. } => Some(remote),
+            Self::DeleteFiles { .. } => None,
+        }
+    }
+}
+
 /// Everything a unit's task needs, taken when it was dispatched.
 pub(crate) struct UnitSpec {
     pub(crate) unit: UnitId,
@@ -497,7 +516,11 @@ async fn run(inner: &Arc<Inner>, spec: &UnitSpec, part: Option<&PartSlot>) {
 /// A network error that takes the lane offline, or one met while it is offline, ends the
 /// attempts with [`Failure::Offline`]: the job waits in the queue for the site, and the
 /// attempts it used don't count. So does using up the retries on network errors, which takes
-/// the lane offline (unless the job has done so [`crate::offline::MAX_STRIKES`] times).
+/// the lane offline. Each time is a strike for the job; at the third it fails instead (ruling
+/// Q50, [`Inner::network_error`]).
+///
+/// An unexplained refusal ([`AuthHint::Unknown`]) is checked before the site is stopped for it
+/// ([`denied_or_auth`], review I5).
 async fn attempts<T, F, Fut>(
     inner: &Arc<Inner>,
     spec: &UnitSpec,
@@ -523,17 +546,25 @@ where
         if error.is_slow_down() {
             inner.slow_down(spec.lane, spec.kind, seen);
         }
-        let network = matches!(error, ProviderError::Network(_));
-        if network && inner.network_error(spec.lane) {
-            return Err(Failure::Offline);
+        if let ProviderError::Auth {
+            hint: AuthHint::Unknown,
+        } = error
+        {
+            return Err(denied_or_auth(inner, spec, error).await);
+        }
+        let delay = policy.delays.get(attempt as usize).copied();
+        if matches!(error, ProviderError::Network(_)) {
+            let exhausted = delay.is_none();
+            match inner.network_error(spec.lane, spec.unit, &[id], exhausted)[0] {
+                Net::Retry => {}
+                Net::Offline => return Err(Failure::Offline),
+                Net::Fail => return Err(error.into()),
+            }
         }
         if !worth_retrying(&error, policy) {
             return Err(error.into());
         }
-        let Some(&delay) = policy.delays.get(attempt as usize) else {
-            if network && !inner.network_exhausted(spec.lane, spec.unit, id) {
-                return Err(Failure::Offline);
-            }
+        let Some(delay) = delay else {
             return Err(error.into());
         };
         let wait = match &error {
@@ -544,6 +575,28 @@ where
         };
         tokio::time::sleep(wait).await;
         attempt += 1;
+    }
+}
+
+/// What an unexplained refusal of one file's request (`error`, S3 `AccessDenied` with no hint)
+/// means (review I5). It may be the sign-in failing, or a key or a bucket policy that allows some
+/// paths only: the file's folder is listed to tell. Refused as well, the sign-in is broken, and
+/// the site stops ([`Failure::Provider`] with `error`). Listed (or found missing), the sign-in
+/// works, and only this file fails, with [`messages::ACCESS_DENIED`]; stopping the site would
+/// loop, since Edit Site's test would pass and the same file be refused again. With no answer to
+/// the listing nothing is known, and the site stops as for any refusal. A site already stopped
+/// isn't asked again.
+async fn denied_or_auth(inner: &Arc<Inner>, spec: &UnitSpec, error: ProviderError) -> Failure {
+    let Some(remote) = spec.work.remote() else {
+        return error.into();
+    };
+    if inner.lane_stopped(spec.lane) {
+        return error.into();
+    }
+    let dir = remote.parent().unwrap_or_else(RemotePath::root);
+    match spec.provider.list(&dir).await {
+        Err(ProviderError::Auth { .. } | ProviderError::Network(_)) => error.into(),
+        _ => Failure::Reason(messages::ACCESS_DENIED.to_owned()),
     }
 }
 
@@ -645,10 +698,20 @@ async fn upload(
                 *lock(prepared) = Some(fresh.clone());
                 inner.set_size(spec.unit, id, fresh.len);
                 inner.restart_progress(spec.unit, id);
+                // Every upload keeps its multipart progress in the journal, for providers that
+                // send large files in parts (ruling Q49).
+                let parts = inner.job_parts(
+                    spec.unit,
+                    id,
+                    FileStamp::new(fresh.len, fresh.modified),
+                    spec.provider.clone(),
+                    remote.clone(),
+                );
                 let opts = UploadOptions {
                     sha256: fresh.sha256,
                     md5: fresh.md5,
                     meter: Some(meter.clone()),
+                    parts: Some(parts),
                     ..UploadOptions::new(content_type.clone())
                 };
                 let source = UploadSource::File {
@@ -955,7 +1018,8 @@ async fn delete(
 ///
 /// A request that got no answer counts as one network error for the lane. Once the lane is
 /// offline the paths still to delete are left unfinished, so they go back to the queue as they
-/// were.
+/// were; each file whose own request took the lane offline, or met it offline, gets a strike,
+/// and fails at the third (ruling Q50), as a single job does.
 async fn delete_files(inner: &Arc<Inner>, spec: &UnitSpec, items: &[(JobId, RemotePath, bool)]) {
     let policy = &spec.policy;
     let mut pending: Vec<(JobId, RemotePath, bool)> = items.to_vec();
@@ -1009,16 +1073,33 @@ async fn delete_files(inner: &Arc<Inner>, spec: &UnitSpec, items: &[(JobId, Remo
         if again.is_empty() {
             return;
         }
-        if unanswered && inner.network_error(spec.lane) {
-            return;
-        }
-        let Some(&delay) = policy.delays.get(attempt) else {
-            for (id, _, error) in again {
-                if matches!(error, ProviderError::Network(_))
-                    && !inner.network_exhausted(spec.lane, spec.unit, id)
-                {
-                    continue;
+        let delay = policy.delays.get(attempt).copied();
+        if unanswered {
+            let unreached: Vec<JobId> = again
+                .iter()
+                .filter(|(_, _, error)| matches!(error, ProviderError::Network(_)))
+                .map(|(id, _, _)| *id)
+                .collect();
+            let outcomes = inner.network_error(spec.lane, spec.unit, &unreached, delay.is_none());
+            if outcomes.iter().any(|net| *net != Net::Retry) {
+                // The lane is offline: what is left goes back to the queue as it was, except the
+                // files that struck out, and those whose retries of another kind are used up.
+                let mut outcomes = outcomes.into_iter();
+                for (id, _, error) in again {
+                    let fails = if matches!(error, ProviderError::Network(_)) {
+                        outcomes.next() == Some(Net::Fail)
+                    } else {
+                        delay.is_none()
+                    };
+                    if fails {
+                        inner.finish_in_batch(spec.unit, id, Err(error.into()));
+                    }
                 }
+                return;
+            }
+        }
+        let Some(delay) = delay else {
+            for (id, _, error) in again {
                 inner.finish_in_batch(spec.unit, id, Err(error.into()));
             }
             return;

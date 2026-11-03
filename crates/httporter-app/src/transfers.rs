@@ -723,7 +723,7 @@ impl Transfers {
         let engine = self.engine.clone();
         self.link
             .rt()
-            .spawn_blocking(move || engine.discard_journal());
+            .spawn_blocking(move || engine.discard_journal(&|_| None));
     }
 
     // ---- The engine's feed ----

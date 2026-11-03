@@ -10,6 +10,15 @@
 //! record's multipart column, which a delete never otherwise uses: a `Delete` record with
 //! `multipart: Some(_)` (the [`DELETE_SENT`] marker) was possibly sent, so after a crash a
 //! `NotFound` for it means done (ledger 179). This keeps the journal's shape as it is.
+//!
+//! An upload's column holds its multipart progress (ruling Q49): every upload is given a
+//! [`JobParts`] part journal, which keeps the progress on the job's entry and writes it through
+//! the same ordered writer, so an upload interrupted by a crash, a pause, an offline spell or a
+//! failed try carries on from the parts already stored. Only an upload's part journal writes
+//! the column, and only a delete's record is read as possibly sent, so the two uses never meet.
+//! An upload the user cancels or discards is given up on the service
+//! ([`StorageProvider::abort_multipart`]) by a task the app waits for as it closes
+//! ([`Engine::pending_aborts`]), so its stored parts aren't left to be billed.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -17,9 +26,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::Utc;
 use httporter_core::{
-    BatchSummary, Checksum, Direction, EngineSnapshot, EngineState, Job, JobId, JobKind, JobRecord,
-    JobState, JobView, Journal, JournalError, MultipartProgress, ProviderError, RemotePath, SiteId,
-    StorageProvider, TransferSettings,
+    BatchSummary, Checksum, Direction, EngineSnapshot, EngineState, FileStamp, Job, JobId, JobKind,
+    JobRecord, JobState, JobView, Journal, JournalError, JournalUpdate, MultipartProgress,
+    PartJournal, ProviderError, RemotePath, SiteId, StorageProvider, TransferSettings,
 };
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, mpsc, watch};
@@ -36,6 +45,35 @@ use crate::rate::{RateWindow, eta};
 
 /// The `upload_id` of the multipart progress that marks a delete as possibly sent.
 pub(crate) const DELETE_SENT: &str = "httporter:delete-sent";
+
+/// Whether `progress` is a real multipart upload on the service, one that can be resumed or must
+/// be given up: not the "possibly sent" mark of a delete.
+pub(crate) fn is_upload(progress: &MultipartProgress) -> bool {
+    !progress.upload_id.is_empty() && progress.upload_id != DELETE_SENT
+}
+
+/// The multipart progress a journal record carries for its job: an upload's own, never a
+/// delete's "possibly sent" mark (review C2 b).
+fn upload_progress(job: &Job, multipart: Option<MultipartProgress>) -> Option<MultipartProgress> {
+    match job {
+        Job::Upload { .. } => multipart.filter(is_upload),
+        _ => None,
+    }
+}
+
+/// Whether a journal record is a delete whose request may have reached the server: only a
+/// delete's record is read that way (review C2 b).
+fn possibly_sent(job: &Job, multipart: Option<&MultipartProgress>) -> bool {
+    matches!(job, Job::Delete { .. }) && multipart.is_some()
+}
+
+/// What didn't finish last time, for the resume banner.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Unfinished {
+    pub total: usize,
+    /// How many of them are deletes, which Resume carries out.
+    pub deletes: usize,
+}
 
 /// A site as [`Engine::resume_from_journal`] needs it: its name, its host, and its client.
 pub type SiteInfo = (String, String, Arc<dyn StorageProvider>);
@@ -89,12 +127,63 @@ pub(crate) struct Inner {
     rt: Handle,
     journal: Arc<dyn Journal>,
     writer: JournalWriter,
+    aborts: Aborts,
     describe: fn(&ProviderError) -> String,
     pub(crate) bucket: TokenBucket,
     state: Mutex<State>,
     /// Wakes the dispatcher.
     wake: Notify,
     changes: Arc<watch::Sender<u64>>,
+}
+
+/// Multipart uploads being given up (ruling Q49): each `abort_multipart` runs in its own task,
+/// counted while it runs so that closing can wait for it. Best effort: a failed abort only
+/// leaves the parts where they are.
+#[derive(Clone)]
+struct Aborts {
+    rt: Handle,
+    running: Arc<AtomicUsize>,
+    changes: Arc<watch::Sender<u64>>,
+}
+
+/// Counts one abort as running until it is dropped: when the task ends, or is dropped unrun.
+struct AbortRunning(Arc<AtomicUsize>, Arc<watch::Sender<u64>>);
+
+impl Drop for AbortRunning {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.1.send_modify(|n| *n = n.wrapping_add(1));
+    }
+}
+
+impl Aborts {
+    /// Gives up the upload `upload_id` of `remote` through `provider`, in a task.
+    fn send(&self, provider: Arc<dyn StorageProvider>, remote: RemotePath, upload_id: String) {
+        self.running.fetch_add(1, Ordering::SeqCst);
+        let running = AbortRunning(self.running.clone(), self.changes.clone());
+        self.rt.spawn(async move {
+            let _running = running;
+            let _ = provider.abort_multipart(&remote, &upload_id).await;
+        });
+    }
+
+    /// Gives up the multipart upload of `job`, if `progress` is one.
+    fn give_up(
+        &self,
+        provider: &Arc<dyn StorageProvider>,
+        job: &Job,
+        progress: Option<&MultipartProgress>,
+    ) {
+        if let (Job::Upload { remote, .. }, Some(progress)) = (job, progress)
+            && is_upload(progress)
+        {
+            self.send(provider.clone(), remote.clone(), progress.upload_id.clone());
+        }
+    }
+
+    fn running(&self) -> usize {
+        self.running.load(Ordering::SeqCst)
+    }
 }
 
 /// Where a job stands in memory. A cancelled job is let go at once.
@@ -131,8 +220,13 @@ pub(crate) struct Entry {
     sent: bool,
     /// What a download's contents must hash to, when its batch said.
     checksum: Option<Checksum>,
-    /// How many times it used up its retries on network errors (see [`MAX_STRIKES`]).
+    /// How many offline cycles its own network errors started or met (see [`MAX_STRIKES`]).
     strikes: u8,
+    /// The lane's offline cycle of its latest strike: one strike per cycle.
+    struck: Option<u64>,
+    /// An upload's multipart progress, as the journal holds it (ruling Q49). Never a delete's
+    /// "possibly sent" mark.
+    multipart: Option<MultipartProgress>,
 }
 
 /// Every job the engine still needs to know about: queued, active, failed, and the done ones
@@ -257,6 +351,8 @@ struct State {
     disk_full: Option<(String, u64)>,
     /// The local file operations: the disk, unless a test stands in for it.
     files: Arc<dyn LocalFiles>,
+    /// Where cancelled uploads are given up.
+    aborts: Aborts,
 }
 
 impl Engine {
@@ -270,13 +366,19 @@ impl Engine {
     ) -> Self {
         let changes = Arc::new(watch::channel(0u64).0);
         let writer = JournalWriter::spawn(&rt, journal.clone(), changes.clone());
+        let aborts = Aborts {
+            rt: rt.clone(),
+            running: Arc::new(AtomicUsize::new(0)),
+            changes: changes.clone(),
+        };
         let inner = Arc::new(Inner {
             rt: rt.clone(),
             journal,
             writer,
+            aborts: aborts.clone(),
             describe,
             bucket: TokenBucket::new(settings.bandwidth_limit_bytes()),
-            state: Mutex::new(State::new(settings)),
+            state: Mutex::new(State::new(settings, aborts)),
             wake: Notify::new(),
             changes,
         });
@@ -287,7 +389,9 @@ impl Engine {
         }
     }
 
-    /// New settings, for work starting from now on (and the bandwidth limit at once).
+    /// New settings, for work starting from now on (and the bandwidth limit at once). Settings
+    /// a site's client is built with (the proxy, the protocol, its own transfer slots) reach the
+    /// work already queued through [`Self::replace_provider`].
     pub fn set_settings(&self, settings: TransferSettings) {
         self.inner.bucket.set_rate(settings.bandwidth_limit_bytes());
         {
@@ -298,6 +402,40 @@ impl Engine {
             st.settings = settings;
         }
         self.inner.poke();
+    }
+
+    /// Hands `site` a new client (reviews I3, M2): rebuilt for new settings, or for the edited
+    /// site. The units that start from now on and the offline probe use it; the units in flight
+    /// finish with the one they started with. Nothing else about the site's lane changes: a
+    /// stopped lane stays stopped ([`Self::resume_site`] restarts one).
+    pub fn replace_provider(&self, site: &SiteId, provider: Arc<dyn StorageProvider>) {
+        {
+            let mut guard = self.inner.lock();
+            let State {
+                lanes,
+                lane_of,
+                settings,
+                ..
+            } = &mut *guard;
+            let Some(&lane) = lane_of.get(site) else {
+                return;
+            };
+            lanes[lane].provider = provider;
+            lanes[lane].configure(settings);
+        }
+        self.inner.poke();
+    }
+
+    /// The sites the engine has a lane for: those it was given work for since it started.
+    pub fn sites(&self) -> Vec<SiteId> {
+        self.inner.lock().lane_of.keys().cloned().collect()
+    }
+
+    /// The client `site`'s lane starts its units with, if it has a lane.
+    pub fn site_provider(&self, site: &SiteId) -> Option<Arc<dyn StorageProvider>> {
+        let st = self.inner.lock();
+        let lane = *st.lane_of.get(site)?;
+        Some(st.lanes[lane].provider.clone())
     }
 
     /// Journals every job of `batch` (one transaction), then queues them on the site's lane.
@@ -527,7 +665,8 @@ impl Engine {
         self.inner.poke();
     }
 
-    /// Restarts a site stopped by an auth failure, with the edited site's client.
+    /// Restarts a site stopped by an auth failure, with the edited site's client, or one
+    /// stopped by a clock that was off (review I4), with the client it had.
     pub fn resume_site(&self, site: &SiteId, provider: Arc<dyn StorageProvider>) {
         {
             let mut guard = self.inner.lock();
@@ -565,6 +704,23 @@ impl Engine {
             .map(|(site, _)| site.clone())
     }
 
+    /// The site the clock banner is about (review I4): the first one stopped because it found
+    /// the PC's clock too far off that still has work (the one [`EngineState::ClockSkew`]
+    /// names), with the client its lane has, for [`Self::resume_site`] once the clock is set.
+    pub fn clock_skewed_site(&self) -> Option<(SiteId, Arc<dyn StorageProvider>)> {
+        let st = self.inner.lock();
+        let lane = st
+            .lanes
+            .iter()
+            .position(|lane| lane.state == LaneState::ClockSkew && lane.has_work())?;
+        let site = st
+            .lane_of
+            .iter()
+            .find(|&(_, &index)| index == lane)
+            .map(|(site, _)| site.clone())?;
+        Some((site, st.lanes[lane].provider.clone()))
+    }
+
     /// Cancels everything of `site` not yet done: its queued, paused, running and failed jobs
     /// (the site is being removed). The other sites carry on.
     pub fn cancel_site(&self, site: &SiteId) {
@@ -595,6 +751,50 @@ impl Engine {
         self.inner.poke();
     }
 
+    /// The site is being removed: cancels everything of it (as [`Self::cancel_site`]), and marks
+    /// every unfinished journal record of it Cancelled at once, those a crash left included. The
+    /// multipart uploads of those left by a crash are given up through `provider` when there is
+    /// one (ruling Q49; the engine's own are given up as they are cancelled). Reads and writes
+    /// the journal: call it off the UI thread.
+    pub fn forget_site(&self, site: &SiteId, provider: Option<Arc<dyn StorageProvider>>) {
+        self.cancel_site(site);
+        let records = match self.inner.journal.unfinished() {
+            Ok(records) => records,
+            Err(_) => {
+                self.inner.writer.count_error();
+                self.inner.bump();
+                return;
+            }
+        };
+        let left: Vec<(JobRecord, bool)> = {
+            let st = self.inner.lock();
+            records
+                .into_iter()
+                .filter(|record| record.site == *site)
+                .map(|record| {
+                    let held = job_id(record.id).is_some_and(|id| st.jobs.get(id).is_some());
+                    (record, held)
+                })
+                .collect()
+        };
+        for (record, held) in &left {
+            if let (Some(provider), false) = (&provider, held) {
+                self.inner
+                    .aborts
+                    .give_up(provider, &record.job, record.multipart.as_ref());
+            }
+            if self
+                .inner
+                .journal
+                .set_state(record.id, JobState::Cancelled, None)
+                .is_err()
+            {
+                self.inner.writer.count_error();
+            }
+        }
+        self.inner.bump();
+    }
+
     /// What the drawer shows now. Costs the same however many jobs there are: the lists are
     /// windows of at most [`WINDOW`] jobs and the totals are kept as jobs change.
     pub fn snapshot(&self) -> EngineSnapshot {
@@ -609,9 +809,27 @@ impl Engine {
         self.inner.changes.subscribe()
     }
 
-    /// Something is queued (paused ones too), running, or not yet written to the journal.
+    /// Something is queued (paused ones too), running, not yet written to the journal, or a
+    /// multipart upload is still being given up.
     pub fn is_busy(&self) -> bool {
-        self.inner.lock().has_work() || self.inner.writer.pending() > 0
+        self.has_work() || self.pending_writes() > 0 || self.pending_aborts() > 0
+    }
+
+    /// Transfers are queued (paused ones too) or running: what the quit alert asks about. The
+    /// journal writes and aborts still on their way are not transfers (review C1); closing waits
+    /// for them, with [`Self::pending_writes`] and [`Self::pending_aborts`].
+    pub fn has_work(&self) -> bool {
+        self.inner.lock().has_work()
+    }
+
+    /// Journal updates queued and not yet written.
+    pub fn pending_writes(&self) -> usize {
+        self.inner.writer.pending()
+    }
+
+    /// Multipart uploads still being given up (ruling Q49).
+    pub fn pending_aborts(&self) -> usize {
+        self.inner.aborts.running()
     }
 
     /// How many uploads and downloads the site may have in flight now, after any slow-down.
@@ -632,18 +850,30 @@ impl Engine {
     /// engine doesn't hold: what [`resume_from_journal`](Self::resume_from_journal) would offer
     /// again. 0 when the journal can't be read (counted as a journal error).
     pub fn unfinished_count(&self) -> usize {
+        self.unfinished().total
+    }
+
+    /// As [`Self::unfinished_count`], with how many of them are deletes: the resume banner names
+    /// them, since Resume carries them out (review C1).
+    pub fn unfinished(&self) -> Unfinished {
         let records = match self.inner.journal.unfinished() {
             Ok(records) => records,
             Err(_) => {
                 self.inner.writer.count_error();
-                return 0;
+                return Unfinished::default();
             }
         };
         let st = self.inner.lock();
-        records
-            .iter()
-            .filter(|record| job_id(record.id).is_some_and(|id| st.jobs.get(id).is_none()))
-            .count()
+        let mut left = Unfinished::default();
+        for record in &records {
+            if job_id(record.id).is_some_and(|id| st.jobs.get(id).is_none()) {
+                left.total += 1;
+                if matches!(record.job, Job::Delete { .. }) {
+                    left.deletes += 1;
+                }
+            }
+        }
+        left
     }
 
     /// Re-queues every unfinished journal record whose site `lookup` still knows, at the back
@@ -732,9 +962,11 @@ impl Engine {
                 if record.state == JobState::Failed {
                     writer.set_state(id, JobState::Queued, None);
                 }
-                let sent = matches!(job, Job::Delete { .. }) && record.multipart.is_some();
+                let sent = possibly_sent(&job, record.multipart.as_ref());
+                let multipart = upload_progress(&job, record.multipart);
                 let mut entry = Entry::new(job, lane, seq, size);
                 entry.sent = sent;
+                entry.multipart = multipart;
                 st.lanes[lane].queue.push_back(id);
                 st.jobs.insert(id, entry);
                 resumed += 1;
@@ -745,27 +977,49 @@ impl Engine {
     }
 
     /// Drops the unfinished jobs a crash left in the journal, when the user chooses not to
-    /// resume them. The jobs this engine holds stay journalled.
-    pub fn discard_journal(&self) {
+    /// resume them. The jobs this engine holds stay journalled. The multipart uploads among the
+    /// dropped ones are given up on their sites, through the clients `lookup` gives (ruling
+    /// Q49); a site it doesn't know keeps them.
+    pub fn discard_journal(&self, lookup: SiteLookup<'_>) {
         let holds_unfinished = {
             let st = self.inner.lock();
             st.has_work() || !st.failed.is_empty()
         };
         let journal = &self.inner.journal;
+        let records = match journal.unfinished() {
+            Ok(records) => records,
+            Err(_) => {
+                self.inner.writer.count_error();
+                self.inner.bump();
+                return;
+            }
+        };
+        let others: Vec<JobRecord> = {
+            let st = self.inner.lock();
+            records
+                .into_iter()
+                .filter(|record| job_id(record.id).is_none_or(|id| st.jobs.get(id).is_none()))
+                .collect()
+        };
+        let mut sites: HashMap<SiteId, Option<Arc<dyn StorageProvider>>> = HashMap::new();
+        for record in &others {
+            let uploading = upload_progress(&record.job, record.multipart.clone()).is_some();
+            if !uploading {
+                continue;
+            }
+            let provider = sites
+                .entry(record.site.clone())
+                .or_insert_with(|| lookup(&record.site).map(|(_, _, provider)| provider));
+            if let Some(provider) = provider {
+                self.inner
+                    .aborts
+                    .give_up(provider, &record.job, record.multipart.as_ref());
+            }
+        }
         let result = if holds_unfinished {
-            journal.unfinished().and_then(|records| {
-                let others: Vec<i64> = {
-                    let st = self.inner.lock();
-                    records
-                        .iter()
-                        .map(|record| record.id)
-                        .filter(|&id| job_id(id).is_none_or(|id| st.jobs.get(id).is_none()))
-                        .collect()
-                };
-                others
-                    .into_iter()
-                    .try_for_each(|id| journal.set_state(id, JobState::Cancelled, None))
-            })
+            others
+                .iter()
+                .try_for_each(|record| journal.set_state(record.id, JobState::Cancelled, None))
         } else {
             journal.discard_unfinished()
         };
@@ -840,7 +1094,20 @@ impl Entry {
             sent: false,
             checksum: None,
             strikes: 0,
+            struck: None,
+            multipart: None,
         }
+    }
+
+    /// The job's own network error took its lane offline, or met it offline, in the lane's
+    /// offline cycle `cycle`: a strike, counted once per cycle (ruling Q50). True once that
+    /// makes [`MAX_STRIKES`]: the job then fails rather than loop.
+    fn strike(&mut self, cycle: u64) -> bool {
+        if self.struck != Some(cycle) {
+            self.struck = Some(cycle);
+            self.strikes = self.strikes.saturating_add(1);
+        }
+        self.strikes >= MAX_STRIKES
     }
 
     fn view(&self, id: JobId) -> JobView {
@@ -857,7 +1124,7 @@ impl Entry {
 }
 
 impl State {
-    fn new(settings: TransferSettings) -> Self {
+    fn new(settings: TransferSettings, aborts: Aborts) -> Self {
         Self {
             settings,
             paused: false,
@@ -875,6 +1142,7 @@ impl State {
             rates: RateWindow::default(),
             disk_full: None,
             files: Arc::new(DiskFiles),
+            aborts,
         }
     }
 
@@ -1115,13 +1383,17 @@ impl State {
     }
 
     /// Cancels a job that is queued (already out of its queue), active or failed, and lets it
-    /// go.
+    /// go. An upload's multipart upload is given up, so the service frees its parts (ruling
+    /// Q49): one queued after a resume, one paused part way, or one cut short in flight.
     fn mark_cancelled(&mut self, id: JobId, writer: &JournalWriter) {
         self.leave_active(id);
         let Some(entry) = self.jobs.remove(id) else {
             return;
         };
         writer.set_state(id, JobState::Cancelled, None);
+        let provider = &self.lanes[entry.lane].provider;
+        self.aborts
+            .give_up(provider, &entry.job, entry.multipart.as_ref());
         let was_failed = entry.status == Status::Failed;
         if was_failed {
             self.failed.remove(&id);
@@ -1165,6 +1437,9 @@ impl State {
         entry.status = Status::Queued;
         entry.error = None;
         entry.done_bytes = 0;
+        // The user's Retry starts it afresh (ruling Q50).
+        entry.strikes = 0;
+        entry.struck = None;
         let (lane, batch, size) = (entry.lane, entry.batch, entry.size);
         self.failed.remove(&id);
         self.run.bytes_failed -= size;
@@ -1198,10 +1473,10 @@ impl State {
         }
     }
 
-    /// The site refused its credentials: its lane stops and everything in flight on it goes
-    /// back to the queue.
-    fn auth_stop(&mut self, lane: usize) {
-        self.lanes[lane].state = LaneState::AuthStopped;
+    /// The site refused its credentials (`AuthStopped`) or the PC's clock (`ClockSkew`): its
+    /// lane stops and everything in flight on it goes back to the queue.
+    fn stop_lane(&mut self, lane: usize, why: LaneState) {
+        self.lanes[lane].state = why;
         let lane = &self.lanes[lane];
         for (&unit, active) in &lane.units {
             interrupt(&mut self.jobs, unit, active, Stop::Requeue);
@@ -1223,6 +1498,15 @@ impl State {
             .find(|lane| lane.state == LaneState::AuthStopped && lane.has_work())
         {
             return EngineState::AuthStopped {
+                site: lane.name.clone(),
+            };
+        }
+        if let Some(lane) = self
+            .lanes
+            .iter()
+            .find(|lane| lane.state == LaneState::ClockSkew && lane.has_work())
+        {
+            return EngineState::ClockSkew {
                 site: lane.name.clone(),
             };
         }
@@ -1490,7 +1774,13 @@ impl Inner {
                 Err(_) if stop == Some(Stop::Cancel) => st.mark_cancelled(id, &self.writer),
                 Err(Failure::Provider(ProviderError::Auth { .. })) => {
                     st.requeue_front(lane, vec![id]);
-                    st.auth_stop(lane);
+                    st.stop_lane(lane, LaneState::AuthStopped);
+                }
+                // Every request to the site would be refused the same way until the clock is
+                // set: one stop, not a failure per job (review I4).
+                Err(Failure::Provider(ProviderError::ClockSkew)) => {
+                    st.requeue_front(lane, vec![id]);
+                    st.stop_lane(lane, LaneState::ClockSkew);
                 }
                 Err(Failure::Offline) => st.requeue_front(lane, vec![id]),
                 Err(Failure::DiskFull) => {
@@ -1511,54 +1801,75 @@ impl Inner {
         self.lock().lanes[lane].state == LaneState::Offline
     }
 
-    /// A request on `lane` got no answer. Returns whether the lane is offline now: it already
-    /// was, or this error makes too many too close together.
-    pub(crate) fn network_error(self: &Arc<Self>, lane: usize) -> bool {
-        let now = Instant::now();
-        {
-            let mut st = self.lock();
-            let lane_ref = &mut st.lanes[lane];
-            match lane_ref.state {
-                LaneState::Offline => return true,
-                LaneState::AuthStopped => return false,
-                LaneState::Running => {}
-            }
-            if !lane_ref.network.record(now) {
-                return false;
-            }
-        }
-        self.go_offline(lane);
-        true
-    }
-
-    /// Job `id` of `unit` used up its retries on network errors. Its lane goes offline and the
-    /// job goes back to the queue, unless it has done this [`MAX_STRIKES`] times: then it fails
-    /// (returns true).
-    pub(crate) fn network_exhausted(
+    /// One request of `unit` on `lane`, for the jobs `ids` (one, or the files of a
+    /// `delete_batch`), got no answer; `exhausted`: the jobs have no retries left. Says, for
+    /// each job, whether to try again, to go back to the queue as it was, or to fail.
+    ///
+    /// The lane goes offline when this makes [`crate::offline::OFFLINE_AFTER`] errors within
+    /// the window, or when the jobs have used up their retries. A job whose error takes the lane
+    /// offline, or meets it offline, gets a strike, one per offline cycle (ruling Q50); at
+    /// [`MAX_STRIKES`] it fails with the network error instead of sending the lane offline once
+    /// more. A site that answers its probes but never this job's requests would otherwise hold
+    /// it forever, with the offline banner blinking while the network is fine.
+    pub(crate) fn network_error(
         self: &Arc<Self>,
         lane: usize,
         unit: UnitId,
-        id: JobId,
-    ) -> bool {
-        {
-            let mut st = self.lock();
-            if let Some(entry) = st.jobs.get_mut(id)
-                && entry.status == Status::Active(unit)
-            {
-                entry.strikes = entry.strikes.saturating_add(1);
-                if entry.strikes >= MAX_STRIKES {
-                    return true;
+        ids: &[JobId],
+        exhausted: bool,
+    ) -> Vec<Net> {
+        let now = Instant::now();
+        let (outcomes, take_offline) = {
+            let mut guard = self.lock();
+            let st = &mut *guard;
+            let lane_ref = &mut st.lanes[lane];
+            let (offline, cycle) = match lane_ref.state {
+                LaneState::Offline => (true, lane_ref.cycle),
+                LaneState::Running => (false, lane_ref.cycle + 1),
+                // A stopped lane takes nothing until it is resumed: the jobs wait for that.
+                LaneState::AuthStopped | LaneState::ClockSkew => {
+                    let net = if exhausted { Net::Offline } else { Net::Retry };
+                    return vec![net; ids.len()];
                 }
+            };
+            let crowded = !offline && lane_ref.network.record(now);
+            let goes_offline = !offline && (crowded || exhausted);
+            if !offline && !goes_offline {
+                return vec![Net::Retry; ids.len()];
             }
+            let outcomes: Vec<Net> = ids
+                .iter()
+                .map(|&id| match st.jobs.get_mut(id) {
+                    Some(entry) if entry.status == Status::Active(unit) => {
+                        if entry.strike(cycle) {
+                            Net::Fail
+                        } else {
+                            Net::Offline
+                        }
+                    }
+                    _ => Net::Offline,
+                })
+                .collect();
+            // Errors only of jobs that now fail don't take the lane offline: the site answers.
+            let take_offline = goes_offline && outcomes.contains(&Net::Offline);
+            if goes_offline && !take_offline {
+                st.lanes[lane].network.clear();
+            }
+            (outcomes, take_offline)
+        };
+        if take_offline {
+            self.go_offline(lane);
         }
-        self.go_offline(lane);
-        false
+        outcomes
     }
 
-    /// Takes a running lane offline and starts probing its site.
+    /// Takes a running lane offline and starts probing its site. The work in flight on it goes
+    /// back to the queue at once, its attempts unused (review M1), rather than wait on dead
+    /// connections until they time out.
     fn go_offline(self: &Arc<Self>, lane: usize) {
         {
-            let mut st = self.lock();
+            let mut guard = self.lock();
+            let st = &mut *guard;
             if st.shut_down {
                 return;
             }
@@ -1568,9 +1879,41 @@ impl Inner {
             }
             lane_ref.state = LaneState::Offline;
             lane_ref.network.clear();
+            lane_ref.cycle += 1;
+            for (&unit, active) in &st.lanes[lane].units {
+                interrupt(&mut st.jobs, unit, active, Stop::Requeue);
+            }
         }
         self.rt.spawn(offline::probe(self.clone(), lane));
         self.bump();
+    }
+
+    /// Whether `lane` is stopped (a refused sign-in, a clock that is off) until resumed.
+    pub(crate) fn lane_stopped(&self, lane: usize) -> bool {
+        matches!(
+            self.lock().lanes[lane].state,
+            LaneState::AuthStopped | LaneState::ClockSkew
+        )
+    }
+
+    /// The part journal for one attempt at upload `id` of `unit` (ruling Q49), for the file as
+    /// the attempt found it.
+    pub(crate) fn job_parts(
+        self: &Arc<Self>,
+        unit: UnitId,
+        id: JobId,
+        file: FileStamp,
+        provider: Arc<dyn StorageProvider>,
+        remote: RemotePath,
+    ) -> Arc<dyn PartJournal> {
+        Arc::new(JobParts {
+            inner: self.clone(),
+            unit,
+            id,
+            file,
+            provider,
+            remote,
+        })
     }
 
     /// The client to probe an offline lane's site with; `None` once the lane isn't offline or
@@ -1629,32 +1972,114 @@ impl Inner {
     }
 }
 
-/// One journal update.
-enum Write {
-    State {
-        id: i64,
-        state: JobState,
-        error: Option<String>,
-    },
-    Multipart {
-        id: i64,
-        progress: Option<MultipartProgress>,
-    },
+/// What a job's request that got no answer leads to (see [`Inner::network_error`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Net {
+    /// Try again, after the policy's wait.
+    Retry,
+    /// Back to the queue as it was, its attempts unused: the lane is offline.
+    Offline,
+    /// Fail with the network error: the job has struck out (ruling Q50).
+    Fail,
 }
 
-impl Write {
-    fn apply(&self, journal: &dyn Journal) -> Result<(), JournalError> {
-        match self {
-            Self::State { id, state, error } => journal.set_state(*id, *state, error.as_deref()),
-            Self::Multipart { id, progress } => journal.set_multipart(*id, progress.as_ref()),
+/// The part journal of one attempt at an upload (ruling Q49): the job's multipart progress,
+/// kept on its entry and written to the journal's multipart column through the ordered writer,
+/// so the next attempt (after a failed one, a pause, an offline spell, or a crash and a resume)
+/// carries on from the parts already stored.
+struct JobParts {
+    inner: Arc<Inner>,
+    unit: UnitId,
+    id: JobId,
+    /// The file as this attempt found it. Recorded when the upload starts; parts recorded for a
+    /// file that has changed since are not reused.
+    file: FileStamp,
+    /// Where an upload found stale is given up.
+    provider: Arc<dyn StorageProvider>,
+    remote: RemotePath,
+}
+
+impl JobParts {
+    /// Changes the job's progress and journals it, while this attempt is the job's. Only an
+    /// upload's progress is ever written: a delete's column holds its "possibly sent" mark,
+    /// which an upload id must never overwrite (review C2 b).
+    fn update(&self, change: impl FnOnce(&mut Option<MultipartProgress>)) {
+        let mut st = self.inner.lock();
+        let Some(entry) = st.jobs.get_mut(self.id) else {
+            return;
+        };
+        if entry.status != Status::Active(self.unit) || !matches!(entry.job, Job::Upload { .. }) {
+            return;
         }
+        change(&mut entry.multipart);
+        self.inner
+            .writer
+            .set_multipart(self.id, entry.multipart.clone());
+    }
+}
+
+impl PartJournal for JobParts {
+    /// The progress of an earlier attempt, if the file is still the one its parts were cut
+    /// from. Progress for a file that changed since is forgotten, and its upload given up.
+    fn load(&self) -> Option<MultipartProgress> {
+        let stale = {
+            let mut st = self.inner.lock();
+            let entry = st.jobs.get_mut(self.id)?;
+            if !matches!(entry.job, Job::Upload { .. }) {
+                return None;
+            }
+            let progress = entry.multipart.as_ref()?;
+            if progress.file == Some(self.file) {
+                return Some(progress.clone());
+            }
+            let stale = entry.multipart.take()?;
+            self.inner.writer.set_multipart(self.id, None);
+            stale
+        };
+        if is_upload(&stale) {
+            self.inner
+                .aborts
+                .send(self.provider.clone(), self.remote.clone(), stale.upload_id);
+        }
+        None
+    }
+
+    fn started(&self, upload_id: &str, part_size: u64) {
+        let progress = MultipartProgress {
+            upload_id: upload_id.to_owned(),
+            part_size,
+            parts: Vec::new(),
+            file: Some(self.file),
+        };
+        self.update(|kept| *kept = Some(progress));
+    }
+
+    fn part_done(&self, number: u32, etag: &str) {
+        self.update(|kept| {
+            if let Some(progress) = kept {
+                progress.parts.retain(|(done, _)| *done != number);
+                progress.parts.push((number, etag.to_owned()));
+            }
+        });
+    }
+
+    fn finished(&self) {
+        self.update(|kept| *kept = None);
+    }
+
+    /// The user cancelled the job: its upload is not kept for a resume.
+    fn cancelled(&self) -> bool {
+        let st = self.inner.lock();
+        st.jobs
+            .get(self.id)
+            .is_none_or(|entry| entry.stop == Some(Stop::Cancel))
     }
 }
 
 /// Writes job states to the journal from one task, in the order they were made, off the
 /// runtime's worker threads, and counts the writes that fail.
 struct JournalWriter {
-    tx: mpsc::UnboundedSender<Write>,
+    tx: mpsc::UnboundedSender<JournalUpdate>,
     pending: Arc<AtomicUsize>,
     errors: Arc<AtomicU64>,
 }
@@ -1681,22 +2106,22 @@ impl JournalWriter {
     /// Queues an update. Called with the state locked, so updates queue in the order the
     /// changes were made.
     fn set_state(&self, id: JobId, state: JobState, error: Option<&str>) {
-        self.send(Write::State {
+        self.send(JournalUpdate::State {
             id: record_id(id),
             state,
             error: error.map(str::to_owned),
         });
     }
 
-    /// Queues a change to a job's multipart column (see the module's notes on deletes).
+    /// Queues a change to a job's multipart column (see the module's notes).
     fn set_multipart(&self, id: JobId, progress: Option<MultipartProgress>) {
-        self.send(Write::Multipart {
+        self.send(JournalUpdate::Multipart {
             id: record_id(id),
             progress,
         });
     }
 
-    fn send(&self, write: Write) {
+    fn send(&self, write: JournalUpdate) {
         self.pending.fetch_add(1, Ordering::SeqCst);
         if self.tx.send(write).is_err() {
             self.pending.fetch_sub(1, Ordering::SeqCst);
@@ -1720,36 +2145,36 @@ impl JournalWriter {
     }
 }
 
+/// The updates waiting are taken up to [`JOURNAL_CHUNK`] at a time and written with one
+/// [`Journal::apply`]: one transaction, one disk sync, however many there are (review C1:
+/// cancelling 13,793 jobs one commit at a time took about 9 s, longer than closing waited).
+///
 /// A write that fails leaves the job's older record: after a crash a finished job may be
 /// offered again, or a failed one forgotten. The job's state in memory is unaffected; the
-/// failure is counted, and the snapshot's `journal_errors` lets the app warn.
+/// failure is counted (every update of the chunk, since the journal can't say which were
+/// written), and the snapshot's `journal_errors` lets the app warn.
 async fn write_journal(
-    mut rx: mpsc::UnboundedReceiver<Write>,
+    mut rx: mpsc::UnboundedReceiver<JournalUpdate>,
     journal: Arc<dyn Journal>,
     pending: Arc<AtomicUsize>,
     errors: Arc<AtomicU64>,
     changes: Arc<watch::Sender<u64>>,
 ) {
     while let Some(first) = rx.recv().await {
-        let mut writes = vec![first];
-        while writes.len() < JOURNAL_CHUNK {
+        let mut updates = vec![first];
+        while updates.len() < JOURNAL_CHUNK {
             match rx.try_recv() {
-                Ok(write) => writes.push(write),
+                Ok(update) => updates.push(update),
                 Err(_) => break,
             }
         }
-        let n = writes.len();
+        let n = updates.len();
         let journal = journal.clone();
-        let failed = tokio::task::spawn_blocking(move || {
-            writes
-                .iter()
-                .filter(|write| write.apply(&*journal).is_err())
-                .count()
-        })
-        .await
-        .unwrap_or(n);
-        if failed > 0 {
-            errors.fetch_add(failed as u64, Ordering::SeqCst);
+        let written = tokio::task::spawn_blocking(move || journal.apply(&updates).is_ok())
+            .await
+            .unwrap_or(false);
+        if !written {
+            errors.fetch_add(n as u64, Ordering::SeqCst);
         }
         pending.fetch_sub(n, Ordering::SeqCst);
         changes.send_modify(|n| *n = n.wrapping_add(1));
@@ -1758,7 +2183,110 @@ async fn write_journal(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use httporter_core::{Capabilities, MemoryJournal, MockOp, MockProvider};
+
     use super::*;
+
+    fn progress(upload_id: &str) -> MultipartProgress {
+        MultipartProgress {
+            upload_id: upload_id.into(),
+            part_size: 5 << 20,
+            parts: vec![(1, "\"e1\"".into())],
+            file: None,
+        }
+    }
+
+    /// Review C2 (b): the multipart column holds an upload's progress or a delete's "possibly
+    /// sent" mark. A record's progress is read as an upload only for an upload, and as the mark
+    /// only for a delete.
+    #[test]
+    fn only_an_upload_has_progress_and_only_a_delete_was_possibly_sent() {
+        let upload = Job::Upload {
+            local: "big.bin".into(),
+            remote: RemotePath::parse("big.bin").unwrap(),
+            size: 1,
+        };
+        let delete = Job::Delete {
+            remote: RemotePath::parse("old.txt").unwrap(),
+            folder: false,
+        };
+        let real = progress("u-1");
+        let mark = delete_sent();
+        assert!(is_upload(&real) && !is_upload(&mark) && !is_upload(&progress("")));
+        assert_eq!(
+            upload_progress(&upload, Some(real.clone())),
+            Some(real.clone())
+        );
+        assert_eq!(upload_progress(&upload, Some(mark.clone())), None);
+        assert_eq!(upload_progress(&delete, Some(real.clone())), None);
+        assert_eq!(upload_progress(&delete, Some(mark.clone())), None);
+        assert_eq!(upload_progress(&upload, None), None);
+        assert!(possibly_sent(&delete, Some(&mark)));
+        assert!(possibly_sent(&delete, Some(&real)));
+        assert!(!possibly_sent(&delete, None));
+        assert!(!possibly_sent(&upload, Some(&real)));
+        assert!(!possibly_sent(&upload, Some(&mark)));
+    }
+
+    /// Review C2 (b): a part journal told about an upload never writes its id onto a delete's
+    /// record, whose column holds the "possibly sent" mark, even while the delete is the one in
+    /// flight.
+    #[tokio::test(start_paused = true)]
+    async fn a_part_journal_never_writes_onto_a_delete() {
+        let journal = Arc::new(MemoryJournal::new());
+        let engine = Engine::new(
+            Handle::current(),
+            journal.clone(),
+            TransferSettings::default(),
+            |e| e.to_string(),
+        );
+        let mock = Arc::new(MockProvider::new(Capabilities::default()).with_file("old.txt", b"o"));
+        mock.set_latency(MockOp::DeleteFile, Duration::from_secs(60));
+        let remote = RemotePath::parse("old.txt").unwrap();
+        engine
+            .submit(Batch {
+                site: SiteId("s".into()),
+                site_name: "S".into(),
+                host: "h".into(),
+                provider: mock.clone(),
+                jobs: vec![Job::Delete {
+                    remote: remote.clone(),
+                    folder: false,
+                }],
+                checksums: HashMap::new(),
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let id = JobId(1);
+        let Status::Active(unit) = engine.inner.lock().jobs.get(id).unwrap().status else {
+            panic!("the delete is not in flight");
+        };
+        let parts = engine
+            .inner
+            .job_parts(unit, id, FileStamp::new(1, None), mock.clone(), remote);
+        parts.started("u-1", 5 << 20);
+        parts.part_done(1, "\"e1\"");
+        assert_eq!(parts.load(), None);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let record = journal.records()[0].clone();
+        assert_eq!(record.multipart, Some(delete_sent()));
+        parts.finished();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(journal.records()[0].multipart, Some(delete_sent()));
+        assert!(
+            engine
+                .inner
+                .lock()
+                .jobs
+                .get(id)
+                .unwrap()
+                .multipart
+                .is_none()
+        );
+    }
 
     #[test]
     fn directions() {

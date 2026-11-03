@@ -16,7 +16,7 @@ mod plan;
 mod rate;
 
 pub use bucket::TokenBucket;
-pub use engine::{Batch, Engine, SiteInfo, SiteLookup, WINDOW};
+pub use engine::{Batch, Engine, SiteInfo, SiteLookup, Unfinished, WINDOW};
 pub use hash::{FileHashes, hash_file};
 pub use limiter::AdaptiveLimiter;
 pub use local::{DiskFiles, LocalFiles};

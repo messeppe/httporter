@@ -1,7 +1,8 @@
 //! When a site can't be reached or the disk is full.
 //!
 //! A lane goes offline after [`OFFLINE_AFTER`] network errors within [`OFFLINE_WINDOW`], or when
-//! one job uses up its retries on network errors. While it is offline nothing new starts on it,
+//! one job uses up its retries on network errors. Going offline sends the work in flight on it
+//! back to the queue at once. While it is offline nothing new starts on it,
 //! and a job that fails with a network error goes back to the queue as it was, without using up
 //! an attempt. The site is probed every [`PROBE_EVERY`] with `StorageProvider::reachable`; the
 //! first answer puts the lane back to work.
@@ -28,9 +29,10 @@ pub(crate) const OFFLINE_WINDOW: Duration = Duration::from_secs(10);
 /// How often an offline site is asked whether it answers again.
 pub(crate) const PROBE_EVERY: Duration = Duration::from_secs(5);
 
-/// A job that uses up its retries on network errors this many times fails instead of sending
-/// its lane offline once more: a site that answers the probe but never this job's requests
-/// would otherwise hold the job forever.
+/// A job whose own network errors take its lane offline (or meet it offline) in this many
+/// offline cycles fails with the network error instead of sending the lane offline once more
+/// (ruling Q50): a site that answers the probe but never this job's requests would otherwise
+/// hold the job forever. The user's Retry starts it again with none.
 pub(crate) const MAX_STRIKES: u8 = 3;
 
 /// The latest network errors on one lane.

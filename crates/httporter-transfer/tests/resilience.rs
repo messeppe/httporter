@@ -488,7 +488,8 @@ async fn offline_pauses_and_resumes_without_failures() {
         .submit(batch(site.clone(), upload_jobs(dir.path(), 20, 10)))
         .unwrap();
 
-    // The first four tries fail at once: three errors within 10 s take the lane offline.
+    // The first three tries fail at once: three errors within 10 s take the lane offline, and
+    // the fourth transfer, about to start, goes back to the queue untried (review M1).
     wait_for(&engine, "the lane to go offline", |s| s.state == offline()).await;
     assert_eq!(start.elapsed(), Duration::ZERO);
 
@@ -503,7 +504,7 @@ async fn offline_pauses_and_resumes_without_failures() {
     );
     assert!(s.active.is_empty() && s.failed.is_empty());
     assert_eq!(s.eta, None);
-    assert_eq!(site.total_uploads(), 4, "no tries while offline");
+    assert_eq!(site.total_uploads(), 3, "no tries while offline");
     assert_eq!(site.probes(), 4, "a probe every 5 s");
     assert_eq!(count(&journal, JobState::Failed), 0);
 
@@ -902,7 +903,7 @@ async fn discard_journal_clears_unfinished() {
     let engine = engine_on(journal.clone(), TransferSettings::default());
     let mock: Arc<dyn StorageProvider> = Arc::new(MockProvider::new(Capabilities::default()));
     assert_eq!(engine.unfinished_count(), 3);
-    engine.discard_journal();
+    engine.discard_journal(&only_site(mock.clone()));
     assert_eq!(engine.unfinished_count(), 0);
     assert!(journal.unfinished().unwrap().is_empty());
     assert_eq!(engine.resume_from_journal(&only_site(mock.clone())), 0);
@@ -918,7 +919,7 @@ async fn discard_journal_clears_unfinished() {
         ))
         .unwrap();
     assert_eq!(engine.unfinished_count(), 2);
-    engine.discard_journal();
+    engine.discard_journal(&only_site(mock.clone()));
     assert_eq!(engine.unfinished_count(), 0);
     let unfinished = journal.unfinished().unwrap();
     assert_eq!(unfinished.len(), 2);
@@ -1126,4 +1127,182 @@ async fn a_job_the_site_never_lets_through_fails_after_three_strikes() {
     let record = &journal.records()[0];
     assert_eq!(record.state, JobState::Failed);
     assert_eq!(record.error.as_deref(), Some("No connection"));
+}
+
+/// Ruling Q50 with the default settings (5 retries): a job whose requests never get through
+/// while the site answers its probes takes the lane offline itself (three errors within 10 s,
+/// before its retries run out). Each such offline→online cycle is a strike, and the third fails
+/// it with the network reason instead of looping forever. Retry starts it again with none.
+#[tokio::test(start_paused = true)]
+async fn a_stubborn_job_fails_after_three_strikes_with_default_retries() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(TransferSettings::default());
+    assert_eq!(TransferSettings::default().retries, 5);
+    let mock = Arc::new(MockProvider::new(Capabilities::default()));
+    mock.fail_next(MockOp::Upload, ProviderError::Network("reset".into()), 1000);
+    let start = Instant::now();
+    engine
+        .submit(batch(mock.clone(), upload_jobs(dir.path(), 1, 10)))
+        .unwrap();
+
+    let s = wait_for(&engine, "the failure", |s| s.files_failed == 1).await;
+    // Tries at 0, 1 and 3 s (offline), 8, 9 and 11 s (offline), 16, 17 and 19 s: the third
+    // strike.
+    assert_eq!(start.elapsed(), Duration::from_secs(19));
+    assert_eq!(mock.calls(MockOp::Upload), 9);
+    assert_eq!(mock.calls(MockOp::Reachable), 2);
+    assert_eq!(s.failed[0].error.as_deref(), Some("No connection"));
+    let s = wait_idle(&engine).await;
+    assert_eq!(s.state, EngineState::Idle, "the site itself is fine");
+    assert_eq!(journal.records()[0].state, JobState::Failed);
+    assert_eq!(journal.records()[0].error.as_deref(), Some("No connection"));
+
+    // Retry: no strikes are left over, so the first cycle sends it back to the queue.
+    let failed = s.failed[0].id;
+    engine.retry(&[failed]);
+    let s = wait_for(&engine, "the lane to go offline again", |s| {
+        s.state == offline() && s.active.is_empty()
+    })
+    .await;
+    assert_eq!((s.files_failed, s.queued_count), (0, 1), "{}", brief(&s));
+    let s = wait_for(&engine, "the second failure", |s| s.files_failed == 1).await;
+    assert_eq!(mock.calls(MockOp::Upload), 18, "{}", brief(&s));
+}
+
+/// Ruling Q50 for file deletes sent together: a batch whose requests never get through takes
+/// the lane offline, a strike for each of its files, and the third strike fails them.
+#[tokio::test(start_paused = true)]
+async fn a_stubborn_batch_delete_fails_after_three_strikes_with_default_retries() {
+    let caps = Capabilities {
+        batch_delete_max: 10,
+        ..Capabilities::default()
+    };
+    let (engine, journal) = engine(TransferSettings::default());
+    let mock = Arc::new(
+        MockProvider::new(caps)
+            .with_file("a.txt", b"a")
+            .with_file("b.txt", b"b"),
+    );
+    mock.fail_next(
+        MockOp::DeleteBatch,
+        ProviderError::Network("reset".into()),
+        1000,
+    );
+    let start = Instant::now();
+    engine
+        .submit(batch(mock.clone(), vec![delete("a.txt"), delete("b.txt")]))
+        .unwrap();
+
+    let s = wait_for(&engine, "the failures", |s| s.files_failed == 2).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(19));
+    assert_eq!(mock.calls(MockOp::DeleteBatch), 9, "one request a try");
+    assert!(
+        s.failed
+            .iter()
+            .all(|view| view.error.as_deref() == Some("No connection")),
+        "{:?}",
+        s.failed
+    );
+    let s = wait_idle(&engine).await;
+    assert_eq!(s.state, EngineState::Idle);
+    assert_eq!(count(&journal, JobState::Failed), 2);
+    assert!(mock.contents(&p("a.txt")).is_some() && mock.contents(&p("b.txt")).is_some());
+}
+
+/// Review M1: when a lane goes offline, the transfers in flight on it go back to the queue at
+/// once, their attempts unused, instead of sitting on dead connections until they time out.
+#[tokio::test(start_paused = true)]
+async fn going_offline_sends_the_work_in_flight_back_to_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(with(4));
+    let mock = Arc::new(MockProvider::new(Capabilities::default()));
+    mock.set_latency(MockOp::Upload, Duration::from_secs(60));
+    let site = Arc::new(Faulty::new(mock.clone(), Faults::default()));
+    let mut jobs = upload_jobs(dir.path(), 4, 10);
+    let rest = jobs.split_off(1);
+    let start = Instant::now();
+    engine.submit(batch(site.clone(), jobs)).unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(engine.snapshot().active_count, 1);
+
+    // The connection drops: the next requests get no answer, three of them within 10 s.
+    site.faults.lock().unwrap().down_until = Some(Instant::now() + Duration::from_secs(20));
+    engine.submit(batch(site.clone(), rest)).unwrap();
+    let s = wait_for(&engine, "the lane to go offline, nothing in flight", |s| {
+        s.state == offline() && s.active.is_empty()
+    })
+    .await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(1),
+        "at once, not after 60 s"
+    );
+    assert_eq!((s.queued_count, s.files_failed), (4, 0), "{}", brief(&s));
+    assert_eq!(mock.max_in_flight(MockOp::Upload), 1);
+
+    // Back online at 21 s: all four go, the interrupted one again from the start.
+    let s = wait_idle(&engine).await;
+    assert_eq!((s.files_done, s.files_failed), (4, 0), "{}", brief(&s));
+    assert_eq!(site.uploads_of("up/f0.txt"), 2);
+    assert_eq!(count(&journal, JobState::Done), 4);
+}
+
+/// A journal in memory that counts how its updates arrive: one at a time, or together.
+#[derive(Default)]
+struct Chunked {
+    records: MemoryJournal,
+    singles: AtomicUsize,
+    applies: AtomicUsize,
+    largest: AtomicUsize,
+}
+
+impl Journal for Chunked {
+    fn insert(&self, records: &mut [JobRecord]) -> Result<(), JournalError> {
+        self.records.insert(records)
+    }
+    fn set_state(&self, id: i64, state: JobState, error: Option<&str>) -> Result<(), JournalError> {
+        self.singles.fetch_add(1, Ordering::SeqCst);
+        self.records.set_state(id, state, error)
+    }
+    fn set_multipart(&self, id: i64, mp: Option<&MultipartProgress>) -> Result<(), JournalError> {
+        self.singles.fetch_add(1, Ordering::SeqCst);
+        self.records.set_multipart(id, mp)
+    }
+    fn apply(&self, updates: &[httporter_core::JournalUpdate]) -> Result<(), JournalError> {
+        self.applies.fetch_add(1, Ordering::SeqCst);
+        self.largest.fetch_max(updates.len(), Ordering::SeqCst);
+        self.records.apply(updates)
+    }
+    fn unfinished(&self) -> Result<Vec<JobRecord>, JournalError> {
+        self.records.unfinished()
+    }
+    fn clear_finished(&self) -> Result<(), JournalError> {
+        self.records.clear_finished()
+    }
+    fn discard_unfinished(&self) -> Result<(), JournalError> {
+        self.records.discard_unfinished()
+    }
+}
+
+/// Review C1: the journal writer hands its updates to `Journal::apply` in chunks of up to 512
+/// (one transaction each for SQLite), so cancelling 2,000 jobs is four writes, not 2,000.
+#[tokio::test(start_paused = true)]
+async fn cancels_reach_the_journal_in_chunks() {
+    let journal = Arc::new(Chunked::default());
+    let engine = engine_on(journal.clone(), TransferSettings::default());
+    let mock = Arc::new(MockProvider::new(Capabilities::default()));
+    engine.pause_all();
+    let jobs = (0..2000).map(|i| delete(&format!("f{i}.txt"))).collect();
+    engine.submit(batch(mock.clone(), jobs)).unwrap();
+    engine.cancel_all();
+    wait_idle(&engine).await;
+    assert_eq!(
+        journal.singles.load(Ordering::SeqCst),
+        0,
+        "never one at a time"
+    );
+    assert_eq!(journal.applies.load(Ordering::SeqCst), 4);
+    assert_eq!(journal.largest.load(Ordering::SeqCst), 512);
+    assert!(journal.records.unfinished().unwrap().is_empty());
+    assert_eq!(engine.snapshot().journal_errors, 0);
 }

@@ -427,9 +427,11 @@ async fn auth_failure_pauses_site_without_failing_items() {
     let dir = tempfile::tempdir().unwrap();
     let (engine, journal) = engine(TransferSettings::default());
     // The site's stored credentials stopped working: the first request and every later one
-    // is refused.
+    // is refused, its listings too (review I5: a refused upload whose folder still lists is
+    // that file's own refusal, not the sign-in's).
     let old = slow_mock(Duration::from_millis(100));
     old.fail_next(MockOp::Upload, refused(), 100);
+    old.fail_next(MockOp::List, refused(), 100);
     engine
         .submit(batch(old.clone(), upload_jobs(dir.path(), 100, 10)))
         .unwrap();
@@ -1856,4 +1858,178 @@ async fn a_folder_delete_that_finds_nothing_counts_as_done() {
         assert_eq!(count(&journal, JobState::Done), 1);
         assert!(mock.contents(&p("kept.txt")).is_some());
     }
+}
+
+/// A batch of `n` uploads from `dir` (made if needed) to `site`, named `name`.
+fn site_batch(
+    site: &str,
+    name: &str,
+    provider: Arc<dyn StorageProvider>,
+    dir: &Path,
+    n: usize,
+) -> Batch {
+    std::fs::create_dir_all(dir).unwrap();
+    Batch {
+        site: SiteId(site.into()),
+        site_name: name.into(),
+        host: format!("{site}.example"),
+        provider,
+        jobs: upload_jobs(dir, n, 10),
+        checksums: HashMap::new(),
+    }
+}
+
+/// Ledger 227 / review M16: a site that refuses its sign-in stops only its own lane; another
+/// site's transfers carry on to the end meanwhile.
+#[tokio::test(start_paused = true)]
+async fn an_auth_stop_on_one_site_leaves_other_sites_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(with(2));
+    let a = slow_mock(Duration::from_millis(100));
+    a.fail_next(MockOp::Upload, refused(), 100);
+    a.fail_next(MockOp::List, refused(), 100);
+    let b = slow_mock(Duration::from_millis(100));
+    engine
+        .submit(site_batch(
+            "a",
+            "Site A",
+            a.clone(),
+            &dir.path().join("a"),
+            10,
+        ))
+        .unwrap();
+    engine
+        .submit(site_batch(
+            "b",
+            "Site B",
+            b.clone(),
+            &dir.path().join("b"),
+            10,
+        ))
+        .unwrap();
+
+    let s = wait_for(&engine, "site B to finish", |s| s.files_done == 10).await;
+    assert_eq!(
+        s.state,
+        EngineState::AuthStopped {
+            site: "Site A".into()
+        }
+    );
+    assert!(engine.is_auth_stopped(&SiteId("a".into())));
+    assert!(!engine.is_auth_stopped(&SiteId("b".into())));
+    assert_eq!((s.queued_count, s.files_failed), (10, 0), "{}", brief(&s));
+    assert_eq!(b.calls(MockOp::Upload), 10);
+    assert!(a.calls(MockOp::Upload) <= 2, "one round, then the stop");
+    assert_eq!(count(&journal, JobState::Done), 10);
+    assert_eq!(count(&journal, JobState::Queued), 10);
+}
+
+/// Review I4: a PC clock the site finds too far off stops the site's lane once, like a refused
+/// sign-in, instead of failing every job one request at a time. Once the clock is set, Resume
+/// carries on with the same client.
+#[tokio::test(start_paused = true)]
+async fn clock_skew_stops_the_site_instead_of_failing_every_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(with(4));
+    let mock = slow_mock(Duration::from_millis(100));
+    mock.fail_next(MockOp::Upload, ProviderError::ClockSkew, 4);
+    engine
+        .submit(batch(mock.clone(), upload_jobs(dir.path(), 40, 10)))
+        .unwrap();
+    let skewed = EngineState::ClockSkew {
+        site: SITE_NAME.into(),
+    };
+    wait_for(&engine, "the clock stop", |s| {
+        s.state == skewed && s.active.is_empty()
+    })
+    .await;
+
+    // No storm of requests, and nothing failed.
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let s = engine.snapshot();
+    assert_eq!(s.state, skewed);
+    assert_eq!((s.files_failed, s.queued_count), (0, 40), "{}", brief(&s));
+    assert_eq!(mock.calls(MockOp::Upload), 4);
+    assert_eq!(count(&journal, JobState::Failed), 0);
+    assert!(!engine.is_auth_stopped(&site()));
+
+    // The clock is set: the banner's Resume goes on with the client the site had.
+    let (stopped, provider) = engine.clock_skewed_site().unwrap();
+    assert_eq!(stopped, site());
+    let storage: Arc<dyn StorageProvider> = mock.clone();
+    assert!(Arc::ptr_eq(&provider, &storage));
+    engine.resume_site(&stopped, provider);
+    let s = wait_idle(&engine).await;
+    assert_eq!((s.files_done, s.files_failed), (40, 0), "{}", brief(&s));
+    assert_eq!(engine.clock_skewed_site().map(|(site, _)| site), None);
+    assert_eq!(mock.calls(MockOp::Upload), 44);
+}
+
+/// Review I5: one file refused with an unexplained AccessDenied while the site still lists its
+/// folder (a key limited to some paths) fails alone; the site keeps going. When the listing is
+/// refused as well, the sign-in itself is broken, and the site stops.
+#[tokio::test(start_paused = true)]
+async fn a_file_the_key_may_not_touch_fails_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(with(1));
+    let mock = Arc::new(MockProvider::new(Capabilities::default()));
+    mock.fail_next(MockOp::Upload, refused(), 1);
+    engine
+        .submit(batch(mock.clone(), upload_jobs(dir.path(), 3, 10)))
+        .unwrap();
+    let s = wait_idle(&engine).await;
+    assert_eq!(s.state, EngineState::Idle);
+    assert_eq!((s.files_done, s.files_failed), (2, 1), "{}", brief(&s));
+    assert_eq!(s.failed[0].path, "up/f0.txt");
+    assert!(!engine.is_auth_stopped(&site()));
+    assert_eq!(s.failed[0].error.as_deref(), Some(messages::ACCESS_DENIED));
+    assert_eq!(count(&journal, JobState::Failed), 1);
+
+    // The folder can't be listed either: the site stops, nothing fails.
+    let dir = tempfile::tempdir().unwrap();
+    let (stopping, journal) = crate::engine(with(1));
+    let mock = Arc::new(MockProvider::new(Capabilities::default()));
+    mock.fail_next(MockOp::Upload, refused(), 1);
+    mock.fail_next(MockOp::List, refused(), 1);
+    stopping
+        .submit(batch(mock.clone(), upload_jobs(dir.path(), 3, 10)))
+        .unwrap();
+    let stopped = EngineState::AuthStopped {
+        site: SITE_NAME.into(),
+    };
+    let s = wait_for(&stopping, "the auth stop", |s| {
+        s.state == stopped && s.active.is_empty()
+    })
+    .await;
+    assert_eq!((s.files_failed, s.queued_count), (0, 3), "{}", brief(&s));
+    assert_eq!(count(&journal, JobState::Failed), 0);
+}
+
+/// Reviews I3 and M2: a new client for a site (new settings, an edited site) takes the work
+/// still queued; the transfer in flight finishes with the one it started with, and the site's
+/// lane is otherwise as it was.
+#[tokio::test(start_paused = true)]
+async fn a_replaced_client_takes_the_queued_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, journal) = engine(with(1));
+    let old = slow_mock(Duration::from_secs(1));
+    engine
+        .submit(batch(old.clone(), upload_jobs(dir.path(), 3, 10)))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(old.calls(MockOp::Upload), 1);
+
+    let new = slow_mock(Duration::from_secs(1));
+    engine.replace_provider(&site(), new.clone());
+    // A site the engine has no lane for is left alone.
+    engine.replace_provider(&SiteId("other".into()), old.clone());
+    assert_eq!(engine.sites(), [site()]);
+    let s = wait_idle(&engine).await;
+    assert_eq!((s.files_done, s.files_failed), (3, 0), "{}", brief(&s));
+    assert_eq!(old.calls(MockOp::Upload), 1, "the one in flight");
+    assert_eq!(new.calls(MockOp::Upload), 2);
+    let kept = engine.site_provider(&site()).unwrap();
+    let new_one: Arc<dyn StorageProvider> = new.clone();
+    assert!(Arc::ptr_eq(&kept, &new_one));
+    assert_eq!(count(&journal, JobState::Done), 3);
 }

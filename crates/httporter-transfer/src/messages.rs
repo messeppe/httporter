@@ -32,3 +32,7 @@ pub fn local_file(path: &Path, error: &io::Error) -> String {
         .replace("{path}", &path.display().to_string())
         .replace("{error}", &error.to_string())
 }
+
+/// The site refused one file while it still lets its folder be listed: a key or a bucket policy
+/// that allows some paths only (review I5).
+pub const ACCESS_DENIED: &str = "access to this file was denied";

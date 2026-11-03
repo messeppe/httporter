@@ -826,7 +826,7 @@ fn auth_stop_banner_opens_edit() {
     mock.fail_next(
         MockOp::Upload,
         ProviderError::Auth {
-            hint: AuthHint::Unknown,
+            hint: AuthHint::Secret,
         },
         1,
     );
