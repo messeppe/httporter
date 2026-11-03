@@ -36,6 +36,7 @@ use httporter_transfer::{
     policy_to_resolution, resolve_downloads, resolve_uploads,
 };
 use slint::{CloseRequestResponse, ComponentHandle, Model, SharedString};
+use tokio::sync::watch;
 
 use crate::binding::Link;
 use crate::copy::{self, Attempt};
@@ -729,28 +730,15 @@ impl Transfers {
 
     /// Redraws the window from the engine's changes, at most every [`REDRAW_EVERY`].
     fn spawn_feed(self: &Arc<Self>) {
-        let mut changes = self.engine.changes();
+        let changes = self.engine.changes();
         let this = self.clone();
-        self.link.rt().spawn(async move {
-            let mut pace = Throttle::new(REDRAW_EVERY);
-            while changes.changed().await.is_ok() {
-                if !pace.ready(Instant::now()) {
-                    // Changes during the wait are drawn with this one.
-                    tokio::time::sleep(REDRAW_EVERY).await;
-                    pace.ready(Instant::now());
-                }
-                changes.borrow_and_update();
-                let tick = this.clone();
-                if this
-                    .link
-                    .ui()
-                    .upgrade_in_event_loop(move |ui| tick.tick(&ui))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        self.link.rt().spawn(paced(changes, move || {
+            let tick = this.clone();
+            this.link
+                .ui()
+                .upgrade_in_event_loop(move |ui| tick.tick(&ui))
+                .is_ok()
+        }));
     }
 
     /// Brings the window up to date with the engine (on the UI thread).
@@ -1130,6 +1118,24 @@ fn install_close(ui: &AppWindow, transfers: &Arc<Transfers>, settings: SettingsS
     ui.on_quit_cancel_all(quit_cancel);
 }
 
+/// Calls `draw` after the engine's changes, at most once every [`REDRAW_EVERY`]: the changes that
+/// come during the wait are drawn with the next call. Ends when the engine is gone, or when `draw`
+/// says the window is.
+async fn paced(mut changes: watch::Receiver<u64>, mut draw: impl FnMut() -> bool) {
+    let mut pace = Throttle::new(REDRAW_EVERY);
+    while changes.changed().await.is_ok() {
+        if !pace.ready(Instant::now()) {
+            // Changes during the wait are drawn with this one.
+            tokio::time::sleep(REDRAW_EVERY).await;
+            pace.ready(Instant::now());
+        }
+        changes.borrow_and_update();
+        if !draw() {
+            break;
+        }
+    }
+}
+
 /// The banners the engine's state calls for: offline, sign-in failed, or the disk full.
 fn show_banners(ui: &AppWindow, state: &EngineState) {
     let (offline, auth, disk) = match state {
@@ -1205,3 +1211,7 @@ pub fn show_in_explorer(path: &Path) {
         .raw_arg(format!("/select,\"{}\"", path.display()))
         .spawn();
 }
+
+#[cfg(test)]
+#[path = "transfers_tests.rs"]
+mod tests;

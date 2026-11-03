@@ -244,3 +244,7 @@ pub fn aws_draft(profile: &AwsProfile) -> SiteDraft {
         ..SiteDraft::default()
     }
 }
+
+#[cfg(test)]
+#[path = "import_tests.rs"]
+mod tests;

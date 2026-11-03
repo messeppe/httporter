@@ -337,3 +337,7 @@ pub fn wire(window: &SettingsWindow, apply: impl Fn(TransferSettings) + 'static)
         apply(defaults);
     });
 }
+
+#[cfg(test)]
+#[path = "settings_view_tests.rs"]
+mod tests;

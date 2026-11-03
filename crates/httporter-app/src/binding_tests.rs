@@ -109,15 +109,48 @@ fn the_sheet_reports_its_fields_to_the_session_in_order() {
 #[test]
 fn an_invalid_form_shows_its_field_error_and_starts_nothing() {
     let b = bound(empty());
+    // Task 24: every problem is shown at once, each under its own field.
     b.ui.invoke_add_site_test("".into(), "".into(), 0, "".into());
     assert_eq!(
         b.ui.get_add_site_zone_error(),
         "Enter the storage zone name."
     );
+    assert_eq!(
+        b.ui.get_add_site_password_error(),
+        "Enter the zone's password."
+    );
+    assert_eq!(b.ui.get_add_site_region_error(), "");
     assert!(!b.ui.get_add_site_busy());
 
     b.ui.invoke_add_site_save("name".into(), "zone".into(), -1, "pw".into());
     assert_eq!(b.ui.get_add_site_region_error(), "Choose a region.");
+    assert_eq!(b.ui.get_add_site_zone_error(), "");
+    assert_eq!(b.ui.get_add_site_password_error(), "");
+    assert!(!b.ui.get_add_site_busy());
+
+    // An S3 form's problems go under the S3 fields.
+    let draft = SiteDraft {
+        provider: 1,
+        ..SiteDraft::default()
+    };
+    b.ui.invoke_add_site_save_s3(draft, "".into());
+    let errors = b.ui.get_add_site_s3_errors();
+    assert_eq!(
+        (
+            errors.region.as_str(),
+            errors.bucket.as_str(),
+            errors.key_id.as_str(),
+            errors.secret.as_str(),
+            errors.account_id.as_str()
+        ),
+        (
+            "Choose a region.",
+            "Enter the bucket name.",
+            "Enter the access key ID.",
+            "Enter the secret access key.",
+            ""
+        )
+    );
     assert_eq!(b.ui.get_add_site_zone_error(), "");
     assert!(!b.ui.get_add_site_busy());
 
@@ -213,7 +246,9 @@ fn picking_a_site_empties_the_cloud_pane_and_drops_its_error_only() {
     assert_eq!(ui.get_remote_rows().row_count(), 0);
     assert_eq!(ui.get_remote_crumbs().row_count(), 0);
     assert_eq!(ui.get_remote_selected(), -1);
-    assert_eq!(ui.get_status_left(), "3 items");
+    // Task 25 (item 1): nothing is known of the new site yet, so the status bar says it is
+    // connecting rather than keep the old site's count.
+    assert_eq!(ui.get_status_left(), "Connecting…");
     assert_eq!(
         ui.get_error_text(),
         "Couldn't open D:\\x: Access is denied."
@@ -819,4 +854,121 @@ fn the_status_bar_counts_the_items_of_the_pane_last_used() {
     assert_eq!(ui.get_status_left(), "dropped");
     apply_remote(&ui, &remote(1), Change::Listed);
     assert_eq!(ui.get_status_left(), "1 item");
+}
+
+// ---- Task 24: Welcome, the site menu, and the banner's way out ----
+
+/// How many elements of the window carry this accessible label.
+fn labelled(ui: &AppWindow, label: &str) -> usize {
+    i_slint_backend_testing::ElementHandle::find_by_accessible_label(ui, label).count()
+}
+
+const TAGLINE: &str = "Fast, safe file transfers to cloud storage over HTTP.";
+
+#[test]
+fn welcome_shows_only_without_sites() {
+    let b = bound(empty());
+    b.ui.show().unwrap();
+    // Every control of the second round of Add Site is wired (Ruling Q10).
+    assert!(b.ui.get_sites_v2_ready());
+    assert_eq!(labelled(&b.ui, TAGLINE), 1);
+    assert_eq!(b.ui.get_selected_site(), -1);
+
+    // With a site saved, the panes show instead.
+    let (session, _creds, _factory) = session_with(empty());
+    b.rt.block_on(session.save_site(&valid("testzone")))
+        .unwrap();
+    let ui = AppWindow::new().unwrap();
+    install(&ui, b.rt.handle().clone(), session);
+    ui.show().unwrap();
+    assert_eq!(labelled(&ui, TAGLINE), 0);
+    assert_eq!(ui.get_selected_site(), 0);
+}
+
+#[test]
+fn the_site_menu_duplicates_and_removes_after_asking() {
+    testing::init_no_event_loop();
+    let rt = Runtime::new().unwrap();
+    let (session, creds, _factory) = session_with(empty());
+    let site = rt.block_on(session.save_site(&valid("testzone"))).unwrap();
+    let ui = AppWindow::new().unwrap();
+    let session = install(&ui, rt.handle().clone(), session);
+
+    // Duplicate: a copy of the site and its password.
+    ui.invoke_site_duplicate(0);
+    let copy = wait_for("the copy", || session.sites().get(1).cloned());
+    assert_eq!(copy.name, "testzone copy");
+    let secret = |id: &httporter_core::SiteId| {
+        httporter_platform::CredentialStore::get(
+            &*creds,
+            &httporter_platform::CredentialKey::site(id),
+        )
+        .unwrap()
+    };
+    assert_eq!(secret(&copy.id).as_deref(), Some("pw"));
+
+    // Remove… asks first; Cancel keeps the site.
+    ui.invoke_site_remove(1);
+    assert!(ui.get_remove_site_open());
+    assert_eq!(ui.get_remove_site_title(), "Remove “testzone copy”?");
+    assert_eq!(
+        ui.get_remove_site_body(),
+        "HTTPorter forgets this site and its saved password. Files on Bunny Storage aren't touched."
+    );
+    ui.set_remove_site_open(false);
+    ui.invoke_remove_site_cancel();
+    // Confirming after a cancel removes nothing: the alert's site was let go.
+    ui.invoke_remove_site_confirm();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(session.sites().len(), 2);
+
+    // Remove: the site and its password go; the other stays.
+    ui.invoke_site_remove(1);
+    ui.set_remove_site_open(false);
+    ui.invoke_remove_site_confirm();
+    wait_for("the removal", || (session.sites().len() == 1).then_some(()));
+    assert_eq!(session.sites()[0].id, site.id);
+    assert_eq!(secret(&copy.id), None);
+    assert_eq!(secret(&site.id).as_deref(), Some("pw"));
+}
+
+#[test]
+fn the_banner_offers_edit_and_remove_for_a_site_that_cannot_sign_in() {
+    testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_sites(slint::ModelRc::new(slint::VecModel::from(vec![SiteItem {
+        name: "testzone".into(),
+        provider: ProviderTile::Bunny,
+        ..SiteItem::default()
+    }])));
+    ui.set_selected_site(0);
+    ui.set_error_text("No password saved for testzone. Edit the site to enter it again.".into());
+    ui.set_remote_offer_edit(true);
+    let told = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    ui.on_site_edit({
+        let told = told.clone();
+        move |i| told.borrow_mut().push(format!("edit {i}"))
+    });
+    ui.on_site_remove({
+        let told = told.clone();
+        move |i| told.borrow_mut().push(format!("remove {i}"))
+    });
+    ui.show().unwrap();
+    let button = |label: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label)
+            .find(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button))
+    };
+    // Not before the second round of Add Site is wired.
+    assert!(button("Edit Site…").is_none());
+    ui.set_sites_v2_ready(true);
+    button("Edit Site…")
+        .unwrap()
+        .invoke_accessible_default_action();
+    button("Remove Site…")
+        .unwrap()
+        .invoke_accessible_default_action();
+    assert_eq!(told.borrow().as_slice(), ["edit 0", "remove 0"]);
+    // Only for an error that editing the site fixes.
+    ui.set_remote_offer_edit(false);
+    assert!(button("Edit Site…").is_none());
 }

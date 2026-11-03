@@ -26,4 +26,4 @@ slint-build = "1.18"
 [dev-dependencies]
 i-slint-backend-testing = "1.18"
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }

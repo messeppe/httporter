@@ -26,6 +26,13 @@ pub(crate) struct FakeFactory {
     configs: Mutex<Vec<BunnyConfig>>,
     /// The thread each client was made on.
     threads: Mutex<Vec<ThreadId>>,
+    /// The configurations of the S3 clients made, and of the bucket lists asked for.
+    s3_configs: Mutex<Vec<S3Config>>,
+    /// What Choose… and Find Zones answer next (empty lists when not scripted), and the keys
+    /// Find Zones was asked with.
+    buckets: Mutex<Option<Result<Vec<String>, ProviderError>>>,
+    zones: Mutex<Option<Result<ZoneList, ProviderError>>>,
+    zone_keys: Mutex<Vec<String>>,
 }
 
 /// The factory's side of a [`Hold`].
@@ -77,7 +84,31 @@ impl FakeFactory {
             held: Mutex::new(HashMap::new()),
             configs: Mutex::new(Vec::new()),
             threads: Mutex::new(Vec::new()),
+            s3_configs: Mutex::new(Vec::new()),
+            buckets: Mutex::new(None),
+            zones: Mutex::new(None),
+            zone_keys: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Every S3 configuration handed in so far (clients and bucket lists alike).
+    pub(crate) fn s3_configs(&self) -> Vec<S3Config> {
+        lock(&self.s3_configs).clone()
+    }
+
+    /// What the next bucket lists answer.
+    pub(crate) fn script_buckets(&self, answer: Result<Vec<String>, ProviderError>) {
+        *lock(&self.buckets) = Some(answer);
+    }
+
+    /// What the next zone lists answer.
+    pub(crate) fn script_zones(&self, answer: Result<ZoneList, ProviderError>) {
+        *lock(&self.zones) = Some(answer);
+    }
+
+    /// The account keys the zones were asked for with.
+    pub(crate) fn zone_keys(&self) -> Vec<String> {
+        lock(&self.zone_keys).clone()
     }
 
     /// Hands out `provider` for `zone` from now on.
@@ -141,20 +172,26 @@ impl ProviderFactory for FakeFactory {
     /// Hands out the storage served for the bucket (the default one otherwise).
     fn s3(&self, cfg: S3Config) -> Result<Arc<dyn StorageProvider>, ProviderError> {
         lock(&self.threads).push(std::thread::current().id());
-        Ok(lock(&self.by_zone)
+        let provider = lock(&self.by_zone)
             .get(&cfg.bucket)
             .cloned()
-            .unwrap_or_else(|| self.provider.clone()))
+            .unwrap_or_else(|| self.provider.clone());
+        lock(&self.s3_configs).push(cfg);
+        Ok(provider)
     }
 
-    /// No buckets: the tests of Choose… script their own.
-    fn s3_buckets(&self, _cfg: S3Config) -> Answer<Vec<String>> {
-        Box::pin(async { Ok(Vec::new()) })
+    /// No buckets, unless a test scripted some (`script_buckets`).
+    fn s3_buckets(&self, cfg: S3Config) -> Answer<Vec<String>> {
+        lock(&self.s3_configs).push(cfg);
+        let answer = lock(&self.buckets).clone().unwrap_or(Ok(Vec::new()));
+        Box::pin(async move { answer })
     }
 
-    /// No zones: the tests of the account key script their own.
-    fn bunny_zones(&self, _key: String, _settings: &TransferSettings) -> Answer<ZoneList> {
-        Box::pin(async { Ok(ZoneList::default()) })
+    /// No zones, unless a test scripted some (`script_zones`).
+    fn bunny_zones(&self, key: String, _settings: &TransferSettings) -> Answer<ZoneList> {
+        lock(&self.zone_keys).push(key);
+        let answer = lock(&self.zones).clone().unwrap_or(Ok(ZoneList::default()));
+        Box::pin(async move { answer })
     }
 }
 

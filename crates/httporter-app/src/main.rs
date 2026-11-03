@@ -282,6 +282,88 @@ mod tests {
         assert_eq!(wide("OK"), [79, 75, 0]);
     }
 
+    fn window_with_rows() -> AppWindow {
+        i_slint_backend_testing::init_no_event_loop();
+        let w = AppWindow::new().unwrap();
+        let row = |name: &str, folder: bool| FileRow {
+            name: name.into(),
+            kind: if folder {
+                FileKind::Folder
+            } else {
+                FileKind::Doc
+            },
+            folder,
+            ..FileRow::default()
+        };
+        w.set_remote_rows(slint::ModelRc::new(slint::VecModel::from(vec![
+            row("wp-content", true),
+            row("index.html", false),
+        ])));
+        w
+    }
+
+    /// Explorer's drops land on a folder row only when the row is a folder.
+    #[test]
+    fn a_drop_targets_a_folder_row_and_never_a_file_row() {
+        let w = window_with_rows();
+        assert_eq!(
+            remote_folder(&w, Some(0)),
+            Some((0, "wp-content".to_owned()))
+        );
+        assert_eq!(remote_folder(&w, Some(1)), None);
+        assert_eq!(remote_folder(&w, Some(7)), None);
+        assert_eq!(remote_folder(&w, None), None);
+    }
+
+    #[test]
+    fn the_selected_site_is_named_by_the_sidebar() {
+        let w = window_with_rows();
+        assert_eq!(selected_site_name(&w), None);
+        w.set_sites(slint::ModelRc::new(slint::VecModel::from(vec![
+            SiteItem {
+                name: "example-shop.com".into(),
+                ..SiteItem::default()
+            },
+            SiteItem {
+                name: "media".into(),
+                ..SiteItem::default()
+            },
+        ])));
+        w.set_selected_site(1);
+        assert_eq!(selected_site_name(&w).as_deref(), Some("media"));
+        w.set_selected_site(5);
+        assert_eq!(selected_site_name(&w), None);
+    }
+
+    #[test]
+    fn a_panes_bounds_become_the_drop_hooks_geometry() {
+        let bounds = PaneBounds {
+            x: 10.0,
+            y: 20.0,
+            width: 300.0,
+            height: 400.0,
+            list_top: 60.0,
+            row_height: 22.0,
+            scroll_y: 44.0,
+            rows: 12,
+        };
+        let g = geometry(&bounds);
+        assert_eq!(
+            (
+                g.x,
+                g.y,
+                g.w,
+                g.h,
+                g.list_top,
+                g.row_height,
+                g.scroll_y,
+                g.rows
+            ),
+            (10.0, 20.0, 300.0, 400.0, 60.0, 22.0, 44.0, 12)
+        );
+        assert_eq!(geometry(&PaneBounds { rows: -1, ..bounds }).rows, 0);
+    }
+
     #[test]
     fn window_builds_with_defaults() {
         i_slint_backend_testing::init_no_event_loop();
