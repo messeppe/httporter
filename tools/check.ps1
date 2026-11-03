@@ -14,8 +14,8 @@ if ((Test-Path $cargoBin) -and ($env:PATH -notlike "*$cargoBin*")) {
 
 $steps = @(
     @('fmt', '--check'),
-    @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings'),
-    @('test', '--workspace'),
+    @('clippy', '--locked', '--workspace', '--all-targets', '--', '-D', 'warnings'),
+    @('test', '--locked', '--workspace'),
     @('deny', 'check', 'licenses', 'bans')
 )
 
