@@ -10,7 +10,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use chrono::Utc;
 use httporter_core::{
-    Job, JobRecord, JobState, Journal, JournalError, MultipartProgress, RemotePath, SiteId,
+    Job, JobRecord, JobState, Journal, JournalError, JournalUpdate, MultipartProgress, RemotePath,
+    SiteId,
 };
 use rusqlite::{Connection, Row, TransactionBehavior, params};
 
@@ -142,6 +143,13 @@ fn local_text(path: &Path) -> Result<&str, JournalError> {
             path.display()
         ))
     })
+}
+
+/// The multipart column's text: the progress as JSON, or NULL.
+fn multipart_text(mp: Option<&MultipartProgress>) -> Result<Option<String>, JournalError> {
+    mp.map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| JournalError(e.to_string()))
 }
 
 fn stored_size(size: u64) -> Result<i64, JournalError> {
@@ -286,15 +294,49 @@ impl Journal for SqliteJournal {
     }
 
     fn set_multipart(&self, id: i64, mp: Option<&MultipartProgress>) -> Result<(), JournalError> {
-        let text = mp
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|e| JournalError(e.to_string()))?;
+        let text = multipart_text(mp)?;
         self.lock()
             .prepare_cached("UPDATE journal SET multipart = ?2, updated_at = ?3 WHERE id = ?1")
             .and_then(|mut update| update.execute(params![id, text, stamp(Utc::now())]))
             .map(drop)
             .map_err(db)
+    }
+
+    /// Every update in one transaction: one disk sync for all of them, however many (review
+    /// C1: 13,793 cancels one commit at a time took about 9 s at `synchronous=FULL`, more than
+    /// closing waits). All of them are written, or none.
+    fn apply(&self, updates: &[JournalUpdate]) -> Result<(), JournalError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let now = stamp(Utc::now());
+        let mut conn = self.lock();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db)?;
+        {
+            let mut set_state = tx
+                .prepare_cached(
+                    "UPDATE journal SET state = ?2, error = ?3, updated_at = ?4 WHERE id = ?1",
+                )
+                .map_err(db)?;
+            let mut set_multipart = tx
+                .prepare_cached("UPDATE journal SET multipart = ?2, updated_at = ?3 WHERE id = ?1")
+                .map_err(db)?;
+            for update in updates {
+                match update {
+                    JournalUpdate::State { id, state, error } => set_state
+                        .execute(params![id, state_to_text(*state), error, now])
+                        .map(drop),
+                    JournalUpdate::Multipart { id, progress } => {
+                        let text = multipart_text(progress.as_ref())?;
+                        set_multipart.execute(params![id, text, now]).map(drop)
+                    }
+                }
+                .map_err(db)?;
+            }
+        }
+        tx.commit().map_err(db)
     }
 
     /// The Queued and Failed jobs, in id order. A row this build can't make sense of is left
@@ -555,7 +597,10 @@ mod tests {
             upload_id: "u-1/é".into(),
             part_size: 16 << 20,
             parts: vec![(1, "\"e1\"".into()), (2, "\"e2\"".into())],
-            file: None,
+            file: Some(httporter_core::FileStamp {
+                len: 70 << 20,
+                modified_ns: Some(1_700_000_000_000_000_300),
+            }),
         };
         journal.set_multipart(1, Some(&progress)).unwrap();
 
@@ -666,6 +711,69 @@ mod tests {
         assert_eq!(records[0].id, 1);
         assert_eq!(records[9_999].id, 10_000);
         assert_eq!(journal.unfinished().unwrap().len(), 10_000);
+    }
+
+    /// Review C1: a batch of updates is one transaction on the file, so 10,000 cancels cost one
+    /// disk sync, not 10,000; and they land as the single calls would.
+    #[test]
+    fn apply_writes_10k_updates_in_one_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SqliteJournal::open(&dir.path().join("httporter.db")).unwrap();
+        let mut records: Vec<JobRecord> = (0..10_000).map(|i| upload(&format!("f{i}"))).collect();
+        journal.insert(&mut records).unwrap();
+        let progress = MultipartProgress {
+            upload_id: "u-2".into(),
+            part_size: 5 << 20,
+            parts: vec![(1, "\"e1\"".into())],
+            file: None,
+        };
+        let mut updates: Vec<JournalUpdate> = records
+            .iter()
+            .map(|r| JournalUpdate::State {
+                id: r.id,
+                state: JobState::Cancelled,
+                error: None,
+            })
+            .collect();
+        updates[1] = JournalUpdate::State {
+            id: 2,
+            state: JobState::Failed,
+            error: Some("No connection".into()),
+        };
+        updates.push(JournalUpdate::Multipart {
+            id: 2,
+            progress: Some(progress.clone()),
+        });
+
+        let started = Instant::now();
+        journal.apply(&updates).unwrap();
+        let took = started.elapsed();
+        assert!(took.as_secs_f64() < 2.0, "10k updates took {took:?}");
+
+        let unfinished = journal.unfinished().unwrap();
+        assert_eq!(ids(&unfinished), [2]);
+        assert_eq!(unfinished[0].error.as_deref(), Some("No connection"));
+        assert_eq!(unfinished[0].multipart, Some(progress));
+        journal.apply(&[]).unwrap();
+    }
+
+    /// A batch that can't be written leaves every record as it was.
+    #[test]
+    fn a_failed_apply_writes_nothing() {
+        let journal = journal();
+        journal.insert(&mut [upload("a"), upload("b")]).unwrap();
+        raw(
+            &journal,
+            "CREATE TRIGGER refuse BEFORE UPDATE ON journal WHEN NEW.id = 2
+             BEGIN SELECT RAISE(ABORT, 'refused'); END",
+        );
+        let cancel = |id| JournalUpdate::State {
+            id,
+            state: JobState::Cancelled,
+            error: None,
+        };
+        assert!(journal.apply(&[cancel(1), cancel(2)]).is_err());
+        assert_eq!(ids(&journal.unfinished().unwrap()), [1, 2]);
     }
 
     /// One failing record fails the whole insert: nothing is written and no id is handed out.
