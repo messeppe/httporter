@@ -698,6 +698,9 @@ fn install_with(
         move || ctx.cancel_sheet()
     });
 
+    // The Add Site sheet's S3 address preview; the rest of its new callbacks wait for Task 24.
+    crate::add_site::install(ui);
+
     // The transfer drawer: its idle state and callback stubs until the engine is wired (Task 23).
     crate::drawer_view::install(ui);
 

@@ -155,6 +155,24 @@ pub const ZONE_HAS_SPACES: &str = "Zone names can't contain spaces.";
 pub const CHOOSE_REGION: &str = "Choose a region.";
 /// Under the Password field when it is empty.
 pub const PASSWORD_MISSING: &str = "Enter the zone's password.";
+/// Under the Account key field when it is empty.
+pub const ACCOUNT_KEY_MISSING: &str = "Enter your Bunny account key.";
+/// Under the Access key ID field when it is empty.
+pub const KEY_ID_MISSING: &str = "Enter the access key ID.";
+/// Under the Secret access key field when it is empty.
+pub const SECRET_MISSING: &str = "Enter the secret access key.";
+/// Under the Bucket field when it is empty.
+pub const BUCKET_MISSING: &str = "Enter the bucket name.";
+
+/// Importing a `.env` file that has no line setting `name` (for example `BUNNY_KEY`).
+pub fn env_missing(name: &str) -> String {
+    format!("The file has no {name} line.")
+}
+
+/// Importing a `.env` file whose line for `name` has nothing after the `=`.
+pub fn env_empty(name: &str) -> String {
+    format!("The {name} line is empty.")
+}
 
 /// The result box after a test that worked: "Connected over HTTPS · http/1.1 · 21 ms · 3 items
 /// in /".

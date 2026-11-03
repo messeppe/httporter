@@ -1,0 +1,248 @@
+// The provider grid of the Add Site sheet (mockup `Main.dc.html`, overlay `addsite`): eight tiles
+// in two rows of four, Bunny Storage first and then the S3 services. One tile is chosen. The grid
+// is one Tab stop and the arrow keys move the choice, like the options of a radio group.
+//
+// The S3 tiles can be turned off (`s3-available`): they are drawn dimmed, cannot be chosen, and a
+// line under the grid says why. The Bunny tile is always available.
+
+import { Theme } from "../theme.slint";
+import { MonoTile } from "chips.slint";
+import { VCenter } from "layout.slint";
+
+// One provider choice (mockup: the `group` buttons of the grid). The four tiles of a row share its
+// width equally, whatever their texts.
+component ProviderChoice inherits Rectangle {
+    in property <string> name;
+    in property <string> kind;
+    in property <string> mono;
+    in property <color> tint;
+    in property <bool> available: true;
+    in property <bool> selected: false;
+    // The grid has the keyboard focus and this is its chosen tile.
+    in property <bool> ringed: false;
+    // Why the tile is turned off; read out after its name.
+    in property <string> note;
+    callback clicked();
+
+    horizontal-stretch: 1;
+    preferred-width: 0px;
+    min-width: 0px;
+    height: 44px;
+    border-radius: Theme.radius-md;
+    background: root.available ? Theme.content : Theme.chip;
+    border-width: root.selected ? 2px : 0.5px;
+    border-color: root.selected ? Theme.accent : Theme.sep-strong;
+    accessible-role: radio-button;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    accessible-enabled: root.available;
+    accessible-label: @tr("{}, {}", root.name, root.kind);
+    accessible-description: root.available ? "" : root.note;
+    accessible-action-default => {
+        if (root.available) {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        VCenter {
+            MonoTile {
+                mono: root.mono;
+                tint: root.tint;
+                opacity: root.available ? 1 : 0.5;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.name;
+                color: root.available ? Theme.label : Theme.label2;
+                font-size: Theme.font-body;
+                font-weight: Theme.weight-semibold;
+                overflow: elide;
+                accessible-role: none;
+            }
+            Text {
+                text: root.kind;
+                color: Theme.label2;
+                font-size: Theme.font-small;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside like the buttons' ring.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.ringed;
+    }
+
+    TouchArea {
+        enabled: root.available;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ProviderGrid inherits Rectangle {
+    // The chosen tile: 0 Bunny Storage, 1 Amazon S3, 2 Cloudflare R2, 3 Backblaze B2, 4 Wasabi,
+    // 5 DigitalOcean Spaces, 6 MinIO, 7 Other S3.
+    in-out property <int> selected: 0;
+    // False turns the seven S3 tiles off.
+    in property <bool> s3-available: true;
+    out property <bool> has-focus: scope.has-focus;
+    // The user chose another tile.
+    callback chosen(int);
+
+    function choose(index: int) {
+        if (index >= 0 && index <= 7 && (index == 0 || root.s3-available) && index != root.selected) {
+            root.selected = index;
+            root.chosen(index);
+        }
+    }
+
+    height: content.preferred-height;
+    forward-focus: scope;
+    accessible-role: radio-group;
+    accessible-label: @tr("Storage provider");
+
+    content := VerticalLayout {
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            ProviderChoice {
+                name: @tr("Bunny Storage");
+                kind: @tr("HTTP API");
+                mono: "B";
+                tint: Theme.provider-bunny;
+                selected: root.selected == 0;
+                ringed: scope.has-focus && root.selected == 0;
+                clicked => { scope.focus(); root.choose(0); }
+            }
+            ProviderChoice {
+                name: @tr("Amazon S3");
+                kind: @tr("S3");
+                mono: "S3";
+                tint: Theme.provider-s3;
+                available: root.s3-available;
+                note: @tr("Arrives later in this build.");
+                selected: root.selected == 1;
+                ringed: scope.has-focus && root.selected == 1;
+                clicked => { scope.focus(); root.choose(1); }
+            }
+            ProviderChoice {
+                name: @tr("Cloudflare R2");
+                kind: @tr("S3-compatible");
+                mono: "R2";
+                tint: Theme.provider-r2;
+                available: root.s3-available;
+                note: @tr("Arrives later in this build.");
+                selected: root.selected == 2;
+                ringed: scope.has-focus && root.selected == 2;
+                clicked => { scope.focus(); root.choose(2); }
+            }
+            ProviderChoice {
+                name: @tr("Backblaze B2");
+                kind: @tr("S3-compatible");
+                mono: "B2";
+                tint: Theme.provider-b2;
+                available: root.s3-available;
+                note: @tr("Arrives later in this build.");
+                selected: root.selected == 3;
+                ringed: scope.has-focus && root.selected == 3;
+                clicked => { scope.focus(); root.choose(3); }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            ProviderChoice {
+                name: @tr("Wasabi");
+                kind: @tr("S3-compatible");
+                mono: "W";
+                tint: Theme.provider-wasabi;
+                available: root.s3-available;
+                note: @tr("Arrives later in this build.");
+                selected: root.selected == 4;
+                ringed: scope.has-focus && root.selected == 4;
+                clicked => { scope.focus(); root.choose(4); }
+            }
+            ProviderChoice {
+                name: @tr("DigitalOcean Spaces");
+                kind: @tr("S3-compatible");
+                mono: "DO";
+                tint: Theme.provider-do;
+                available: root.s3-available;
+                note: @tr("Arrives later in this build.");
+                selected: root.selected == 5;
+                ringed: scope.has-focus && root.selected == 5;
+                clicked => { scope.focus(); root.choose(5); }
+            }
+            ProviderChoice {
+                name: @tr("MinIO");
+                kind: @tr("S3-compatible");
+                mono: "M";
+                tint: Theme.provider-minio;
+                available: root.s3-available;
+                note: @tr("Arrives later in this build.");
+                selected: root.selected == 6;
+                ringed: scope.has-focus && root.selected == 6;
+                clicked => { scope.focus(); root.choose(6); }
+            }
+            ProviderChoice {
+                name: @tr("Other S3");
+                kind: @tr("Custom endpoint");
+                mono: "…";
+                tint: Theme.provider-other;
+                available: root.s3-available;
+                note: @tr("Arrives later in this build.");
+                selected: root.selected == 7;
+                ringed: scope.has-focus && root.selected == 7;
+                clicked => { scope.focus(); root.choose(7); }
+            }
+        }
+        if !root.s3-available: Text {
+            text: @tr("Arrives later in this build.");
+            color: Theme.label2;
+            font-size: Theme.font-small;
+        }
+    }
+
+    // Zero width so that clicks do not focus it; a tile's click does.
+    scope := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.LeftArrow) {
+                root.choose(root.selected - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                root.choose(root.selected + 1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.choose(root.selected - 4);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.choose(root.selected + 4);
+                return accept;
+            }
+            return reject;
+        }
+    }
+}

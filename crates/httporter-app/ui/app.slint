@@ -7,12 +7,13 @@ import "fonts/Inter-Bold.ttf";
 
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { FileKind, FileRow, PaneBounds, ProviderTile, SiteItem } from "types.slint";
+import { FileKind, FileRow, PaneBounds, ProviderTile, S3Errors, SiteDraft, SiteItem, ZoneChoice } from "types.slint";
 import { Toolbar } from "components/toolbar.slint";
 import { Sidebar } from "components/sidebar.slint";
 import { StatusBar } from "components/statusbar.slint";
 import { Pane } from "components/pane.slint";
 import { AddSiteSheet } from "components/add_site.slint";
+import { WelcomeView } from "components/welcome.slint";
 import { TransferRow } from "types.slint";
 import { TransferDrawer } from "components/drawer.slint";
 import { ConflictContents, ConflictRow } from "types.slint";
@@ -20,7 +21,7 @@ import { Banner, ConflictSheet, DeleteAlert, NewFolderSheet, QuitAlert, RemoveSi
 import { CapsuleButton } from "components/buttons.slint";
 import { SettingsWindow } from "components/settings_window.slint";
 
-export { FileKind, FileRow, PaneBounds, ProviderTile, SiteItem, Theme }
+export { FileKind, FileRow, PaneBounds, ProviderTile, S3Errors, SiteDraft, SiteItem, Theme, ZoneChoice }
 export { TransferRow }
 export { ConflictContents, ConflictRow }
 export { SettingsWindow }
@@ -134,6 +135,29 @@ export component AppWindow inherits Window {
     // Bumped by `show_field_error` each time it shows an error; the sheet then focuses that field.
     in property <int> add-site-error-serial;
 
+    // ---- Add Site, round 2: the S3 services, the Bunny account key, editing, Welcome ----
+    // Ruling Q10: the S3 tiles, the "Bunny account key" sign-in, Import and what only they reach
+    // are turned off, with the note "Arrives later in this build.", until Task 24 wires them and
+    // sets this.
+    in property <bool> sites-v2-ready: false;
+    // The sheet changes a saved site: Edit Site and Save, and an empty secret is kept. `draft` is
+    // what its fields start with (the provider tile too); it is read when the sheet opens.
+    in property <bool> add-site-editing: false;
+    in property <SiteDraft> add-site-draft;
+    // The message under the account key, and under the S3 fields.
+    in-out property <string> add-site-key-error;
+    in-out property <S3Errors> add-site-s3-errors;
+    // The account's zones after Find Zones, which are ticked (one entry per zone, in the same
+    // order) and how many. The sheet keeps the last two up to date when a box is pressed; the
+    // app fills all three (`add_site::show_zones`) and empties them when it opens the sheet.
+    in property <[ZoneChoice]> add-site-zones;
+    in-out property <[bool]> add-site-zone-checked;
+    in-out property <int> add-site-zone-count;
+    // The buckets Choose… lists, whether they are being fetched and why they could not be.
+    in property <[string]> add-site-buckets;
+    in property <bool> add-site-buckets-busy;
+    in property <string> add-site-buckets-error;
+
     // Back and Forward in the toolbar (and Alt+Left / Alt+Right) move through the folders of the
     // pane last used or focused, Finder-style: the This PC pane when `local-pane-active`, else the
     // cloud pane (the one they act on at first). The app says where each pane can go. Refresh and
@@ -210,6 +234,29 @@ export component AppWindow inherits Window {
     // The sheet was cancelled (Cancel button or Escape); it has already closed itself. If a test or
     // save was running (`add-site-busy`), the app should give up on it and clear the flag.
     callback add-site-cancel();
+    // The S3 fields changed (also called once when the sheet opens on an S3 form): the app answers
+    // with `add-site-endpoint`.
+    callback add-site-s3-changed(SiteDraft);
+    // Test Connection and Add Site for an S3 service: the visible fields and the secret access key.
+    callback add-site-test-s3(SiteDraft, string);
+    callback add-site-save-s3(SiteDraft, string);
+    // Another provider tile was chosen (0 Bunny Storage, 1 Amazon S3, 2 Cloudflare R2, 3 Backblaze
+    // B2, 4 Wasabi, 5 DigitalOcean Spaces, 6 MinIO, 7 Other S3) and another way to sign in to
+    // Bunny (0 storage zone password, 1 account key).
+    callback add-site-provider(int);
+    callback add-site-sign-in-mode(int);
+    // Find Zones, with the account key; then Add n Sites, with which zones are ticked and whether
+    // the key is kept (the second radio button).
+    callback add-site-find-zones(string);
+    callback add-site-zones-chosen([bool], bool);
+    // Choose… beside the bucket: list what these fields and this secret access key can see.
+    callback add-site-list-buckets(SiteDraft, string);
+    // An eye button on the sheet was pressed.
+    callback add-site-reveal();
+    // The Welcome screen: Add Your First Site (the sheet has been opened and `add-site` called
+    // already) and Import from .env or AWS profile…
+    callback welcome-add();
+    callback welcome-import();
 
     // ---- The transfer drawer (see components/drawer.slint) ----
     // The drawer is expanded, and which tab it shows (0 Active, 1 Queued, 2 Failed, 3 Done). The
@@ -443,8 +490,8 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             Toolbar {
-                title: root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter");
-                subtitle: root.endpoint-text;
+                title: root.sites.length == 0 ? @tr("Welcome") : (root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter"));
+                subtitle: root.sites.length == 0 ? @tr("No site connected") : root.endpoint-text;
                 connection-text: root.connection-text;
                 connection-ok: root.connection-ok;
                 can-go-back: root.can-go-back;
@@ -465,6 +512,7 @@ export component AppWindow inherits Window {
             }
 
             HorizontalLayout {
+                vertical-stretch: 1;
                 // The main area already pads itself by 8 px, so only the sidebar needs the left margin.
                 padding-left: root.sidebar-visible ? 8px : 0px;
                 padding-top: 8px;
@@ -486,178 +534,198 @@ export component AppWindow inherits Window {
                     open-settings => { root.open-settings(); }
                 }
 
-                // Main area: the two file panes.
-                VerticalLayout {
-                    padding: 8px;
-                    spacing: 8px;
+                // Main area: the two file panes, or the Welcome screen while there is no site.
+                main-area := Rectangle {
+                    horizontal-stretch: 1;
 
-                    if root.resume-banner-text != "": Banner {
-                        text: root.resume-banner-text;
-                        icon: Icons.clock;
-                        fg: Theme.accent-text;
-                        bg: Theme.accent-soft;
-                        CapsuleButton {
-                            text: @tr("Resume");
-                            primary: true;
-                            clicked => { root.resume-banner-resume(); }
-                        }
-                        CapsuleButton {
-                            text: @tr("Discard");
-                            clicked => { root.resume-banner-discard(); }
-                        }
-                    }
-                    if root.offline-banner-text != "": Banner {
-                        text: root.offline-banner-text;
-                        icon: Icons.warn;
-                        fg: Theme.orange;
-                        bg: Theme.orange-soft;
-                    }
-                    if root.auth-banner-text != "": Banner {
-                        text: root.auth-banner-text;
-                        icon: Icons.lock;
-                        fg: Theme.red;
-                        bg: Theme.red-soft;
-                        CapsuleButton {
-                            text: @tr("Edit Site…");
-                            clicked => { root.auth-banner-edit-site(); }
-                        }
-                    }
-                    if root.disk-banner-text != "": Banner {
-                        text: root.disk-banner-text;
-                        icon: Icons.warn;
-                        fg: Theme.orange;
-                        bg: Theme.orange-soft;
-                        CapsuleButton {
-                            text: @tr("Resume");
-                            clicked => { root.disk-banner-resume(); }
-                        }
-                    }
-                    if root.error-text != "": ErrorBanner { text: root.error-text; }
+                    // The panes and the transfer drawer. Folded away (and out of the Tab order) behind
+                    // the Welcome screen.
+                    panes-host := Rectangle {
+                        visible: root.sites.length > 0;
 
-                    // Side by side when each pane can have the mockup's 420 px, stacked otherwise
-                    // (mockup `.panes`: a wrapping row). The panes are placed by hand rather than in a
-                    // layout so that they keep their state when the window crosses that width.
-                    panes := Rectangle {
-                        property <bool> side-by-side: self.width >= 2 * 420px + 8px;
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 8px;
 
-                        vertical-stretch: 1;
-
-                        local-pane := Pane {
-                            x: 0px;
-                            y: 0px;
-                            width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
-                            height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
-                            title: @tr("This PC");
-                            changed has-focus => {
-                                if (self.has-focus) {
-                                    root.local-pane-active = true;
+                            if root.resume-banner-text != "": Banner {
+                                text: root.resume-banner-text;
+                                icon: Icons.clock;
+                                fg: Theme.accent-text;
+                                bg: Theme.accent-soft;
+                                CapsuleButton {
+                                    text: @tr("Resume");
+                                    primary: true;
+                                    clicked => { root.resume-banner-resume(); }
+                                }
+                                CapsuleButton {
+                                    text: @tr("Discard");
+                                    clicked => { root.resume-banner-discard(); }
                                 }
                             }
-                            icon: Icons.pc;
-                            crumbs: root.local-crumbs;
-                            rows: root.local-rows;
-                            loading: root.local-loading;
-                            drop-hover: root.drag-over-local;
-                            drop-row: root.drag-row-local;
-                            can-upload: root.can-upload;
-                            can-download: root.can-download;
-                            can-new-folder: root.can-new-folder;
-                            can-delete: root.can-delete;
-                            selected <=> root.local-selected;
-                            sort-column <=> root.local-sort-column;
-                            sort-ascending <=> root.local-sort-ascending;
-                            open(index) => { root.open-local(index); }
-                            up => { root.local-up(); }
-                            crumb-clicked(index) => { root.local-crumb-clicked(index); }
-                            sort(column) => { root.sort-local(column); }
-                            row-pointer(row, ctrl, shift) => { root.row-pointer(0, row, ctrl, shift); }
-                            band-select(from, to, additive) => { root.band-select(0, from, to, additive); }
-                            select-all => { root.select-all(0); }
-                            upload => { root.upload(); }
-                            download => { root.download(); }
-                            download-to => { root.download-to(); }
-                            new-folder => { root.new-folder(); }
-                            delete => { root.delete(); }
-                            refresh => { root.refresh(); }
-                            show-in-explorer(row) => { root.show-in-explorer(row); }
-                            drag-moved(point) => { root.pane-drag-moved(0, point); }
-                            drag-ended(point) => { root.pane-drag-ended(0, point); }
-                            drag-cancelled => { root.pane-drag-cancelled(); }
-                        }
-                        remote-pane := Pane {
-                            x: panes.side-by-side ? (panes.width + 8px) / 2 : 0px;
-                            y: panes.side-by-side ? 0px : (panes.height + 8px) / 2;
-                            width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
-                            height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
-                            title: root.has-selection ? root.sites[root.selected-site].name : @tr("No site selected");
-                            changed has-focus => {
-                                if (self.has-focus) {
-                                    root.local-pane-active = false;
+                            if root.offline-banner-text != "": Banner {
+                                text: root.offline-banner-text;
+                                icon: Icons.warn;
+                                fg: Theme.orange;
+                                bg: Theme.orange-soft;
+                            }
+                            if root.auth-banner-text != "": Banner {
+                                text: root.auth-banner-text;
+                                icon: Icons.lock;
+                                fg: Theme.red;
+                                bg: Theme.red-soft;
+                                CapsuleButton {
+                                    text: @tr("Edit Site…");
+                                    clicked => { root.auth-banner-edit-site(); }
                                 }
                             }
-                            icon: Icons.cloud;
-                            crumbs: root.remote-crumbs;
-                            rows: root.remote-rows;
-                            header-chip: root.remote-chip;
-                            loading: root.remote-loading;
-                            drop-hover: (root.drop-hover-remote && root.has-selection) || root.drag-over-remote;
-                            drop-row: root.drag-over-remote ? root.drag-row-remote : (root.drop-hover-remote ? root.drop-hover-row : -1);
-                            cloud: true;
-                            can-upload: root.can-upload;
-                            can-download: root.can-download;
-                            can-new-folder: root.can-new-folder;
-                            can-delete: root.can-delete;
-                            selected <=> root.remote-selected;
-                            sort-column <=> root.remote-sort-column;
-                            sort-ascending <=> root.remote-sort-ascending;
-                            open(index) => { root.open-remote(index); }
-                            up => { root.remote-up(); }
-                            crumb-clicked(index) => { root.remote-crumb-clicked(index); }
-                            sort(column) => { root.sort-remote(column); }
-                            row-pointer(row, ctrl, shift) => { root.row-pointer(1, row, ctrl, shift); }
-                            band-select(from, to, additive) => { root.band-select(1, from, to, additive); }
-                            select-all => { root.select-all(1); }
-                            upload => { root.upload(); }
-                            download => { root.download(); }
-                            download-to => { root.download-to(); }
-                            new-folder => { root.new-folder(); }
-                            delete => { root.delete(); }
-                            refresh => { root.refresh(); }
-                            show-in-explorer(row) => { root.show-in-explorer(row); }
-                            paste => { root.paste(); }
-                            drag-moved(point) => { root.pane-drag-moved(1, point); }
-                            drag-ended(point) => { root.pane-drag-ended(1, point); }
-                            drag-cancelled => { root.pane-drag-cancelled(); }
+                            if root.disk-banner-text != "": Banner {
+                                text: root.disk-banner-text;
+                                icon: Icons.warn;
+                                fg: Theme.orange;
+                                bg: Theme.orange-soft;
+                                CapsuleButton {
+                                    text: @tr("Resume");
+                                    clicked => { root.disk-banner-resume(); }
+                                }
+                            }
+                            if root.error-text != "": ErrorBanner { text: root.error-text; }
+
+                            // Side by side when each pane can have the mockup's 420 px, stacked otherwise
+                            // (mockup `.panes`: a wrapping row). The panes are placed by hand rather than in a
+                            // layout so that they keep their state when the window crosses that width.
+                            panes := Rectangle {
+                                property <bool> side-by-side: self.width >= 2 * 420px + 8px;
+
+                                vertical-stretch: 1;
+
+                                local-pane := Pane {
+                                    x: 0px;
+                                    y: 0px;
+                                    width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
+                                    height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
+                                    title: @tr("This PC");
+                                    changed has-focus => {
+                                        if (self.has-focus) {
+                                            root.local-pane-active = true;
+                                        }
+                                    }
+                                    icon: Icons.pc;
+                                    crumbs: root.local-crumbs;
+                                    rows: root.local-rows;
+                                    loading: root.local-loading;
+                                    drop-hover: root.drag-over-local;
+                                    drop-row: root.drag-row-local;
+                                    can-upload: root.can-upload;
+                                    can-download: root.can-download;
+                                    can-new-folder: root.can-new-folder;
+                                    can-delete: root.can-delete;
+                                    selected <=> root.local-selected;
+                                    sort-column <=> root.local-sort-column;
+                                    sort-ascending <=> root.local-sort-ascending;
+                                    open(index) => { root.open-local(index); }
+                                    up => { root.local-up(); }
+                                    crumb-clicked(index) => { root.local-crumb-clicked(index); }
+                                    sort(column) => { root.sort-local(column); }
+                                    row-pointer(row, ctrl, shift) => { root.row-pointer(0, row, ctrl, shift); }
+                                    band-select(from, to, additive) => { root.band-select(0, from, to, additive); }
+                                    select-all => { root.select-all(0); }
+                                    upload => { root.upload(); }
+                                    download => { root.download(); }
+                                    download-to => { root.download-to(); }
+                                    new-folder => { root.new-folder(); }
+                                    delete => { root.delete(); }
+                                    refresh => { root.refresh(); }
+                                    show-in-explorer(row) => { root.show-in-explorer(row); }
+                                    drag-moved(point) => { root.pane-drag-moved(0, point); }
+                                    drag-ended(point) => { root.pane-drag-ended(0, point); }
+                                    drag-cancelled => { root.pane-drag-cancelled(); }
+                                }
+                                remote-pane := Pane {
+                                    x: panes.side-by-side ? (panes.width + 8px) / 2 : 0px;
+                                    y: panes.side-by-side ? 0px : (panes.height + 8px) / 2;
+                                    width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
+                                    height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
+                                    title: root.has-selection ? root.sites[root.selected-site].name : @tr("No site selected");
+                                    changed has-focus => {
+                                        if (self.has-focus) {
+                                            root.local-pane-active = false;
+                                        }
+                                    }
+                                    icon: Icons.cloud;
+                                    crumbs: root.remote-crumbs;
+                                    rows: root.remote-rows;
+                                    header-chip: root.remote-chip;
+                                    loading: root.remote-loading;
+                                    drop-hover: (root.drop-hover-remote && root.has-selection) || root.drag-over-remote;
+                                    drop-row: root.drag-over-remote ? root.drag-row-remote : (root.drop-hover-remote ? root.drop-hover-row : -1);
+                                    cloud: true;
+                                    can-upload: root.can-upload;
+                                    can-download: root.can-download;
+                                    can-new-folder: root.can-new-folder;
+                                    can-delete: root.can-delete;
+                                    selected <=> root.remote-selected;
+                                    sort-column <=> root.remote-sort-column;
+                                    sort-ascending <=> root.remote-sort-ascending;
+                                    open(index) => { root.open-remote(index); }
+                                    up => { root.remote-up(); }
+                                    crumb-clicked(index) => { root.remote-crumb-clicked(index); }
+                                    sort(column) => { root.sort-remote(column); }
+                                    row-pointer(row, ctrl, shift) => { root.row-pointer(1, row, ctrl, shift); }
+                                    band-select(from, to, additive) => { root.band-select(1, from, to, additive); }
+                                    select-all => { root.select-all(1); }
+                                    upload => { root.upload(); }
+                                    download => { root.download(); }
+                                    download-to => { root.download-to(); }
+                                    new-folder => { root.new-folder(); }
+                                    delete => { root.delete(); }
+                                    refresh => { root.refresh(); }
+                                    show-in-explorer(row) => { root.show-in-explorer(row); }
+                                    paste => { root.paste(); }
+                                    drag-moved(point) => { root.pane-drag-moved(1, point); }
+                                    drag-ended(point) => { root.pane-drag-ended(1, point); }
+                                    drag-cancelled => { root.pane-drag-cancelled(); }
+                                }
+                            }
+
+                            TransferDrawer {
+                                open <=> root.transfers-open;
+                                tab <=> root.transfers-tab;
+                                running: root.transfers-running;
+                                paused: root.transfers-paused;
+                                collapsed-text: root.transfers-collapsed-text;
+                                title: root.transfers-title;
+                                line: root.transfers-line;
+                                files-per-s: root.transfers-files-per-s;
+                                mb-per-s: root.transfers-mb-per-s;
+                                eta: root.transfers-eta;
+                                percent: root.transfers-percent;
+                                tab-titles: root.transfers-tab-titles;
+                                active-rows: root.transfers-active;
+                                queued-rows: root.transfers-queued;
+                                failed-rows: root.transfers-failed;
+                                done-rows: root.transfers-done;
+                                toggle => { root.transfers-toggle(); }
+                                pause => { root.transfers-pause(); }
+                                resume => { root.transfers-resume(); }
+                                cancel-all => { root.transfers-cancel-all(); }
+                                cancel(id) => { root.transfer-cancel(id); }
+                                retry(id) => { root.transfer-retry(id); }
+                                retry-failed => { root.transfers-retry-failed(); }
+                                move-to-top(id) => { root.transfer-move-to-top(id); }
+                                pause-row(id) => { root.transfer-pause(id); }
+                                resume-row(id) => { root.transfer-resume(id); }
+                            }
                         }
                     }
 
-                    TransferDrawer {
-                        open <=> root.transfers-open;
-                        tab <=> root.transfers-tab;
-                        running: root.transfers-running;
-                        paused: root.transfers-paused;
-                        collapsed-text: root.transfers-collapsed-text;
-                        title: root.transfers-title;
-                        line: root.transfers-line;
-                        files-per-s: root.transfers-files-per-s;
-                        mb-per-s: root.transfers-mb-per-s;
-                        eta: root.transfers-eta;
-                        percent: root.transfers-percent;
-                        tab-titles: root.transfers-tab-titles;
-                        active-rows: root.transfers-active;
-                        queued-rows: root.transfers-queued;
-                        failed-rows: root.transfers-failed;
-                        done-rows: root.transfers-done;
-                        toggle => { root.transfers-toggle(); }
-                        pause => { root.transfers-pause(); }
-                        resume => { root.transfers-resume(); }
-                        cancel-all => { root.transfers-cancel-all(); }
-                        cancel(id) => { root.transfer-cancel(id); }
-                        retry(id) => { root.transfer-retry(id); }
-                        retry-failed => { root.transfers-retry-failed(); }
-                        move-to-top(id) => { root.transfer-move-to-top(id); }
-                        pause-row(id) => { root.transfer-pause(id); }
-                        resume-row(id) => { root.transfer-resume(id); }
+                    if root.sites.length == 0: WelcomeView {
+                        v2-ready: root.sites-v2-ready;
+                        add-first => {
+                            root.add-site-open = true;
+                            root.add-site();
+                            root.welcome-add();
+                        }
+                        import-profiles => { root.welcome-import(); }
                     }
                 }
             }
@@ -706,10 +774,30 @@ export component AppWindow inherits Window {
         zone-error <=> root.add-site-zone-error;
         region-error <=> root.add-site-region-error;
         password-error <=> root.add-site-password-error;
+        key-error <=> root.add-site-key-error;
+        s3-errors <=> root.add-site-s3-errors;
         error-serial: root.add-site-error-serial;
+        v2-ready: root.sites-v2-ready;
+        editing: root.add-site-editing;
+        draft: root.add-site-draft;
+        zones: root.add-site-zones;
+        zone-checked <=> root.add-site-zone-checked;
+        zone-count <=> root.add-site-zone-count;
+        buckets: root.add-site-buckets;
+        buckets-busy: root.add-site-buckets-busy;
+        buckets-error: root.add-site-buckets-error;
         changed(zone, region) => { root.add-site-changed(zone, region); }
+        s3-changed(draft) => { root.add-site-s3-changed(draft); }
         test(name, zone, region, password) => { root.add-site-test(name, zone, region, password); }
         save(name, zone, region, password) => { root.add-site-save(name, zone, region, password); }
+        test-s3(draft, secret) => { root.add-site-test-s3(draft, secret); }
+        save-s3(draft, secret) => { root.add-site-save-s3(draft, secret); }
+        provider-chosen(index) => { root.add-site-provider(index); }
+        sign-in-chosen(index) => { root.add-site-sign-in-mode(index); }
+        find-zones(key) => { root.add-site-find-zones(key); }
+        zones-chosen(checked, keep) => { root.add-site-zones-chosen(checked, keep); }
+        list-buckets(draft, secret) => { root.add-site-list-buckets(draft, secret); }
+        reveal => { root.add-site-reveal(); }
         cancel => {
             root.add-site-open = false;
             root.add-site-cancel();

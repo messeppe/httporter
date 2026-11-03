@@ -18,6 +18,7 @@ mod copy;
 mod drawer_view;
 mod drop_hook;
 mod format;
+mod import;
 mod local_fs;
 mod selection;
 mod session;

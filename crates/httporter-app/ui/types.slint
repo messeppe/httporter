@@ -68,3 +68,47 @@ export struct PaneBounds {
     scroll-y: length,
     rows: int,
 }
+
+// One storage zone in the list the Add Site sheet shows after Find Zones (Bunny account key). The
+// sheet writes "{name} · {region} · {hostnames}" for a zone that can be added and greys out the
+// others with their `reason`. Which zones are ticked lives apart from the zones, in the sheet's
+// `[bool]` of the same length.
+export struct ZoneChoice {
+    name: string,
+    // The city of the zone's region, for example "Singapore".
+    region: string,
+    // The hostnames of the pull zones in front of it, joined with ", "; empty for none.
+    hostnames: string,
+    // False for a zone the account has but that can't be added.
+    usable: bool,
+    reason: string,
+}
+
+// The fields of the Add Site sheet that are not secret. The app hands one to the sheet to start
+// from (editing or duplicating a site, `provider` being the tile of the provider grid: 0 Bunny,
+// then the S3 services in the order of the grid), and the sheet reports one back with the
+// secret in a separate string, so that no secret is ever kept in a struct that is passed around.
+export struct SiteDraft {
+    provider: int,
+    name: string,
+    zone: string,
+    // Position in the Bunny region list.
+    region-index: int,
+    // The S3 region as typed.
+    region: string,
+    account-id: string,
+    endpoint: string,
+    path-style: bool,
+    bucket: string,
+    key-id: string,
+}
+
+// The messages under the S3 fields of the Add Site sheet; an empty one shows nothing.
+export struct S3Errors {
+    region: string,
+    account-id: string,
+    endpoint: string,
+    bucket: string,
+    key-id: string,
+    secret: string,
+}

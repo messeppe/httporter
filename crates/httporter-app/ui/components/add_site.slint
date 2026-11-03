@@ -1,81 +1,42 @@
 // Add Site sheet (mockup `Main.dc.html`, overlay `addsite`): the window dimmed by a scrim with a sheet
-// on top. Bunny Storage is the only provider that works in this build; the S3 tiles and the
-// "Bunny account key" sign-in are shown disabled and marked "Coming soon".
+// on top. A grid of eight providers (Bunny Storage and seven S3 services) picks the form below it:
+//
+// - Bunny Storage, signed in with a storage zone's password: zone, region, password;
+// - Bunny Storage, signed in with an account key: the key, Find Zones, a checklist of the account's
+//   zones and what to do with the key afterwards;
+// - an S3 service: the fields that service needs (region, account ID or address), a bucket that can
+//   be typed or chosen from the account's list, and the access key.
+//
+// The S3 tiles, the account key sign-in and everything that only they reach are turned off while
+// `v2-ready` is false (Ruling Q10); the Bunny password form works as it always did. While editing
+// a site the sheet is called Edit Site, its button Save, and a secret left empty is kept.
+//
+// All the forms are always built; the ones not in use are folded away (`Collapsible`), so what was
+// typed in one survives a look at another, and a hidden control is neither in the Tab order nor
+// in the accessibility tree. Every secret field has an eye button, and since the fields belong to
+// the sheet, a revealed secret is hidden again whenever the sheet closes.
 //
 // The sheet is modal. While it is open the scrim swallows the pointer, so nothing behind it
 // reacts, and the keyboard focus stays inside it: Tab and Shift+Tab wrap around its controls.
-// The focus starts in the Storage zone field, Escape cancels, and Return in a text field presses
-// the default button, Add Site, unless it is disabled. Nothing is validated here: the sheet reports
-// what was typed and the app answers with field errors, a test result or by closing the sheet.
+// The focus starts in the form's first field, Escape cancels, and Return in a text field presses
+// the default button unless it is disabled. Nothing is validated here: the sheet reports what was
+// typed and the app answers with field errors, a test result or by closing the sheet.
 
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { MonoTile } from "chips.slint";
+import { S3Errors, SiteDraft, ZoneChoice } from "../types.slint";
 import { CapsuleButton } from "buttons.slint";
-import { ErrorLine, Field, FormRow, RegionPicker } from "form_controls.slint";
+import { CheckLine, ErrorLine, Field, FormRow, RadioList, RegionPicker, SecretField } from "form_controls.slint";
+import { ProviderGrid } from "provider_grid.slint";
 import { VCenter } from "layout.slint";
-
-// A provider choice (mockup: the `group` buttons in the 4 x 2 grid). Only an available one can
-// be selected; the others say "Coming soon" where the kind of storage would be.
-component ProviderTile inherits Rectangle {
-    in property <string> name;
-    in property <string> kind;
-    in property <string> mono;
-    in property <color> tint;
-    in property <bool> available: false;
-    in property <bool> selected: false;
-
-    // The four tiles of a row share its width equally, whatever their texts.
-    horizontal-stretch: 1;
-    preferred-width: 0px;
-    min-width: 0px;
-    height: 44px;
-    border-radius: Theme.radius-md;
-    background: root.available ? Theme.content : Theme.chip;
-    border-width: root.selected ? 2px : 0.5px;
-    border-color: root.selected ? Theme.accent : Theme.sep-strong;
-    accessible-role: radio-button;
-    accessible-checkable: true;
-    accessible-checked: root.selected;
-    accessible-enabled: root.available;
-    accessible-label: root.available ? @tr("{}, {}", root.name, root.kind) : @tr("{}, Coming soon", root.name);
-
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 8px;
-
-        VCenter {
-            MonoTile {
-                mono: root.mono;
-                tint: root.tint;
-                opacity: root.available ? 1 : 0.5;
-            }
-        }
-        VerticalLayout {
-            alignment: center;
-            Text {
-                text: root.name;
-                color: root.available ? Theme.label : Theme.label2;
-                font-size: Theme.font-body;
-                font-weight: Theme.weight-semibold;
-                overflow: elide;
-            }
-            Text {
-                text: root.available ? root.kind : @tr("Coming soon");
-                color: Theme.label2;
-                font-size: Theme.font-small;
-                overflow: elide;
-            }
-        }
-    }
-}
 
 // One option of the "Sign in with" segmented control (mockup `.seg`).
 component Segment inherits Rectangle {
     in property <string> text;
     in property <bool> selected: false;
     in property <bool> available: true;
+    callback clicked();
 
     height: 24px;
     border-radius: 6px;
@@ -86,7 +47,13 @@ component Segment inherits Rectangle {
     accessible-checkable: true;
     accessible-checked: root.selected;
     accessible-enabled: root.available;
-    accessible-label: root.available ? root.text : @tr("{}, Coming soon", root.text);
+    accessible-label: root.text;
+    accessible-description: root.available ? "" : @tr("Arrives later in this build.");
+    accessible-action-default => {
+        if (root.available) {
+            root.clicked();
+        }
+    }
 
     HorizontalLayout {
         padding-left: 12px;
@@ -98,7 +65,100 @@ component Segment inherits Rectangle {
             font-size: Theme.font-body;
             font-weight: root.selected ? Theme.weight-semibold : 400;
             vertical-alignment: center;
+            accessible-role: none;
         }
+    }
+
+    TouchArea {
+        enabled: root.available;
+        clicked => { root.clicked(); }
+    }
+}
+
+// The "Sign in with" control: Storage zone password or Bunny account key. One Tab stop; Left and
+// Right move the choice. The account key can be turned off.
+component SignInSwitch inherits Rectangle {
+    in-out property <int> current: 0;
+    in property <bool> account-available: true;
+    out property <bool> has-focus: scope.has-focus;
+    // The user chose another way to sign in.
+    callback selected(int);
+
+    function select(index: int) {
+        if (index >= 0 && index <= 1 && (index == 0 || root.account-available) && index != root.current) {
+            root.current = index;
+            root.selected(index);
+        }
+    }
+
+    background: Theme.chip;
+    border-radius: 8px;
+    forward-focus: scope;
+    accessible-role: radio-group;
+    accessible-label: @tr("Sign-in method");
+
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+        Segment {
+            text: @tr("Storage zone password");
+            selected: root.current == 0;
+            clicked => { scope.focus(); root.select(0); }
+        }
+        Segment {
+            text: @tr("Bunny account key");
+            selected: root.current == 1;
+            available: root.account-available;
+            clicked => { scope.focus(); root.select(1); }
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    scope := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.LeftArrow || event.text == Key.UpArrow) {
+                root.select(root.current - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow || event.text == Key.DownArrow) {
+                root.select(root.current + 1);
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+// A block of rows that takes no room (and cannot be reached) while `shown` is false. `gap` is
+// the space left under the block when it is shown; the rows inside are `spacing` apart.
+component Collapsible inherits Rectangle {
+    in property <bool> shown: true;
+    in property <length> gap: 8px;
+    in property <length> spacing: 8px;
+
+    height: root.shown ? inner.preferred-height : 0px;
+    visible: root.shown;
+
+    inner := VerticalLayout {
+        spacing: root.spacing;
+        padding-bottom: root.gap;
+        @children
     }
 }
 
@@ -143,13 +203,67 @@ component ResultBox inherits Rectangle {
     }
 }
 
+// One bucket of the list that Choose… shows: pressed, or reached with Tab and activated with
+// Space or Return.
+component BucketRow inherits Rectangle {
+    in property <string> name;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback picked();
+
+    height: 26px;
+    border-radius: 6px;
+    background: area.has-hover ? Theme.hover : transparent;
+    forward-focus: key-focus;
+    accessible-role: list-item;
+    accessible-label: root.name;
+    accessible-action-default => { root.picked(); }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.name;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+    }
+
+    // Focus ring inside the row: the scroll view around the list would clip one drawn outside.
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (!event.repeat && (event.text == Key.Space || event.text == Key.Return)) {
+                root.picked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.picked(); }
+    }
+}
+
 export component AddSiteSheet inherits Rectangle {
     // Names of the regions to pick from, in the order the app maps them to region codes.
     in property <[string]> region-names;
-    // `https://{host}/{zone}/`, worked out by the app from the zone and region reported by `changed`.
+    // `https://{host}/{zone}/` (Bunny) or the address of the bucket (S3), worked out by the app
+    // from what `changed` and `s3-changed` report.
     in property <string> endpoint;
-    // Outcome of the last test. Cleared here when the zone, region or password is edited, since
-    // it then describes something else.
+    // Outcome of the last test. Cleared here when a field is edited, since it then describes
+    // something else.
     in-out property <string> result;
     in property <bool> result-ok;
     // A connection attempt is running: testing and adding are off, cancelling is not.
@@ -159,55 +273,228 @@ export component AddSiteSheet inherits Rectangle {
     in-out property <string> zone-error;
     in-out property <string> region-error;
     in-out property <string> password-error;
+    in-out property <string> key-error;
+    in-out property <S3Errors> s3-errors;
     // Counts the times the app showed an error: each one moves the focus to the first field that
     // has a message, so that the user lands where the problem is (and hears it).
     in property <int> error-serial;
 
-    // The zone or region changed, so the endpoint shown has to be worked out again.
+    // The S3 tiles, the account key sign-in and what they need are turned off until this is true.
+    in property <bool> v2-ready: false;
+    // The sheet changes a saved site: Edit Site and Save, and a secret left empty is kept.
+    in property <bool> editing: false;
+    // What the fields start with (editing or duplicating a site).
+    in property <SiteDraft> draft;
+
+    // The zones of the account after Find Zones, which of them are ticked (one entry per zone) and
+    // how many are. The sheet changes the last two when a box is pressed.
+    in property <[ZoneChoice]> zones;
+    in-out property <[bool]> zone-checked;
+    in-out property <int> zone-count: 0;
+    // The buckets Choose… lists, whether the list is being fetched, and why it could not be.
+    in property <[string]> buckets;
+    in property <bool> buckets-busy;
+    in property <string> buckets-error;
+
+    // The zone or region changed, so the endpoint shown has to be worked out again (Bunny).
     callback changed(string /* zone */, int /* region */);
+    // The same for an S3 service, with the fields as they are.
+    callback s3-changed(SiteDraft);
     // Arguments of `test` and `save`: site name, zone, region index, password.
     callback test(string, string, int, string);
     callback save(string, string, int, string);
+    // The S3 fields and the secret access key.
+    callback test-s3(SiteDraft, string);
+    callback save-s3(SiteDraft, string);
+    // Another provider tile was chosen (0 Bunny, then the S3 services in the order of the grid).
+    callback provider-chosen(int);
+    // Another way to sign in to Bunny was chosen (0 zone password, 1 account key).
+    callback sign-in-chosen(int);
+    // Find Zones, with the account key.
+    callback find-zones(string);
+    // Add n Sites: which zones are ticked, and whether the account key is kept afterwards.
+    callback zones-chosen([bool], bool);
+    // Choose… beside the bucket: list the buckets that these fields and this secret can see.
+    callback list-buckets(SiteDraft, string);
+    // An eye button was pressed (any secret field).
+    callback reveal();
     callback cancel();
 
     background: Theme.scrim;
 
-    // The sheet's controls, in Tab order.
-    property <bool> on-last-stop: add-button.has-focus || (root.busy && cancel-button.has-focus);
+    property <int> provider: grid.selected;
+    property <int> sign-in-mode: sign-in.current;
+    property <bool> bunny: root.provider == 0;
+    property <bool> password-mode: root.bunny && root.sign-in-mode == 0;
+    property <bool> account-mode: root.bunny && root.sign-in-mode == 1;
+    property <bool> s3: root.provider > 0;
+    // Which fields the chosen S3 service asks for: Amazon S3, Backblaze B2, Wasabi, DigitalOcean
+    // Spaces and Other S3 a region; Cloudflare R2 an account ID; MinIO and Other S3 an address.
+    property <bool> wants-region: root.provider == 1 || root.provider == 3 || root.provider == 4 || root.provider == 5 || root.provider == 7;
+    property <bool> wants-account: root.provider == 2;
+    property <bool> wants-address: root.provider == 6 || root.provider == 7;
+    property <bool> wants-path-style: root.provider == 7;
+    // The Use path-style addresses box (Other S3).
+    property <bool> path-style: false;
+    // Choose… is open.
+    property <bool> buckets-open: false;
+    // The default button can be pressed: not while a run is going, and an account key needs a
+    // zone ticked.
+    property <bool> can-add: !root.busy && (!root.account-mode || root.zone-count > 0);
+    property <string> add-text: root.editing ? @tr("Save") : (root.account-mode ? (root.zone-count == 0 ? @tr("Add Sites") : @tr("Add {n} Site" | "Add {n} Sites" % root.zone-count)) : @tr("Add Site"));
+
+    // The first and last Tab stops, which the focus wraps between. The first is the provider grid,
+    // or, while editing (when the grid is folded away), the form's first field.
+    property <bool> first-field-has-focus: root.password-mode ? zone-field.has-focus : (root.account-mode ? key-field.has-focus : (root.wants-account ? account-field.has-focus : (root.wants-address ? endpoint-field.has-focus : s3-region-field.has-focus)));
+    property <bool> on-first-stop: root.editing ? root.first-field-has-focus : grid.has-focus;
+    property <bool> on-last-stop: add-button.has-focus || (!root.can-add && cancel-button.has-focus);
+
+    // The fields that are on show, as the app is told about them.
+    function draft-now() -> SiteDraft {
+        return {
+            provider: root.provider,
+            name: name-field.text,
+            zone: zone-field.text,
+            region-index: region-box.current-index,
+            region: root.wants-region ? s3-region-field.text : "",
+            account-id: root.wants-account ? account-field.text : "",
+            endpoint: root.wants-address ? endpoint-field.text : "",
+            path-style: root.wants-path-style && root.path-style,
+            bucket: bucket-field.text,
+            key-id: key-id-field.text,
+        };
+    }
 
     function submit() {
-        if (!root.busy) {
+        if (!root.can-add) {
+            return;
+        }
+        if (root.account-mode) {
+            if (root.zone-count > 0) {
+                root.zones-chosen(root.zone-checked, keep-radio.current == 1);
+            } else if (key-field.text != "") {
+                root.find-zones(key-field.text);
+            }
+        } else if (root.s3) {
+            root.save-s3(root.draft-now(), secret-field.text);
+        } else {
             root.save(name-field.text, zone-field.text, region-box.current-index, password-field.text);
         }
     }
 
-    changed error-serial => {
-        if (root.zone-error != "") {
+    function run-test() {
+        if (root.s3) {
+            root.test-s3(root.draft-now(), secret-field.text);
+        } else {
+            root.test(name-field.text, zone-field.text, region-box.current-index, password-field.text);
+        }
+    }
+
+    // Asks the app for the address of the form in use.
+    function refresh-endpoint() {
+        if (root.s3) {
+            root.s3-changed(root.draft-now());
+        } else {
+            root.changed(zone-field.text, region-box.current-index);
+        }
+    }
+
+    // Something was typed or chosen: the old result and the old message of that field no longer
+    // apply.
+    function touched() {
+        root.result = "";
+    }
+
+    // A new form is on show: no messages from the last one, no open bucket list, every secret
+    // hidden.
+    function clear-messages() {
+        root.zone-error = "";
+        root.region-error = "";
+        root.password-error = "";
+        root.key-error = "";
+        root.s3-errors = { region: "", account-id: "", endpoint: "", bucket: "", key-id: "", secret: "" };
+        root.result = "";
+        root.buckets-open = false;
+        password-field.revealed = false;
+        key-field.revealed = false;
+        secret-field.revealed = false;
+    }
+
+    function focus-first() {
+        if (root.password-mode) {
             zone-field.focus();
-        } else if (root.region-error != "") {
-            region-box.focus();
-        } else if (root.password-error != "") {
-            password-field.focus();
+        } else if (root.account-mode) {
+            key-field.focus();
+        } else if (root.wants-account) {
+            account-field.focus();
+        } else if (root.wants-address) {
+            endpoint-field.focus();
+        } else {
+            s3-region-field.focus();
+        }
+    }
+
+    function focus-first-stop() {
+        if (root.editing) {
+            root.focus-first();
+        } else {
+            grid.focus();
         }
     }
 
     function focus-last-stop() {
-        if (root.busy) {
-            cancel-button.focus();
-        } else {
+        if (root.can-add) {
             add-button.focus();
+        } else {
+            cancel-button.focus();
         }
     }
 
-    // A sheet that opens is a fresh one: no messages left over from the last time, the focus in
-    // the first field, and the app asked for the endpoint of the starting zone and region.
+    changed error-serial => {
+        if (root.password-mode) {
+            if (root.zone-error != "") {
+                zone-field.focus();
+            } else if (root.region-error != "") {
+                region-box.focus();
+            } else if (root.password-error != "") {
+                password-field.focus();
+            }
+        } else if (root.account-mode) {
+            if (root.key-error != "") {
+                key-field.focus();
+            }
+        } else if (root.s3-errors.account-id != "") {
+            account-field.focus();
+        } else if (root.s3-errors.endpoint != "") {
+            endpoint-field.focus();
+        } else if (root.s3-errors.region != "") {
+            s3-region-field.focus();
+        } else if (root.s3-errors.bucket != "") {
+            bucket-field.focus();
+        } else if (root.s3-errors.key-id != "") {
+            key-id-field.focus();
+        } else if (root.s3-errors.secret != "") {
+            secret-field.focus();
+        }
+    }
+
+    // A sheet that opens is a fresh one: no messages left over from the last time, the fields
+    // starting from the draft, the focus in the first field, and the app asked for the endpoint
+    // of what is on show.
     init => {
-        root.zone-error = "";
-        root.region-error = "";
-        root.password-error = "";
-        root.result = "";
-        zone-field.focus();
-        root.changed(zone-field.text, region-box.current-index);
+        grid.selected = root.draft.provider;
+        name-field.text = root.draft.name;
+        zone-field.text = root.draft.zone;
+        region-box.current-index = root.draft.region-index;
+        s3-region-field.text = root.draft.region;
+        account-field.text = root.draft.account-id;
+        endpoint-field.text = root.draft.endpoint;
+        root.path-style = root.draft.path-style;
+        bucket-field.text = root.draft.bucket;
+        key-id-field.text = root.draft.key-id;
+        root.clear-messages();
+        root.focus-first();
+        root.refresh-endpoint();
     }
 
     // Swallows the pointer: nothing behind the sheet sees a click, hover or scroll.
@@ -223,14 +510,19 @@ export component AddSiteSheet inherits Rectangle {
         focus-on-tab-navigation: false;
         key-pressed(event) => {
             if (event.text == Key.Escape) {
-                root.cancel();
+                // Escape closes the bucket list first, and the sheet when there is none.
+                if (root.buckets-open) {
+                    root.buckets-open = false;
+                } else {
+                    root.cancel();
+                }
                 return accept;
             }
             if (event.text == Key.Tab && !event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && root.on-last-stop) {
-                zone-field.focus();
+                root.focus-first-stop();
                 return accept;
             }
-            if ((event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && (zone-field.has-focus || trap.has-focus)) {
+            if ((event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && (root.on-first-stop || trap.has-focus)) {
                 root.focus-last-stop();
                 return accept;
             }
@@ -251,7 +543,7 @@ export component AddSiteSheet inherits Rectangle {
             drop-shadow-color: Theme.shadow-sheet;
             clip: true;
             accessible-role: form;
-            accessible-label: @tr("Add Site");
+            accessible-label: root.editing ? @tr("Edit Site") : @tr("Add Site");
 
             content := VerticalLayout {
                 // Header: app icon, title and what the sheet is for.
@@ -282,7 +574,7 @@ export component AddSiteSheet inherits Rectangle {
                         spacing: 4px;
 
                         Text {
-                            text: @tr("Add Site");
+                            text: root.editing ? @tr("Edit Site") : @tr("Add Site");
                             color: Theme.label;
                             font-size: 17px;
                             font-weight: Theme.weight-semibold;
@@ -300,100 +592,55 @@ export component AddSiteSheet inherits Rectangle {
                 VerticalLayout {
                     padding-left: 22px;
                     padding-right: 22px;
-                    padding-bottom: 12px;
-                    spacing: 12px;
+                    padding-bottom: 4px;
 
-                    VerticalLayout {
-                        spacing: 8px;
-                        accessible-role: radio-group;
-                        accessible-label: @tr("Storage provider");
+                    // The provider grid. A saved site keeps its provider, so editing folds it away.
+                    Collapsible {
+                        shown: !root.editing;
+                        gap: 12px;
 
-                        HorizontalLayout {
-                            spacing: 8px;
-                            ProviderTile {
-                                name: @tr("Bunny Storage");
-                                kind: @tr("HTTP API");
-                                mono: "B";
-                                tint: Theme.provider-bunny;
-                                available: true;
-                                selected: true;
-                            }
-                            ProviderTile {
-                                name: @tr("Amazon S3");
-                                kind: @tr("S3");
-                                mono: "S3";
-                                tint: Theme.provider-s3;
-                            }
-                            ProviderTile {
-                                name: @tr("Cloudflare R2");
-                                kind: @tr("S3-compatible");
-                                mono: "R2";
-                                tint: Theme.provider-r2;
-                            }
-                            ProviderTile {
-                                name: @tr("Backblaze B2");
-                                kind: @tr("S3-compatible");
-                                mono: "B2";
-                                tint: Theme.provider-b2;
-                            }
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            ProviderTile {
-                                name: @tr("Wasabi");
-                                kind: @tr("S3-compatible");
-                                mono: "W";
-                                tint: Theme.provider-wasabi;
-                            }
-                            ProviderTile {
-                                name: @tr("DigitalOcean Spaces");
-                                kind: @tr("S3-compatible");
-                                mono: "DO";
-                                tint: Theme.provider-do;
-                            }
-                            ProviderTile {
-                                name: @tr("MinIO");
-                                kind: @tr("S3-compatible");
-                                mono: "M";
-                                tint: Theme.provider-minio;
-                            }
-                            ProviderTile {
-                                name: @tr("Other S3");
-                                kind: @tr("Custom endpoint");
-                                mono: "…";
-                                tint: Theme.provider-other;
+                        grid := ProviderGrid {
+                            s3-available: root.v2-ready;
+                            chosen(index) => {
+                                root.clear-messages();
+                                root.refresh-endpoint();
+                                root.provider-chosen(index);
                             }
                         }
                     }
 
-                    VerticalLayout {
-                        spacing: 8px;
+                    // Bunny: how to sign in.
+                    Collapsible {
+                        shown: root.bunny && !root.editing;
 
                         FormRow {
                             label: @tr("Sign in with");
                             HorizontalLayout {
                                 alignment: start;
-                                Rectangle {
-                                    background: Theme.chip;
-                                    border-radius: 8px;
-                                    accessible-role: radio-group;
-                                    accessible-label: @tr("Sign-in method");
+                                spacing: 12px;
 
-                                    HorizontalLayout {
-                                        padding: 2px;
-                                        spacing: 2px;
-                                        Segment {
-                                            text: @tr("Storage zone password");
-                                            selected: true;
-                                        }
-                                        Segment {
-                                            text: @tr("Bunny account key");
-                                            available: false;
-                                        }
+                                sign-in := SignInSwitch {
+                                    account-available: root.v2-ready;
+                                    selected(index) => {
+                                        root.clear-messages();
+                                        root.refresh-endpoint();
+                                        root.sign-in-chosen(index);
+                                    }
+                                }
+                                if !root.v2-ready: VCenter {
+                                    Text {
+                                        text: @tr("Arrives later in this build.");
+                                        color: Theme.label2;
+                                        font-size: Theme.font-small;
                                     }
                                 }
                             }
                         }
+                    }
+
+                    // Bunny, signed in with the storage zone's password.
+                    Collapsible {
+                        shown: root.password-mode;
 
                         FormRow {
                             label: @tr("Storage zone");
@@ -402,7 +649,7 @@ export component AddSiteSheet inherits Rectangle {
                                 error: root.zone-error;
                                 edited => {
                                     root.zone-error = "";
-                                    root.result = "";
+                                    root.touched();
                                     root.changed(self.text, region-box.current-index);
                                 }
                                 accepted => { root.submit(); }
@@ -418,7 +665,7 @@ export component AddSiteSheet inherits Rectangle {
                                 error: root.region-error;
                                 selected(index) => {
                                     root.region-error = "";
-                                    root.result = "";
+                                    root.touched();
                                     root.changed(zone-field.text, index);
                                 }
                             }
@@ -427,24 +674,362 @@ export component AddSiteSheet inherits Rectangle {
 
                         FormRow {
                             label: @tr("Password");
-                            password-field := Field {
+                            password-field := SecretField {
                                 label: @tr("Password");
+                                show-label: @tr("Show password");
+                                hide-label: @tr("Hide password");
+                                placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : "";
                                 error: root.password-error;
-                                input-type: password;
                                 edited => {
                                     root.password-error = "";
-                                    root.result = "";
+                                    root.touched();
                                 }
                                 accepted => { root.submit(); }
+                                reveal-toggled => { root.reveal(); }
                             }
                             if root.password-error != "": ErrorLine { text: root.password-error; }
                             Text {
-                                text: @tr("Bunny dashboard → Storage → your zone → FTP & API Access. Use the full password, not the read-only one.");
+                                text: @tr("Bunny dashboard → Storage → {} → FTP & API Access. Use the full password, not the read-only one.", zone-field.text != "" ? zone-field.text : @tr("your zone"));
                                 color: Theme.label2;
                                 font-size: Theme.font-small;
                                 wrap: word-wrap;
                             }
                         }
+                    }
+
+                    // Bunny, signed in with an account key.
+                    Collapsible {
+                        shown: root.account-mode;
+
+                        FormRow {
+                            label: @tr("Account key");
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                key-field := SecretField {
+                                    horizontal-stretch: 1;
+                                    label: @tr("Account key");
+                                    show-label: @tr("Show account key");
+                                    hide-label: @tr("Hide account key");
+                                    error: root.key-error;
+                                    edited => {
+                                        root.key-error = "";
+                                        root.touched();
+                                    }
+                                    accepted => { root.submit(); }
+                                    reveal-toggled => { root.reveal(); }
+                                }
+                                find-button := CapsuleButton {
+                                    text: @tr("Find Zones");
+                                    enabled: !root.busy && key-field.text != "";
+                                    clicked => { root.find-zones(key-field.text); }
+                                }
+                            }
+                            if root.key-error != "": ErrorLine { text: root.key-error; }
+                        }
+
+                        if root.zones.length > 0: FormRow {
+                            label: @tr("Storage zones");
+                            Rectangle {
+                                // Three rows and a bit of the fourth, so that the list scrolls and the sheet still fits a short window.
+                                height: min(root.zones.length * 26px + 8px, 94px);
+                                border-radius: 7px;
+                                background: Theme.field;
+                                border-width: 1px;
+                                border-color: Theme.field-border;
+                                accessible-role: list;
+                                accessible-label: @tr("Storage zones");
+
+                                ScrollView {
+                                    x: 4px;
+                                    y: 4px;
+                                    width: parent.width - 8px;
+                                    height: parent.height - 8px;
+                                    VerticalLayout {
+                                        alignment: start;
+                                        for zone[i] in root.zones: Rectangle {
+                                            height: 26px;
+
+                                            if zone.usable: HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                VCenter {
+                                                    CheckLine {
+                                                        text: zone.hostnames != "" ? @tr("{} · {} · {}", zone.name, zone.region, zone.hostnames) : @tr("{} · {}", zone.name, zone.region);
+                                                        checked: root.zone-checked[i];
+                                                        toggled(now) => {
+                                                            root.zone-checked[i] = now;
+                                                            root.zone-count += now ? 1 : -1;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if !zone.usable: HorizontalLayout {
+                                                padding-left: 28px;
+                                                padding-right: 6px;
+                                                Text {
+                                                    text: @tr("{} · can't be added: {}", zone.name, zone.reason);
+                                                    color: Theme.label3;
+                                                    font-size: Theme.font-body;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        FormRow {
+                            label: "";
+                            keep-radio := RadioList {
+                                label: @tr("What happens to the account key");
+                                options: [@tr("Use it once to fetch zone passwords, then forget it"), @tr("Keep it for cache purging and zone tools")];
+                            }
+                        }
+
+                        FormRow {
+                            label: "";
+                            Rectangle {
+                                background: Theme.orange-soft;
+                                border-radius: Theme.radius-md;
+                                accessible-role: AccessibleRole.text;
+                                accessible-label: @tr("An account key can change anything in your Bunny account. HTTPorter uses it only for what you choose here.");
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    padding-top: 6px;
+                                    padding-bottom: 6px;
+                                    spacing: 10px;
+
+                                    VCenter {
+                                        Image {
+                                            source: Icons.warn;
+                                            colorize: Theme.orange;
+                                            width: 16px;
+                                            height: 16px;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                    Text {
+                                        text: @tr("An account key can change anything in your Bunny account. HTTPorter uses it only for what you choose here.");
+                                        color: Theme.orange;
+                                        font-size: Theme.font-small;
+                                        font-weight: Theme.weight-semibold;
+                                        wrap: word-wrap;
+                                        vertical-alignment: center;
+                                        accessible-role: none;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // An S3 service: its address, the bucket and the access key.
+                    Collapsible {
+                        shown: root.s3;
+                        gap: 0px;
+                        spacing: 0px;
+
+                        Collapsible {
+                            shown: root.wants-account;
+
+                            FormRow {
+                                label: @tr("Account ID");
+                                account-field := Field {
+                                    label: @tr("Account ID");
+                                    error: root.s3-errors.account-id;
+                                    edited => {
+                                        root.s3-errors.account-id = "";
+                                        root.touched();
+                                        root.refresh-endpoint();
+                                    }
+                                    accepted => { root.submit(); }
+                                }
+                                if root.s3-errors.account-id != "": ErrorLine { text: root.s3-errors.account-id; }
+                            }
+                        }
+
+                        Collapsible {
+                            shown: root.wants-address;
+
+                            FormRow {
+                                label: @tr("Endpoint");
+                                endpoint-field := Field {
+                                    label: @tr("Endpoint");
+                                    placeholder: @tr("https://s3.example.com");
+                                    error: root.s3-errors.endpoint;
+                                    edited => {
+                                        root.s3-errors.endpoint = "";
+                                        root.touched();
+                                        root.refresh-endpoint();
+                                    }
+                                    accepted => { root.submit(); }
+                                }
+                                if root.s3-errors.endpoint != "": ErrorLine { text: root.s3-errors.endpoint; }
+                            }
+                        }
+
+                        Collapsible {
+                            shown: root.wants-region;
+
+                            FormRow {
+                                label: @tr("Region");
+                                HorizontalLayout {
+                                    spacing: 16px;
+
+                                    s3-region-field := Field {
+                                        horizontal-stretch: 1;
+                                        label: @tr("Region");
+                                        placeholder: root.wants-path-style ? @tr("Optional, us-east-1 if empty") : (root.provider == 3 ? @tr("us-west-004") : (root.provider == 5 ? @tr("nyc3") : @tr("us-east-1")));
+                                        error: root.s3-errors.region;
+                                        edited => {
+                                            root.s3-errors.region = "";
+                                            root.touched();
+                                            root.refresh-endpoint();
+                                        }
+                                        accepted => { root.submit(); }
+                                    }
+                                    if root.wants-path-style: VCenter {
+                                        CheckLine {
+                                            text: @tr("Use path-style addresses");
+                                            checked: root.path-style;
+                                            toggled(now) => {
+                                                root.path-style = now;
+                                                root.touched();
+                                                root.refresh-endpoint();
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.s3-errors.region != "": ErrorLine { text: root.s3-errors.region; }
+                            }
+                        }
+
+                        Collapsible {
+                            FormRow {
+                                label: @tr("Bucket");
+                                HorizontalLayout {
+                                    spacing: 8px;
+
+                                    bucket-field := Field {
+                                        horizontal-stretch: 1;
+                                        label: @tr("Bucket");
+                                        error: root.s3-errors.bucket;
+                                        edited => {
+                                            root.s3-errors.bucket = "";
+                                            root.touched();
+                                            root.refresh-endpoint();
+                                        }
+                                        accepted => { root.submit(); }
+                                    }
+                                    choose-button := CapsuleButton {
+                                        text: @tr("Choose…");
+                                        enabled: !root.busy;
+                                        clicked => {
+                                            root.buckets-open = true;
+                                            root.list-buckets(root.draft-now(), secret-field.text);
+                                        }
+                                    }
+                                }
+                                if root.s3-errors.bucket != "": ErrorLine { text: root.s3-errors.bucket; }
+                                if root.buckets-open: Rectangle {
+                                    height: root.buckets-busy || root.buckets-error != "" || root.buckets.length == 0 ? 32px : min(root.buckets.length * 26px + 8px, 134px);
+                                    border-radius: 7px;
+                                    background: Theme.field;
+                                    border-width: 1px;
+                                    border-color: Theme.field-border;
+                                    accessible-role: list;
+                                    accessible-label: @tr("Buckets");
+
+                                    if root.buckets-busy: HorizontalLayout {
+                                        padding-left: 10px;
+                                        Text {
+                                            text: @tr("Loading buckets…");
+                                            color: Theme.label2;
+                                            font-size: Theme.font-body;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if !root.buckets-busy && root.buckets-error != "": HorizontalLayout {
+                                        padding-left: 10px;
+                                        ErrorLine { text: root.buckets-error; }
+                                    }
+                                    if !root.buckets-busy && root.buckets-error == "" && root.buckets.length == 0: HorizontalLayout {
+                                        padding-left: 10px;
+                                        Text {
+                                            text: @tr("No buckets found.");
+                                            color: Theme.label2;
+                                            font-size: Theme.font-body;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if !root.buckets-busy && root.buckets-error == "" && root.buckets.length > 0: ScrollView {
+                                        x: 4px;
+                                        y: 4px;
+                                        width: parent.width - 8px;
+                                        height: parent.height - 8px;
+                                        VerticalLayout {
+                                            alignment: start;
+                                            for bucket-name in root.buckets: BucketRow {
+                                                name: bucket-name;
+                                                picked => {
+                                                    bucket-field.text = bucket-name;
+                                                    root.s3-errors.bucket = "";
+                                                    root.buckets-open = false;
+                                                    root.touched();
+                                                    root.refresh-endpoint();
+                                                    bucket-field.focus();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Collapsible {
+                            FormRow {
+                                label: @tr("Access key ID");
+                                key-id-field := Field {
+                                    label: @tr("Access key ID");
+                                    error: root.s3-errors.key-id;
+                                    edited => {
+                                        root.s3-errors.key-id = "";
+                                        root.touched();
+                                    }
+                                    accepted => { root.submit(); }
+                                }
+                                if root.s3-errors.key-id != "": ErrorLine { text: root.s3-errors.key-id; }
+                            }
+                        }
+
+                        Collapsible {
+                            FormRow {
+                                label: @tr("Secret access key");
+                                secret-field := SecretField {
+                                    label: @tr("Secret access key");
+                                    show-label: @tr("Show secret access key");
+                                    hide-label: @tr("Hide secret access key");
+                                    placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : "";
+                                    error: root.s3-errors.secret;
+                                    edited => {
+                                        root.s3-errors.secret = "";
+                                        root.touched();
+                                    }
+                                    accepted => { root.submit(); }
+                                    reveal-toggled => { root.reveal(); }
+                                }
+                                if root.s3-errors.secret != "": ErrorLine { text: root.s3-errors.secret; }
+                            }
+                        }
+                    }
+
+                    // The address that will be used, and the name the site gets in the sidebar.
+                    Collapsible {
+                        shown: !root.account-mode;
 
                         FormRow {
                             label: @tr("Endpoint");
@@ -485,21 +1070,25 @@ export component AddSiteSheet inherits Rectangle {
                             label: @tr("Site name");
                             name-field := Field {
                                 label: @tr("Site name");
-                                placeholder: zone-field.text != "" ? zone-field.text : @tr("Same as the storage zone");
+                                placeholder: root.s3 ? (bucket-field.text != "" ? bucket-field.text : @tr("Same as the bucket")) : (zone-field.text != "" ? zone-field.text : @tr("Same as the storage zone"));
                                 accepted => { root.submit(); }
                             }
                         }
                     }
 
-                    if root.busy || root.result != "": ResultBox {
-                        text: root.result;
-                        ok: root.result-ok;
-                        busy: root.busy;
+                    if root.busy || root.result != "": VerticalLayout {
+                        padding-top: 4px;
+                        padding-bottom: 4px;
+
+                        ResultBox {
+                            text: root.result;
+                            ok: root.result-ok;
+                            busy: root.busy;
+                        }
                     }
                 }
 
-                // Footer: Test Connection to the left, Cancel and the default button, Add Site,
-                // to the right.
+                // Footer: Test Connection to the left, Cancel and the default button to the right.
                 Rectangle {
                     height: 1px;
                     background: Theme.sep;
@@ -511,13 +1100,11 @@ export component AddSiteSheet inherits Rectangle {
                     padding-bottom: 18px;
                     spacing: 8px;
 
-                    test-button := CapsuleButton {
+                    if !root.account-mode: CapsuleButton {
                         text: @tr("Test Connection");
                         icon: Icons.refresh;
                         enabled: !root.busy;
-                        clicked => {
-                            root.test(name-field.text, zone-field.text, region-box.current-index, password-field.text);
-                        }
+                        clicked => { root.run-test(); }
                     }
                     Rectangle { horizontal-stretch: 1; }
                     cancel-button := CapsuleButton {
@@ -525,9 +1112,9 @@ export component AddSiteSheet inherits Rectangle {
                         clicked => { root.cancel(); }
                     }
                     add-button := CapsuleButton {
-                        text: @tr("Add Site");
+                        text: root.add-text;
                         primary: true;
-                        enabled: !root.busy;
+                        enabled: root.can-add;
                         clicked => { root.submit(); }
                     }
                 }

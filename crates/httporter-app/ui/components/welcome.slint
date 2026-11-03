@@ -1,0 +1,284 @@
+// The Welcome screen (mockup `Welcome.dc.html`): what the main area shows while there are no sites.
+// The app icon and the wordmark, three things HTTPorter does, a button that opens Add Site and one
+// that imports a site from a .env file or an AWS profile, and a line about the software.
+//
+// Importing is turned off while `v2-ready` is false (Ruling Q10) and says so.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Activation, CapsuleButton } from "buttons.slint";
+import { VCenter } from "layout.slint";
+
+// One of the three rows: an icon in the accent colour, a heading and a sentence (mockup: the
+// `b` over `p.muted` beside a 28 px icon).
+component FeatureRow inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> heading;
+    in property <string> body;
+
+    spacing: 16px;
+
+    VerticalLayout {
+        alignment: start;
+        Image {
+            source: root.icon;
+            colorize: Theme.accent-text;
+            width: 28px;
+            height: 28px;
+            accessible-role: none;
+        }
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 2px;
+        alignment: start;
+
+        Text {
+            text: root.heading;
+            color: Theme.label;
+            font-size: 14px;
+            font-weight: Theme.weight-bold;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.body;
+            color: Theme.label2;
+            font-size: Theme.font-body;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The quiet button under the main one (mockup `.btn.quiet`): accent text, no outline. Turned off,
+// it is dimmed and takes no focus.
+component QuietAction inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> enabled: true;
+    // Read out after the label: why the button is off.
+    in property <string> description;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    height: 28px;
+    border-radius: self.height / 2;
+    background: area.has-hover && root.enabled ? Theme.hover : transparent;
+    opacity: root.enabled ? 1 : 0.45;
+    forward-focus: key-focus;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-description: root.description;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 6px;
+        alignment: center;
+
+        VCenter {
+            Image {
+                source: root.icon;
+                colorize: Theme.accent-text;
+                width: 16px;
+                height: 16px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.accent-text;
+            font-size: Theme.font-body;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && Activation.triggers(event.text, event.repeat)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component WelcomeView inherits Rectangle {
+    // Importing is not wired yet: until this is true the button is off and says so.
+    in property <bool> v2-ready: false;
+    // Add Your First Site was pressed.
+    callback add-first();
+    // Import from .env or AWS profile… was pressed.
+    callback import-profiles();
+
+    // A short window gets tighter spacing and a smaller icon, so that the buttons stay in view.
+    property <bool> compact: root.height < 560px;
+
+    accessible-role: region;
+    accessible-label: @tr("Welcome");
+
+    VerticalLayout {
+        alignment: center;
+        padding-top: 16px;
+        padding-bottom: 16px;
+
+        HorizontalLayout {
+            alignment: center;
+
+            VerticalLayout {
+                width: min(560px, root.width - 48px);
+                spacing: root.compact ? 16px : 28px;
+
+                // Icon, wordmark and tagline.
+                VerticalLayout {
+                    spacing: root.compact ? 8px : 14px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: root.compact ? 72px : 96px;
+                            height: self.width;
+                            border-radius: self.width / 4;
+                            background: @linear-gradient(160deg, Theme.app-icon-top, Theme.app-icon-bottom);
+
+                            Image {
+                                source: Icons.porter;
+                                colorize: Theme.on-accent;
+                                width: parent.width * 0.58;
+                                height: self.width;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                accessible-role: none;
+                            }
+                        }
+                    }
+                    // HTTP in the accent colour, then orter; read out as one word.
+                    Rectangle {
+                        height: wordmark.preferred-height;
+                        accessible-role: AccessibleRole.text;
+                        accessible-label: @tr("HTTPorter");
+
+                        wordmark := HorizontalLayout {
+                            alignment: center;
+
+                            Text {
+                                text: @tr("HTTP");
+                                color: Theme.accent-text;
+                                font-size: 34px;
+                                font-weight: Theme.weight-bold;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: @tr("orter");
+                                color: Theme.label;
+                                font-size: 34px;
+                                font-weight: Theme.weight-bold;
+                                accessible-role: none;
+                            }
+                        }
+                    }
+                    Text {
+                        text: @tr("Fast, safe file transfers to cloud storage over HTTP.");
+                        color: Theme.label2;
+                        font-size: 15px;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // What it does.
+                VerticalLayout {
+                    spacing: root.compact ? 12px : 18px;
+
+                    FeatureRow {
+                        icon: Icons.globe;
+                        heading: @tr("Made for HTTP storage");
+                        body: @tr("Talks straight to Bunny Storage and S3-compatible services over HTTPS, sending many files at once instead of one by one.");
+                    }
+                    FeatureRow {
+                        icon: Icons.send;
+                        heading: @tr("Publish a whole folder");
+                        body: @tr("Uploads only what changed, checked by checksum, then clears the CDN so visitors see it right away.");
+                    }
+                    FeatureRow {
+                        icon: Icons.shield;
+                        heading: @tr("Safe by design");
+                        body: @tr("You see every change before it happens. Passwords stay in Windows Credential Manager, never in plain files.");
+                    }
+                }
+
+                // What to do about it.
+                VerticalLayout {
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        CapsuleButton {
+                            width: min(280px, root.width - 48px);
+                            height: 32px;
+                            text: @tr("Add Your First Site");
+                            icon: Icons.plus;
+                            primary: true;
+                            clicked => { root.add-first(); }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 10px;
+
+                        QuietAction {
+                            text: @tr("Import from .env or AWS profile…");
+                            icon: Icons.import-file;
+                            enabled: root.v2-ready;
+                            description: root.v2-ready ? "" : @tr("Arrives later in this build.");
+                            clicked => { root.import-profiles(); }
+                        }
+                        if !root.v2-ready: VCenter {
+                            Text {
+                                text: @tr("Arrives later in this build.");
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: @tr("Free software · No telemetry · Your files go only to the services you add");
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

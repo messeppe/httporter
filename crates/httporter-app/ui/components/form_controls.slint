@@ -1,28 +1,38 @@
-// Form controls shared by the app's sheets: a single-line text field, the red line of text under
-// a field, a labelled form row and the region drop-down. Nothing here knows about any one form: a
+// Form controls shared by the app's sheets: a single-line text field, a field for a secret with
+// its reveal button, the red line of text under a field, a labelled form row, the region
+// drop-down, a check box and a list of radio buttons. Nothing here knows about any one form: a
 // sheet puts its own texts and callbacks on them (the Add Site sheet is the first user).
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
+import { ToolButton } from "buttons.slint";
 import { VCenter } from "layout.slint";
 
 // Single-line text field (mockup `.input`: 28 px, 7 px corners; the outline is a full pixel in
 // `field-border` so that the field can be seen). It shows the error border when `error` is set;
 // the message itself is drawn by the caller under the field. A password field shows dots,
-// assistive technology is told it has no readable value, and it cannot be copied or cut.
+// assistive technology is told it has no readable value, and it cannot be copied or cut. A
+// `secret` field cannot be copied or cut either when it shows its text (see SecretField).
 export component Field inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <string> placeholder;
     in property <string> label;
     in property <string> error;
     in property <InputType> input-type: InputType.text;
+    // Holds a password, a key or a secret: what is in it never leaves through the clipboard, also
+    // while it is shown.
+    in property <bool> secret: false;
+    // Room kept free at the right edge for something drawn over the field (SecretField's eye).
+    in property <length> trailing: 9px;
     // False dims the field and takes it out of the Tab order and editing (a limit that is turned off).
     in property <bool> enabled: true;
     out property <bool> has-focus: input.has-focus;
     callback edited();
     // Return was pressed (not auto-repeat).
     callback accepted();
+
+    property <bool> keeps-in: root.secret || root.input-type == InputType.password;
 
     // Selects the whole text, for a value that is offered and likely to be replaced.
     public function select-all() {
@@ -41,7 +51,7 @@ export component Field inherits Rectangle {
     // scrolls instead of spilling out.
     Rectangle {
         x: 9px;
-        width: parent.width - 18px;
+        width: parent.width - 9px - root.trailing;
         clip: true;
 
         Text {
@@ -61,12 +71,12 @@ export component Field inherits Rectangle {
             Menu {
                 MenuItem {
                     title: @tr("Cut");
-                    enabled: input.text != "" && root.input-type != InputType.password;
+                    enabled: input.text != "" && !root.keeps-in;
                     activated => { input.cut(); }
                 }
                 MenuItem {
                     title: @tr("Copy");
-                    enabled: input.text != "" && root.input-type != InputType.password;
+                    enabled: input.text != "" && !root.keeps-in;
                     activated => { input.copy(); }
                 }
                 MenuItem {
@@ -116,7 +126,7 @@ export component Field inherits Rectangle {
                     }
                     // What is typed into a password field must not leave through the clipboard:
                     // copy and cut (Ctrl+C, Ctrl+X, Ctrl+Insert, Shift+Delete) do nothing there.
-                    if (root.input-type == InputType.password && ((event.modifiers.control && (event.text == "c" || event.text == "C" || event.text == "x" || event.text == "X" || event.text == Key.Insert)) || (event.modifiers.shift && event.text == Key.Delete))) {
+                    if (root.keeps-in && ((event.modifiers.control && (event.text == "c" || event.text == "C" || event.text == "x" || event.text == "X" || event.text == Key.Insert)) || (event.modifiers.shift && event.text == Key.Delete))) {
                         return accept;
                     }
                     return reject;
@@ -427,6 +437,251 @@ export component RegionPicker inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+}
+
+// A field for a password, an access key or a secret, with an eye button inside its right edge that
+// shows what was typed (the reveal toggle). It starts hidden. The text cannot be copied or cut
+// from it, hidden or shown. Nothing here remembers the choice: the field is rebuilt with its sheet,
+// so a secret is hidden again whenever the sheet closes.
+export component SecretField inherits Rectangle {
+    in-out property <string> text <=> field.text;
+    in property <string> placeholder;
+    // What assistive technology calls the field.
+    in property <string> label;
+    in property <string> error;
+    // The eye button's names, for the two states: "Show password" and "Hide password".
+    in property <string> show-label;
+    in property <string> hide-label;
+    // The text is shown instead of dots.
+    in-out property <bool> revealed: false;
+    out property <bool> has-focus: field.has-focus || eye.has-focus;
+    callback edited();
+    // Return was pressed (not auto-repeat).
+    callback accepted();
+    // The eye was pressed; the argument is whether the text is now shown.
+    callback reveal-toggled(bool);
+
+    height: 28px;
+    forward-focus: field;
+
+    field := Field {
+        width: parent.width;
+        height: parent.height;
+        label: root.label;
+        placeholder: root.placeholder;
+        error: root.error;
+        secret: true;
+        input-type: root.revealed ? InputType.text : InputType.password;
+        trailing: 36px;
+        edited => { root.edited(); }
+        accepted => { root.accepted(); }
+    }
+
+    eye := ToolButton {
+        x: parent.width - self.width - 4px;
+        y: 2px;
+        width: 28px;
+        height: 24px;
+        icon: root.revealed ? Icons.eye-off : Icons.eye;
+        label: root.revealed ? root.hide-label : root.show-label;
+        clicked => {
+            root.revealed = !root.revealed;
+            root.reveal-toggled(root.revealed);
+        }
+    }
+}
+
+// A checkbox with a label (mockup `.check`). The caller owns the state: pressing the box, or Space
+// on it, only asks for the opposite through `toggled`. Return is left to the default button of
+// the sheet it is on.
+export component CheckLine inherits Rectangle {
+    in property <string> text;
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: key-focus.has-focus;
+    // The user asked for this state.
+    callback toggled(bool);
+
+    height: 22px;
+    forward-focus: key-focus;
+    opacity: root.enabled ? 1 : 0.5;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.toggled(!root.checked);
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+
+        VCenter {
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 4px;
+                background: root.checked ? Theme.accent : Theme.field;
+                border-width: 1px;
+                border-color: root.checked ? Theme.accent : Theme.field-border;
+
+                Image {
+                    source: Icons.check;
+                    colorize: Theme.on-accent;
+                    width: 10px;
+                    height: 10px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    visible: root.checked;
+                    accessible-role: none;
+                }
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            accessible-role: none;
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside like the buttons' ring.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: 8px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && event.text == Key.Space) {
+                if (!event.repeat) {
+                    root.toggled(!root.checked);
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggled(!root.checked); }
+    }
+}
+
+// A column of radio buttons, one of which is chosen. One Tab stop; the arrow keys move the choice.
+export component RadioList inherits Rectangle {
+    in property <[string]> options;
+    // What assistive technology calls the group.
+    in property <string> label;
+    in-out property <int> current: 0;
+    out property <bool> has-focus: key-focus.has-focus;
+    // The user chose another option.
+    callback selected(int);
+
+    function select(index: int) {
+        if (index >= 0 && index < root.options.length && index != root.current) {
+            root.current = index;
+            root.selected(index);
+        }
+    }
+
+    height: root.options.length * 26px;
+    forward-focus: key-focus;
+    accessible-role: radio-group;
+    accessible-label: root.label;
+
+    VerticalLayout {
+        spacing: 4px;
+        alignment: start;
+
+        for option[i] in root.options: Rectangle {
+            height: 22px;
+            accessible-role: radio-button;
+            accessible-checkable: true;
+            accessible-checked: i == root.current;
+            accessible-label: option;
+            accessible-action-default => { root.select(i); }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                VCenter {
+                    Rectangle {
+                        width: 14px;
+                        height: 14px;
+                        border-radius: self.height / 2;
+                        background: Theme.field;
+                        border-width: i == root.current ? 4px : 1px;
+                        border-color: i == root.current ? Theme.accent : Theme.field-border;
+                    }
+                }
+                Text {
+                    text: option;
+                    color: Theme.label;
+                    font-size: Theme.font-body;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    accessible-role: none;
+                }
+            }
+
+            // Keyboard focus ring around the chosen option, 3 px outside.
+            Rectangle {
+                x: -3px;
+                y: -3px;
+                width: parent.width + 6px;
+                height: parent.height + 6px;
+                border-radius: 8px;
+                border-width: 2px;
+                border-color: Theme.accent;
+                visible: root.has-focus && i == root.current;
+            }
+
+            TouchArea {
+                clicked => {
+                    key-focus.focus();
+                    root.select(i);
+                }
+            }
+        }
+    }
+
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.UpArrow || event.text == Key.LeftArrow) {
+                root.select(root.current - 1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow || event.text == Key.RightArrow) {
+                root.select(root.current + 1);
+                return accept;
+            }
+            return reject;
         }
     }
 }
