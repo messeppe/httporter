@@ -153,6 +153,9 @@ pub struct EngineSnapshot {
     pub done: Vec<JobView>,
     pub done_count: u64,
     pub last_batch: Option<BatchSummary>,
+    /// Journal reads and writes that failed since the engine started. Above 0, a crash may
+    /// offer finished jobs again or forget unfinished ones, so the app can warn.
+    pub journal_errors: u64,
 }
 
 /// How a conflict told whether two files have the same contents.

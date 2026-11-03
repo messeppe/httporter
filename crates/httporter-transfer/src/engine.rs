@@ -5,24 +5,43 @@
 //! `.await`, never while telling watchers about a change). Units of work run in their own tasks
 //! and report back through [`Inner`]'s methods. The journal is written by a single task, in the
 //! order the changes happened, so a job's last record is always its latest state.
+//!
+//! A delete whose request may have reached the server is marked in the journal through the
+//! record's multipart column, which a delete never otherwise uses: a `Delete` record with
+//! `multipart: Some(_)` (the [`DELETE_SENT`] marker) was possibly sent, so after a crash a
+//! `NotFound` for it means done (ledger 179). This keeps the journal's shape as it is.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::Utc;
 use httporter_core::{
     BatchSummary, Checksum, Direction, EngineSnapshot, EngineState, Job, JobId, JobKind, JobRecord,
-    JobState, JobView, Journal, JournalError, ProviderError, RemotePath, SiteId, StorageProvider,
-    TransferSettings,
+    JobState, JobView, Journal, JournalError, MultipartProgress, ProviderError, RemotePath, SiteId,
+    StorageProvider, TransferSettings,
 };
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
 
 use crate::bucket::TokenBucket;
-use crate::lane::{ActiveUnit, Lane, LaneState, SlotKind, UnitId, UnitSpec, Work, run_unit};
+use crate::lane::{
+    ActiveUnit, Failure, Lane, LaneState, SlotKind, UnitId, UnitSpec, Work, run_unit,
+};
+use crate::local::{DiskFiles, LocalFiles};
+use crate::messages;
+use crate::offline::{self, MAX_STRIKES, drive_of};
 use crate::rate::{RateWindow, eta};
+
+/// The `upload_id` of the multipart progress that marks a delete as possibly sent.
+pub(crate) const DELETE_SENT: &str = "httporter:delete-sent";
+
+/// A site as [`Engine::resume_from_journal`] needs it: its name, its host, and its client.
+pub type SiteInfo = (String, String, Arc<dyn StorageProvider>);
+
+/// What a site the journal names is now; `None` when the site no longer exists.
+pub type SiteLookup<'a> = &'a dyn Fn(&SiteId) -> Option<SiteInfo>;
 
 /// How many jobs each of a snapshot's lists shows at most.
 pub const WINDOW: usize = 200;
@@ -112,6 +131,8 @@ pub(crate) struct Entry {
     sent: bool,
     /// What a download's contents must hash to, when its batch said.
     checksum: Option<Checksum>,
+    /// How many times it used up its retries on network errors (see [`MAX_STRIKES`]).
+    strikes: u8,
 }
 
 /// Every job the engine still needs to know about: queued, active, failed, and the done ones
@@ -231,6 +252,11 @@ struct State {
     done: VecDeque<JobId>,
     last_batch: Option<BatchSummary>,
     rates: RateWindow,
+    /// A download found its drive full: (drive, download bytes still to come on it). Nothing
+    /// starts until the user resumes.
+    disk_full: Option<(String, u64)>,
+    /// The local file operations: the disk, unless a test stands in for it.
+    files: Arc<dyn LocalFiles>,
 }
 
 impl Engine {
@@ -363,18 +389,24 @@ impl Engine {
         self.inner.poke();
     }
 
+    /// Lifts a pause, and the stop a full disk made (the user freed some space).
     pub fn resume_all(&self) {
-        self.inner.lock().paused = false;
+        {
+            let mut st = self.inner.lock();
+            st.paused = false;
+            st.disk_full = None;
+        }
         self.inner.poke();
     }
 
     /// Cancels everything not yet done: queued, paused, running and failed jobs alike, and
-    /// lifts a pause.
+    /// lifts a pause (or a full disk's stop).
     pub fn cancel_all(&self) {
         {
             let mut guard = self.inner.lock();
             let st = &mut *guard;
             st.paused = false;
+            st.disk_full = None;
             for lane in 0..st.lanes.len() {
                 let queued: Vec<JobId> = st.lanes[lane].queue.drain(..).collect();
                 st.lanes[lane].paused = 0;
@@ -515,7 +547,9 @@ impl Engine {
     /// windows of at most [`WINDOW`] jobs and the totals are kept as jobs change.
     pub fn snapshot(&self) -> EngineSnapshot {
         let now = Instant::now();
-        self.inner.lock().snapshot(now)
+        let mut snapshot = self.inner.lock().snapshot(now);
+        snapshot.journal_errors = self.inner.writer.errors();
+        snapshot
     }
 
     /// Ticks on every change. The UI throttles how often it reads a snapshot.
@@ -534,6 +568,159 @@ impl Engine {
         let st = self.inner.lock();
         let lane = *st.lane_of.get(site)?;
         Some(st.lanes[lane].transfers.limiter.limit())
+    }
+
+    /// Where the local file work of units dispatched from now on goes: the disk by default. A
+    /// test passes a stand-in, such as one whose disk is full.
+    pub fn set_local_files(&self, files: Arc<dyn LocalFiles>) {
+        self.inner.lock().files = files;
+    }
+
+    /// The jobs a crash (or a quit) left unfinished in the journal, Queued or Failed, that this
+    /// engine doesn't hold: what [`resume_from_journal`](Self::resume_from_journal) would offer
+    /// again. 0 when the journal can't be read (counted as a journal error).
+    pub fn unfinished_count(&self) -> usize {
+        let records = match self.inner.journal.unfinished() {
+            Ok(records) => records,
+            Err(_) => {
+                self.inner.writer.count_error();
+                return 0;
+            }
+        };
+        let st = self.inner.lock();
+        records
+            .iter()
+            .filter(|record| job_id(record.id).is_some_and(|id| st.jobs.get(id).is_none()))
+            .count()
+    }
+
+    /// Re-queues every unfinished journal record whose site `lookup` still knows, at the back
+    /// of its site's queue, and returns how many. Failed records go back to the queue too: a
+    /// resume is a retry. A delete marked as possibly sent treats `NotFound` as done.
+    ///
+    /// The records of a site that no longer exists are marked Cancelled, so they aren't
+    /// offered again; records this engine already holds are left alone. Downloads resume
+    /// unverified (their listed checksums aren't journalled).
+    pub fn resume_from_journal(&self, lookup: SiteLookup<'_>) -> usize {
+        let records = match self.inner.journal.unfinished() {
+            Ok(records) => records,
+            Err(_) => {
+                self.inner.writer.count_error();
+                return 0;
+            }
+        };
+        // Each site is looked up once, before the lock is taken: `lookup` is the app's code.
+        let mut sites: HashMap<SiteId, Option<SiteInfo>> = HashMap::new();
+        for record in &records {
+            if !sites.contains_key(&record.site) {
+                let found = lookup(&record.site);
+                sites.insert(record.site.clone(), found);
+            }
+        }
+        let mut resumed = 0;
+        {
+            let mut guard = self.inner.lock();
+            let st = &mut *guard;
+            let writer = &self.inner.writer;
+            let mut lanes: HashMap<SiteId, usize> = HashMap::new();
+            let mut batches: HashMap<String, u64> = HashMap::new();
+            for record in records {
+                let Some(id) = job_id(record.id) else {
+                    continue;
+                };
+                if st.jobs.get(id).is_some() {
+                    continue;
+                }
+                let Some(Some((name, host, provider))) = sites.get(&record.site) else {
+                    writer.set_state(id, JobState::Cancelled, None);
+                    continue;
+                };
+                if !st.has_work() {
+                    st.start_run(Instant::now());
+                }
+                let lane = match lanes.get(&record.site) {
+                    Some(&lane) => lane,
+                    None => {
+                        let lane = st.lane_for(
+                            record.site.clone(),
+                            name.clone(),
+                            host.clone(),
+                            provider.clone(),
+                        );
+                        lanes.insert(record.site.clone(), lane);
+                        lane
+                    }
+                };
+                st.run.site.clone_from(name);
+                st.run.host.clone_from(host);
+                let seq = match batches.get(&record.batch) {
+                    Some(&seq) => seq,
+                    None => {
+                        let seq = st.next_batch;
+                        st.next_batch += 1;
+                        batches.insert(record.batch.clone(), seq);
+                        seq
+                    }
+                };
+                let job = record.job;
+                let size = size_of(&job);
+                let info = st.batches.entry(seq).or_insert_with(|| BatchInfo {
+                    site: name.clone(),
+                    open: 0,
+                    failed: 0,
+                    done_files: 0,
+                    done_bytes: 0,
+                    kinds: Kinds::default(),
+                });
+                info.open += 1;
+                info.kinds.note(job.kind());
+                st.run.kinds.note(job.kind());
+                st.run.files_total += 1;
+                st.run.bytes_total += size;
+                if record.state == JobState::Failed {
+                    writer.set_state(id, JobState::Queued, None);
+                }
+                let sent = matches!(job, Job::Delete { .. }) && record.multipart.is_some();
+                let mut entry = Entry::new(job, lane, seq, size);
+                entry.sent = sent;
+                st.lanes[lane].queue.push_back(id);
+                st.jobs.insert(id, entry);
+                resumed += 1;
+            }
+        }
+        self.inner.poke();
+        resumed
+    }
+
+    /// Drops the unfinished jobs a crash left in the journal, when the user chooses not to
+    /// resume them. The jobs this engine holds stay journalled.
+    pub fn discard_journal(&self) {
+        let holds_unfinished = {
+            let st = self.inner.lock();
+            st.has_work() || !st.failed.is_empty()
+        };
+        let journal = &self.inner.journal;
+        let result = if holds_unfinished {
+            journal.unfinished().and_then(|records| {
+                let others: Vec<i64> = {
+                    let st = self.inner.lock();
+                    records
+                        .iter()
+                        .map(|record| record.id)
+                        .filter(|&id| job_id(id).is_none_or(|id| st.jobs.get(id).is_none()))
+                        .collect()
+                };
+                others
+                    .into_iter()
+                    .try_for_each(|id| journal.set_state(id, JobState::Cancelled, None))
+            })
+        } else {
+            journal.discard_unfinished()
+        };
+        if result.is_err() {
+            self.inner.writer.count_error();
+        }
+        self.inner.bump();
     }
 }
 
@@ -562,7 +749,7 @@ async fn dispatch_loop(inner: Arc<Inner>) {
             if st.shut_down {
                 return;
             }
-            st.dispatch()
+            st.dispatch(&inner.writer)
         };
         if units.is_empty() {
             continue;
@@ -600,6 +787,7 @@ impl Entry {
             stop: None,
             sent: false,
             checksum: None,
+            strikes: 0,
         }
     }
 
@@ -633,6 +821,8 @@ impl State {
             done: VecDeque::new(),
             last_batch: None,
             rates: RateWindow::default(),
+            disk_full: None,
+            files: Arc::new(DiskFiles),
         }
     }
 
@@ -657,6 +847,8 @@ impl State {
         }
         self.run = run;
         self.rates.restart(now);
+        // Nothing waits for the full disk any more.
+        self.disk_full = None;
     }
 
     /// The lane for `site`, made on first use; its name, host and client follow the newest
@@ -683,10 +875,11 @@ impl State {
         index
     }
 
-    /// Takes every unit that may start now off the lanes' queues.
-    fn dispatch(&mut self) -> Vec<UnitSpec> {
+    /// Takes every unit that may start now off the lanes' queues. A delete about to be sent
+    /// for the first time is marked possibly sent, in memory and in the journal.
+    fn dispatch(&mut self, writer: &JournalWriter) -> Vec<UnitSpec> {
         let mut units = Vec::new();
-        if self.paused || self.shut_down {
+        if self.paused || self.shut_down || self.disk_full.is_some() {
             return units;
         }
         let policy = self.settings.retry_policy();
@@ -701,8 +894,9 @@ impl State {
                         entry.status = Status::Active(unit);
                         entry.stop = None;
                         let sent = entry.sent;
-                        if matches!(entry.job, Job::Delete { .. }) {
+                        if matches!(entry.job, Job::Delete { .. }) && !sent {
                             entry.sent = true;
+                            writer.set_multipart(id, Some(delete_sent()));
                         }
                         items.push((id, entry.job.clone(), sent, entry.checksum.clone()));
                     }
@@ -740,10 +934,41 @@ impl State {
                     verify,
                     work,
                     stop,
+                    files: self.files.clone(),
                 });
             }
         }
         units
+    }
+
+    /// A download found `drive` full: every lane stops (the work in flight goes back to the
+    /// queue) until the user resumes, and the snapshot says how much the downloads still
+    /// waiting need on that drive.
+    fn hold_disk_full(&mut self, drive: String) {
+        let queued = self
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.queue.iter())
+            .filter_map(|&id| self.jobs.get(id))
+            .filter(|entry| entry.status == Status::Queued);
+        // A unit's list keeps the jobs it already gave back, so only those still active count.
+        let active = self
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.units.values())
+            .flat_map(|unit| unit.jobs.iter())
+            .filter_map(|&id| self.jobs.get(id))
+            .filter(|entry| matches!(entry.status, Status::Active(_)));
+        let needed = queued
+            .chain(active)
+            .filter(|entry| match &entry.job {
+                Job::Download { local, .. } => drive_of(local) == drive,
+                _ => false,
+            })
+            .map(|entry| entry.size)
+            .sum();
+        self.disk_full = Some((drive, needed));
+        self.interrupt_all(Stop::Requeue);
     }
 
     fn interrupt_all(&mut self, reason: Stop) {
@@ -932,12 +1157,29 @@ impl State {
     }
 
     fn engine_state(&self) -> EngineState {
+        if let Some((drive, needed)) = &self.disk_full
+            && self.has_work()
+        {
+            return EngineState::DiskFull {
+                drive: drive.clone(),
+                needed: *needed,
+            };
+        }
         if let Some(lane) = self
             .lanes
             .iter()
             .find(|lane| lane.state == LaneState::AuthStopped && lane.has_work())
         {
             return EngineState::AuthStopped {
+                site: lane.name.clone(),
+            };
+        }
+        if let Some(lane) = self
+            .lanes
+            .iter()
+            .find(|lane| lane.state == LaneState::Offline && lane.has_work())
+        {
+            return EngineState::Offline {
                 site: lane.name.clone(),
             };
         }
@@ -1021,7 +1263,18 @@ impl State {
             done: self.done.iter().copied().filter_map(view).collect(),
             done_count: run.files_done,
             last_batch: self.last_batch.clone(),
+            // Filled in by `Engine::snapshot`, from the journal writer.
+            journal_errors: 0,
         }
+    }
+}
+
+/// The journal's mark on a delete that may have been sent (see the module's notes).
+fn delete_sent() -> MultipartProgress {
+    MultipartProgress {
+        upload_id: DELETE_SENT.to_owned(),
+        part_size: 0,
+        parts: Vec::new(),
     }
 }
 
@@ -1142,19 +1395,15 @@ impl Inner {
 
     /// A job of `unit` ended: done, or failed with `result`'s error. A failure of a job being
     /// cancelled cancels it, whatever the error; otherwise an auth failure stops the job's site
-    /// and puts the job back in the queue.
-    pub(crate) fn finish(&self, unit: UnitId, id: JobId, result: Result<(), ProviderError>) {
+    /// and puts the job back in the queue, an unreachable site puts it back in the queue as it
+    /// was, and a full disk puts it back and stops every lane.
+    pub(crate) fn finish(&self, unit: UnitId, id: JobId, result: Result<(), Failure>) {
         self.end(unit, id, result, true);
     }
 
     /// As [`finish`](Self::finish), for one path of a `delete_batch` request: the request's
     /// success is counted once, by [`batch_succeeded`](Self::batch_succeeded).
-    pub(crate) fn finish_in_batch(
-        &self,
-        unit: UnitId,
-        id: JobId,
-        result: Result<(), ProviderError>,
-    ) {
+    pub(crate) fn finish_in_batch(&self, unit: UnitId, id: JobId, result: Result<(), Failure>) {
         self.end(unit, id, result, false);
     }
 
@@ -1165,7 +1414,7 @@ impl Inner {
         self.poke();
     }
 
-    fn end(&self, unit: UnitId, id: JobId, result: Result<(), ProviderError>, own_request: bool) {
+    fn end(&self, unit: UnitId, id: JobId, result: Result<(), Failure>, own_request: bool) {
         let now = Instant::now();
         {
             let mut guard = self.lock();
@@ -1177,17 +1426,118 @@ impl Inner {
                 return;
             }
             let (lane, stop) = (entry.lane, entry.stop);
+            let drive = match &entry.job {
+                Job::Download { local, .. } => drive_of(local),
+                _ => String::new(),
+            };
             match result {
                 Ok(()) => st.mark_done(id, &self.writer, now, own_request),
                 // A pending cancel wins over whatever the request answered, an auth failure
                 // included (ruling Q37).
                 Err(_) if stop == Some(Stop::Cancel) => st.mark_cancelled(id, &self.writer),
-                Err(ProviderError::Auth { .. }) => {
+                Err(Failure::Provider(ProviderError::Auth { .. })) => {
                     st.requeue_front(lane, vec![id]);
                     st.auth_stop(lane);
                 }
-                Err(error) => st.mark_failed(id, (self.describe)(&error), &self.writer),
+                Err(Failure::Offline) => st.requeue_front(lane, vec![id]),
+                Err(Failure::DiskFull) => {
+                    st.requeue_front(lane, vec![id]);
+                    st.hold_disk_full(drive);
+                }
+                Err(Failure::Provider(error)) => {
+                    st.mark_failed(id, (self.describe)(&error), &self.writer);
+                }
+                Err(Failure::Reason(reason)) => st.mark_failed(id, reason, &self.writer),
             }
+        }
+        self.poke();
+    }
+
+    /// The lane is offline: nothing should be sent on it now.
+    pub(crate) fn lane_offline(&self, lane: usize) -> bool {
+        self.lock().lanes[lane].state == LaneState::Offline
+    }
+
+    /// A request on `lane` got no answer. Returns whether the lane is offline now: it already
+    /// was, or this error makes too many too close together.
+    pub(crate) fn network_error(self: &Arc<Self>, lane: usize) -> bool {
+        let now = Instant::now();
+        {
+            let mut st = self.lock();
+            let lane_ref = &mut st.lanes[lane];
+            match lane_ref.state {
+                LaneState::Offline => return true,
+                LaneState::AuthStopped => return false,
+                LaneState::Running => {}
+            }
+            if !lane_ref.network.record(now) {
+                return false;
+            }
+        }
+        self.go_offline(lane);
+        true
+    }
+
+    /// Job `id` of `unit` used up its retries on network errors. Its lane goes offline and the
+    /// job goes back to the queue, unless it has done this [`MAX_STRIKES`] times: then it fails
+    /// (returns true).
+    pub(crate) fn network_exhausted(
+        self: &Arc<Self>,
+        lane: usize,
+        unit: UnitId,
+        id: JobId,
+    ) -> bool {
+        {
+            let mut st = self.lock();
+            if let Some(entry) = st.jobs.get_mut(id)
+                && entry.status == Status::Active(unit)
+            {
+                entry.strikes = entry.strikes.saturating_add(1);
+                if entry.strikes >= MAX_STRIKES {
+                    return true;
+                }
+            }
+        }
+        self.go_offline(lane);
+        false
+    }
+
+    /// Takes a running lane offline and starts probing its site.
+    fn go_offline(self: &Arc<Self>, lane: usize) {
+        {
+            let mut st = self.lock();
+            if st.shut_down {
+                return;
+            }
+            let lane_ref = &mut st.lanes[lane];
+            if lane_ref.state != LaneState::Running {
+                return;
+            }
+            lane_ref.state = LaneState::Offline;
+            lane_ref.network.clear();
+        }
+        self.rt.spawn(offline::probe(self.clone(), lane));
+        self.bump();
+    }
+
+    /// The client to probe an offline lane's site with; `None` once the lane isn't offline or
+    /// the engine has stopped.
+    pub(crate) fn offline_provider(&self, lane: usize) -> Option<Arc<dyn StorageProvider>> {
+        let st = self.lock();
+        let lane = &st.lanes[lane];
+        (!st.shut_down && lane.state == LaneState::Offline).then(|| lane.provider.clone())
+    }
+
+    /// An offline lane's site answered: back to work.
+    pub(crate) fn back_online(&self, lane: usize) {
+        {
+            let mut st = self.lock();
+            let lane = &mut st.lanes[lane];
+            if lane.state != LaneState::Offline {
+                return;
+            }
+            lane.state = LaneState::Running;
+            lane.network.clear();
         }
         self.poke();
     }
@@ -1212,9 +1562,8 @@ impl Inner {
                     continue;
                 }
                 if panicked {
-                    let error =
-                        ProviderError::Permanent("the transfer stopped unexpectedly".into());
-                    st.mark_failed(id, (self.describe)(&error), &self.writer);
+                    let reason = messages::STOPPED_UNEXPECTEDLY.to_owned();
+                    st.mark_failed(id, reason, &self.writer);
                 } else if entry.stop == Some(Stop::Cancel) {
                     st.mark_cancelled(id, &self.writer);
                 } else {
@@ -1228,38 +1577,77 @@ impl Inner {
 }
 
 /// One journal update.
-struct Write {
-    id: i64,
-    state: JobState,
-    error: Option<String>,
+enum Write {
+    State {
+        id: i64,
+        state: JobState,
+        error: Option<String>,
+    },
+    Multipart {
+        id: i64,
+        progress: Option<MultipartProgress>,
+    },
+}
+
+impl Write {
+    fn apply(&self, journal: &dyn Journal) -> Result<(), JournalError> {
+        match self {
+            Self::State { id, state, error } => journal.set_state(*id, *state, error.as_deref()),
+            Self::Multipart { id, progress } => journal.set_multipart(*id, progress.as_ref()),
+        }
+    }
 }
 
 /// Writes job states to the journal from one task, in the order they were made, off the
-/// runtime's worker threads.
+/// runtime's worker threads, and counts the writes that fail.
 struct JournalWriter {
     tx: mpsc::UnboundedSender<Write>,
     pending: Arc<AtomicUsize>,
+    errors: Arc<AtomicU64>,
 }
 
 impl JournalWriter {
     fn spawn(rt: &Handle, journal: Arc<dyn Journal>, changes: Arc<watch::Sender<u64>>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let pending = Arc::new(AtomicUsize::new(0));
-        rt.spawn(write_journal(rx, journal, pending.clone(), changes));
-        Self { tx, pending }
+        let errors = Arc::new(AtomicU64::new(0));
+        rt.spawn(write_journal(
+            rx,
+            journal,
+            pending.clone(),
+            errors.clone(),
+            changes,
+        ));
+        Self {
+            tx,
+            pending,
+            errors,
+        }
     }
 
     /// Queues an update. Called with the state locked, so updates queue in the order the
     /// changes were made.
     fn set_state(&self, id: JobId, state: JobState, error: Option<&str>) {
-        self.pending.fetch_add(1, Ordering::SeqCst);
-        let write = Write {
+        self.send(Write::State {
             id: record_id(id),
             state,
             error: error.map(str::to_owned),
-        };
+        });
+    }
+
+    /// Queues a change to a job's multipart column (see the module's notes on deletes).
+    fn set_multipart(&self, id: JobId, progress: Option<MultipartProgress>) {
+        self.send(Write::Multipart {
+            id: record_id(id),
+            progress,
+        });
+    }
+
+    fn send(&self, write: Write) {
+        self.pending.fetch_add(1, Ordering::SeqCst);
         if self.tx.send(write).is_err() {
             self.pending.fetch_sub(1, Ordering::SeqCst);
+            self.count_error();
         }
     }
 
@@ -1267,12 +1655,26 @@ impl JournalWriter {
     fn pending(&self) -> usize {
         self.pending.load(Ordering::SeqCst)
     }
+
+    /// A journal read or write failed.
+    fn count_error(&self) {
+        self.errors.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The journal reads and writes that failed since the engine started.
+    fn errors(&self) -> u64 {
+        self.errors.load(Ordering::SeqCst)
+    }
 }
 
+/// A write that fails leaves the job's older record: after a crash a finished job may be
+/// offered again, or a failed one forgotten. The job's state in memory is unaffected; the
+/// failure is counted, and the snapshot's `journal_errors` lets the app warn.
 async fn write_journal(
     mut rx: mpsc::UnboundedReceiver<Write>,
     journal: Arc<dyn Journal>,
     pending: Arc<AtomicUsize>,
+    errors: Arc<AtomicU64>,
     changes: Arc<watch::Sender<u64>>,
 ) {
     while let Some(first) = rx.recv().await {
@@ -1285,14 +1687,17 @@ async fn write_journal(
         }
         let n = writes.len();
         let journal = journal.clone();
-        // A write that fails leaves the job's older record: at worst a finished job is offered
-        // again after a crash. The job's state in memory is unaffected.
-        let _ = tokio::task::spawn_blocking(move || {
-            for write in writes {
-                let _ = journal.set_state(write.id, write.state, write.error.as_deref());
-            }
+        let failed = tokio::task::spawn_blocking(move || {
+            writes
+                .iter()
+                .filter(|write| write.apply(&*journal).is_err())
+                .count()
         })
-        .await;
+        .await
+        .unwrap_or(n);
+        if failed > 0 {
+            errors.fetch_add(failed as u64, Ordering::SeqCst);
+        }
         pending.fetch_sub(n, Ordering::SeqCst);
         changes.send_modify(|n| *n = n.wrapping_add(1));
     }

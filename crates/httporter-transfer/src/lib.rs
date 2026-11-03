@@ -8,14 +8,18 @@ mod engine;
 mod hash;
 mod lane;
 mod limiter;
+mod local;
+pub mod messages;
 mod names;
+mod offline;
 mod plan;
 mod rate;
 
 pub use bucket::TokenBucket;
-pub use engine::{Batch, Engine, WINDOW};
+pub use engine::{Batch, Engine, SiteInfo, SiteLookup, WINDOW};
 pub use hash::{FileHashes, hash_file};
 pub use limiter::AdaptiveLimiter;
+pub use local::{DiskFiles, LocalFiles};
 pub use names::{keep_both_name, safe_local_name};
 pub use plan::{
     DeletePlan, DownloadPlan, UploadPlan, plan_delete, plan_download, plan_upload,

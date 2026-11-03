@@ -7,24 +7,26 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::io::Write as _;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use httporter_core::{
     BodyMeter, Checksum, ChecksumKind, Job, JobId, ProviderError, RemotePath, RetryPolicy,
-    StorageProvider, TransferSettings, UploadOptions, UploadSource, content_type_for, with_retry,
+    StorageProvider, TransferSettings, UploadOptions, UploadSource, content_type_for,
 };
 use md5::Md5;
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::engine::{Inner, Slab};
-use crate::hash::{extended, hash_file};
 use crate::limiter::AdaptiveLimiter;
+use crate::local::{LocalError, LocalFiles, blocking};
+use crate::messages;
+use crate::offline::{NetworkErrors, is_disk_full};
 
 /// What a download is written to until it is complete: `<target>.httporter-part`.
 pub(crate) const PART_SUFFIX: &str = ".httporter-part";
@@ -61,12 +63,15 @@ pub(crate) fn remote_of(job: &Job) -> &RemotePath {
     }
 }
 
-/// Whether a lane is taking work. Task 14 adds `Offline`.
+/// Whether a lane is taking work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LaneState {
     Running,
     /// The site refused its credentials: nothing starts until `resume_site`.
     AuthStopped,
+    /// The site can't be reached: nothing starts until a probe gets an answer (see
+    /// [`crate::offline`]).
+    Offline,
 }
 
 /// The slots of one kind: the adaptive limit and how many are in use.
@@ -113,6 +118,8 @@ pub(crate) struct Lane {
     pub(crate) deletes: Slots,
     pub(crate) state: LaneState,
     pub(crate) paths: ActivePaths,
+    /// The latest network errors, which take the lane offline when they come too close.
+    pub(crate) network: NetworkErrors,
 }
 
 impl Lane {
@@ -133,6 +140,7 @@ impl Lane {
             deletes: Slots::new(1),
             state: LaneState::Running,
             paths: ActivePaths::default(),
+            network: NetworkErrors::default(),
         };
         lane.configure(settings);
         lane
@@ -362,6 +370,42 @@ pub(crate) struct UnitSpec {
     pub(crate) verify: bool,
     pub(crate) work: Work,
     pub(crate) stop: Arc<Notify>,
+    /// The local file operations: the disk, or a test's stand-in.
+    pub(crate) files: Arc<dyn LocalFiles>,
+}
+
+/// How a job's work ended, short of success.
+#[derive(Debug)]
+pub(crate) enum Failure {
+    /// The site's error: an auth failure stops the site, anything else fails the job with the
+    /// app's words for it.
+    Provider(ProviderError),
+    /// The job fails with this reason, as it is: the engine's own words (see
+    /// [`crate::messages`]) or the system's message about a local file.
+    Reason(String),
+    /// The disk a download is written to is full: every lane stops and the job waits in the
+    /// queue.
+    DiskFull,
+    /// The site can't be reached: the job goes back to the queue as it was.
+    Offline,
+}
+
+impl From<ProviderError> for Failure {
+    fn from(error: ProviderError) -> Self {
+        Self::Provider(error)
+    }
+}
+
+impl LocalError {
+    /// What a local error means for the job: a full disk under a download stops everything;
+    /// anything else fails the job with the system's message.
+    fn failure(self, path: &Path, download: bool, stopped: &str) -> Failure {
+        match self {
+            Self::Io(error) if download && is_disk_full(&error) => Failure::DiskFull,
+            Self::Io(error) => Failure::Reason(messages::local_file(path, &error)),
+            Self::Stopped => Failure::Reason(stopped.to_owned()),
+        }
+    }
 }
 
 /// Tells the engine a unit has ended however it ends: finished, interrupted, panicked, or
@@ -380,7 +424,8 @@ impl Drop for Ended {
 }
 
 /// Runs one unit until it finishes or its stop is notified. Every job outcome is reported to
-/// the engine as it happens; what is left when the unit ends goes back to the engine.
+/// the engine as it happens; what is left when the unit ends goes back to the engine, once
+/// a download's leftover part file is gone (so a job sent again never meets it).
 pub(crate) fn run_unit(inner: Arc<Inner>, spec: UnitSpec) -> impl Future<Output = ()> + Send {
     let ended = Ended {
         inner: inner.clone(),
@@ -389,16 +434,21 @@ pub(crate) fn run_unit(inner: Arc<Inner>, spec: UnitSpec) -> impl Future<Output 
     };
     async move {
         let _ended = ended;
+        let part = matches!(spec.work, Work::Download { .. })
+            .then(|| PartOwner(PartSlot::new(spec.files.clone())));
         let stop = spec.stop.clone();
         tokio::select! {
             biased;
             () = stop.notified() => {}
-            () = run(&inner, &spec) => {}
+            () = run(&inner, &spec, part.as_ref().map(|owner| &owner.0)) => {}
+        }
+        if let Some(part) = &part {
+            part.0.clean_up().await;
         }
     }
 }
 
-async fn run(inner: &Arc<Inner>, spec: &UnitSpec) {
+async fn run(inner: &Arc<Inner>, spec: &UnitSpec, part: Option<&PartSlot>) {
     match &spec.work {
         Work::Upload { id, local, remote } => {
             let result = upload(inner, spec, *id, local, remote).await;
@@ -410,7 +460,12 @@ async fn run(inner: &Arc<Inner>, spec: &UnitSpec) {
             local,
             checksum,
         } => {
-            let result = download(inner, spec, *id, remote, local, checksum.as_ref()).await;
+            let result = match part {
+                Some(part) => {
+                    download(inner, spec, *id, remote, local, checksum.as_ref(), part).await
+                }
+                None => Err(Failure::Reason(messages::FILE_WORK_STOPPED.to_owned())),
+            };
             inner.finish(spec.unit, *id, result);
         }
         Work::Delete {
@@ -419,42 +474,77 @@ async fn run(inner: &Arc<Inner>, spec: &UnitSpec) {
             folder,
             sent,
         } => {
-            let result = delete(inner, spec, remote, *folder, *sent).await;
+            let result = delete(inner, spec, *id, remote, *folder, *sent).await;
             inner.finish(spec.unit, *id, result);
         }
         Work::DeleteFiles { items } => delete_files(inner, spec, items).await,
         Work::CreateFolder { id, remote } => {
-            let result = attempts(inner, spec, |_| spec.provider.create_folder(remote)).await;
+            let result = attempts(inner, spec, *id, |_| async {
+                spec.provider
+                    .create_folder(remote)
+                    .await
+                    .map_err(Failure::from)
+            })
+            .await;
             inner.finish(spec.unit, *id, result);
         }
     }
 }
 
-/// Runs `op` under the retry policy, telling the lane about every slow-down.
-async fn attempts<T, F, Fut>(inner: &Inner, spec: &UnitSpec, mut op: F) -> Result<T, ProviderError>
+/// Runs `op` under the retry policy, as `with_retry` does, telling the lane about every
+/// slow-down and every network error.
+///
+/// A network error that takes the lane offline, or one met while it is offline, ends the
+/// attempts with [`Failure::Offline`]: the job waits in the queue for the site, and the
+/// attempts it used don't count. So does using up the retries on network errors, which takes
+/// the lane offline (unless the job has done so [`crate::offline::MAX_STRIKES`] times).
+async fn attempts<T, F, Fut>(
+    inner: &Arc<Inner>,
+    spec: &UnitSpec,
+    id: JobId,
+    mut op: F,
+) -> Result<T, Failure>
 where
     F: FnMut(u32) -> Fut,
-    Fut: Future<Output = Result<T, ProviderError>>,
+    Fut: Future<Output = Result<T, Failure>>,
 {
-    with_retry(&spec.policy, |attempt| {
-        let seen = inner.generation(spec.lane, spec.kind);
-        let request = op(attempt);
-        async move {
-            let result = request.await;
-            if let Err(error) = &result
-                && error.is_slow_down()
-            {
-                inner.slow_down(spec.lane, spec.kind, seen);
-            }
-            result
+    let policy = &spec.policy;
+    let mut attempt: u32 = 0;
+    loop {
+        if inner.lane_offline(spec.lane) {
+            return Err(Failure::Offline);
         }
-    })
-    .await
-}
-
-/// A local file that can't be read or written: not worth retrying.
-fn local_error(path: &Path, error: &std::io::Error) -> ProviderError {
-    ProviderError::Permanent(format!("{}: {error}", path.display()))
+        let seen = inner.generation(spec.lane, spec.kind);
+        let error = match op(attempt).await {
+            Ok(value) => return Ok(value),
+            Err(Failure::Provider(error)) => error,
+            Err(other) => return Err(other),
+        };
+        if error.is_slow_down() {
+            inner.slow_down(spec.lane, spec.kind, seen);
+        }
+        let network = matches!(error, ProviderError::Network(_));
+        if network && inner.network_error(spec.lane) {
+            return Err(Failure::Offline);
+        }
+        if !worth_retrying(&error, policy) {
+            return Err(error.into());
+        }
+        let Some(&delay) = policy.delays.get(attempt as usize) else {
+            if network && !inner.network_exhausted(spec.lane, spec.unit, id) {
+                return Err(Failure::Offline);
+            }
+            return Err(error.into());
+        };
+        let wait = match &error {
+            ProviderError::RateLimited {
+                retry_after: Some(after),
+            } => delay.max(*after),
+            _ => delay,
+        };
+        tokio::time::sleep(wait).await;
+        attempt += 1;
+    }
 }
 
 /// Counts an upload's bytes as they go and holds them to the bandwidth limit.
@@ -472,45 +562,118 @@ impl BodyMeter for JobMeter {
     }
 }
 
+/// What an upload sends: the file's length when it was last looked at, when it last changed,
+/// and its digests when checksums are verified.
+#[derive(Debug, Clone)]
+struct Prepared {
+    len: u64,
+    modified: Option<SystemTime>,
+    sha256: Option<[u8; 32]>,
+    md5: Option<[u8; 16]>,
+}
+
+/// Looks the file up again before an attempt and hashes it again when it changed since it was
+/// hashed (its size or modification time differs), or when it never was.
+async fn prepare(
+    files: &Arc<dyn LocalFiles>,
+    local: &Path,
+    verify: bool,
+    current: Option<Prepared>,
+) -> Result<Prepared, Failure> {
+    let (len, modified) = {
+        let (files, path) = (files.clone(), local.to_owned());
+        blocking(move || files.stat(&path))
+            .await
+            .map_err(|e| e.failure(local, false, messages::FILE_WORK_STOPPED))?
+    };
+    if let Some(current) = current
+        && current.len == len
+        && current.modified == modified
+        && (!verify || current.sha256.is_some())
+    {
+        return Ok(current);
+    }
+    if !verify {
+        return Ok(Prepared {
+            len,
+            modified,
+            sha256: None,
+            md5: None,
+        });
+    }
+    let (files, path) = (files.clone(), local.to_owned());
+    let hashes = blocking(move || files.hash(&path))
+        .await
+        .map_err(|e| e.failure(local, false, messages::HASHING_STOPPED))?;
+    Ok(Prepared {
+        len: hashes.size,
+        modified: Some(hashes.modified),
+        sha256: Some(hashes.sha256),
+        md5: Some(hashes.md5),
+    })
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // Nothing under these locks can stop part-way, so a poisoned one still holds whole values.
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Sends a local file. Before each attempt the file is looked at again and re-hashed if it
+/// changed. A checksum mismatch re-hashes it and sends it once more; a second one fails the job
+/// as damaged twice.
 async fn upload(
     inner: &Arc<Inner>,
     spec: &UnitSpec,
     id: JobId,
     local: &Path,
     remote: &RemotePath,
-) -> Result<(), ProviderError> {
-    let (len, sha256, md5) = if spec.verify {
-        let path = local.to_owned();
-        let hashes = tokio::task::spawn_blocking(move || hash_file(&path))
-            .await
-            .map_err(|e| ProviderError::Permanent(format!("hashing stopped: {e}")))?
-            .map_err(|e| local_error(local, &e))?;
-        (hashes.size, Some(hashes.sha256), Some(hashes.md5))
-    } else {
-        let meta = std::fs::metadata(extended(local)).map_err(|e| local_error(local, &e))?;
-        (meta.len(), None, None)
-    };
-    inner.set_size(spec.unit, id, len);
+) -> Result<(), Failure> {
     let meter: Arc<dyn BodyMeter> = Arc::new(JobMeter {
         inner: inner.clone(),
         unit: spec.unit,
         id,
     });
-    let opts = UploadOptions {
-        sha256,
-        md5,
-        meter: Some(meter),
-        ..UploadOptions::new(content_type_for(remote.name().unwrap_or_default()))
-    };
-    attempts(inner, spec, |_| {
-        inner.restart_progress(spec.unit, id);
-        let source = UploadSource::File {
-            path: local.to_owned(),
-            len,
-        };
-        spec.provider.upload(remote, source, &opts)
-    })
-    .await
+    let content_type = content_type_for(remote.name().unwrap_or_default());
+    let prepared: Mutex<Option<Prepared>> = Mutex::new(None);
+    let mut mismatches = 0;
+    loop {
+        let result = attempts(inner, spec, id, |_| {
+            let (prepared, meter, content_type) = (&prepared, &meter, &content_type);
+            async move {
+                let current = lock(prepared).clone();
+                let fresh = prepare(&spec.files, local, spec.verify, current).await?;
+                *lock(prepared) = Some(fresh.clone());
+                inner.set_size(spec.unit, id, fresh.len);
+                inner.restart_progress(spec.unit, id);
+                let opts = UploadOptions {
+                    sha256: fresh.sha256,
+                    md5: fresh.md5,
+                    meter: Some(meter.clone()),
+                    ..UploadOptions::new(content_type.clone())
+                };
+                let source = UploadSource::File {
+                    path: local.to_owned(),
+                    len: fresh.len,
+                };
+                spec.provider
+                    .upload(remote, source, &opts)
+                    .await
+                    .map_err(Failure::from)
+            }
+        })
+        .await;
+        match result {
+            Err(Failure::Provider(ProviderError::ChecksumMismatch)) if mismatches == 0 => {
+                mismatches += 1;
+                // Hash it again whatever its size and time say.
+                *lock(&prepared) = None;
+            }
+            Err(Failure::Provider(ProviderError::ChecksumMismatch)) => {
+                return Err(Failure::Reason(messages::DAMAGED_TWICE.to_owned()));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// `<target>.httporter-part`, beside the target.
@@ -520,16 +683,112 @@ pub(crate) fn part_path(local: &Path) -> PathBuf {
     local.with_file_name(name)
 }
 
-/// Removes a part file when dropped, unless it was renamed into place.
-struct PartFile {
-    path: PathBuf,
-    renamed: bool,
+/// How much of a download is gathered before it is written, in one blocking call.
+const WRITE_BATCH: usize = 256 * 1024;
+
+/// The part file a download unit writes, shared with the blocking tasks that write it.
+///
+/// Every file operation runs on a blocking thread and takes the lock there, so they happen one
+/// after another: the clean-up at the end of the unit waits for a write still under way, closes
+/// the file, then removes it.
+#[derive(Clone)]
+pub(crate) struct PartSlot {
+    files: Arc<dyn LocalFiles>,
+    state: Arc<Mutex<PartState>>,
 }
 
-impl Drop for PartFile {
+#[derive(Default)]
+struct PartState {
+    /// The part file, while there is one to remove.
+    path: Option<PathBuf>,
+    writer: Option<Box<dyn Write + Send>>,
+}
+
+impl PartSlot {
+    fn new(files: Arc<dyn LocalFiles>) -> Self {
+        Self {
+            files,
+            state: Arc::new(Mutex::new(PartState::default())),
+        }
+    }
+
+    /// Runs `f` with the part file's state on a blocking thread.
+    async fn with<T, F>(&self, f: F) -> Result<T, LocalError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn LocalFiles, &mut PartState) -> std::io::Result<T> + Send + 'static,
+    {
+        let (files, state) = (self.files.clone(), self.state.clone());
+        blocking(move || f(&*files, &mut lock(&state))).await
+    }
+
+    /// Creates (or empties) the part file at `path`.
+    async fn create(&self, path: &Path) -> Result<(), LocalError> {
+        let path = path.to_owned();
+        self.with(move |files, state| {
+            state.writer = None;
+            state.path = Some(path.clone());
+            state.writer = Some(files.create(&path)?);
+            Ok(())
+        })
+        .await
+    }
+
+    async fn write(&self, data: Vec<u8>) -> Result<(), LocalError> {
+        self.with(move |_, state| match state.writer.as_mut() {
+            Some(writer) => writer.write_all(&data),
+            None => Err(std::io::Error::other("the part file is closed")),
+        })
+        .await
+    }
+
+    /// Flushes and closes the part file.
+    async fn close(&self) -> Result<(), LocalError> {
+        self.with(|_, state| match state.writer.take() {
+            Some(mut writer) => writer.flush(),
+            None => Ok(()),
+        })
+        .await
+    }
+
+    /// Moves the closed part file onto `target`; it is then no longer the unit's to remove.
+    async fn rename_to(&self, target: &Path) -> Result<(), LocalError> {
+        let target = target.to_owned();
+        self.with(move |files, state| {
+            state.writer = None;
+            if let Some(path) = &state.path {
+                files.rename(path, &target)?;
+            }
+            state.path = None;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Closes and removes whatever part file is left.
+    async fn clean_up(&self) {
+        let _ = self
+            .with(|files, state| {
+                state.writer = None;
+                if let Some(path) = state.path.take() {
+                    let _ = files.remove(&path);
+                }
+                Ok(())
+            })
+            .await;
+    }
+}
+
+/// The unit's own hold on its part slot. The unit cleans up before it ends; only when the
+/// runtime drops it unfinished (as it shuts down) is the leftover removed here, at once.
+struct PartOwner(PartSlot);
+
+impl Drop for PartOwner {
     fn drop(&mut self) {
-        if !self.renamed {
-            let _ = std::fs::remove_file(extended(&self.path));
+        let mut state = lock(&self.0.state);
+        state.writer = None;
+        if let Some(path) = state.path.take() {
+            let _ = self.0.files.remove(&path);
         }
     }
 }
@@ -539,8 +798,8 @@ impl Drop for PartFile {
 ///
 /// `expected` is the listed digest of the remote file, from the job's batch (ruling Q27); it
 /// is checked when checksums are verified and it is a SHA-256 or an MD5. Contents that don't
-/// match are fetched once more, then the job fails with `ChecksumMismatch`. A download resumed
-/// from the journal has no digest and completes unchecked.
+/// match are fetched once more, then the job fails as damaged twice. A download resumed from
+/// the journal has no digest and completes unchecked. A full disk stops every lane.
 async fn download(
     inner: &Arc<Inner>,
     spec: &UnitSpec,
@@ -548,32 +807,38 @@ async fn download(
     remote: &RemotePath,
     local: &Path,
     expected: Option<&Checksum>,
-) -> Result<(), ProviderError> {
+    part: &PartSlot,
+) -> Result<(), Failure> {
     if let Some(parent) = local.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(extended(parent)).map_err(|e| local_error(parent, &e))?;
+        let (files, dir) = (spec.files.clone(), parent.to_owned());
+        blocking(move || files.create_dir_all(&dir))
+            .await
+            .map_err(|e| e.failure(parent, true, messages::FILE_WORK_STOPPED))?;
     }
-    let mut part = PartFile {
-        path: part_path(local),
-        renamed: false,
-    };
+    let part_path = part_path(local);
     let expected = expected.filter(|checksum| {
         spec.verify && matches!(checksum.kind, ChecksumKind::Sha256 | ChecksumKind::Md5)
     });
     let mut mismatches = 0;
     loop {
-        let fetched = attempts(inner, spec, |_| {
-            fetch(inner, spec, id, remote, &part.path, expected)
+        let fetched = attempts(inner, spec, id, |_| {
+            fetch(inner, spec, id, remote, &part_path, expected, part)
         })
         .await;
         match fetched {
             Ok(()) => break,
-            Err(ProviderError::ChecksumMismatch) if mismatches == 0 => mismatches += 1,
+            Err(Failure::Provider(ProviderError::ChecksumMismatch)) if mismatches == 0 => {
+                mismatches += 1;
+            }
+            Err(Failure::Provider(ProviderError::ChecksumMismatch)) => {
+                return Err(Failure::Reason(messages::DAMAGED_TWICE.to_owned()));
+            }
             Err(error) => return Err(error),
         }
     }
-    std::fs::rename(extended(&part.path), extended(local)).map_err(|e| local_error(local, &e))?;
-    part.renamed = true;
-    Ok(())
+    part.rename_to(local)
+        .await
+        .map_err(|e| e.failure(local, true, messages::FILE_WORK_STOPPED))
 }
 
 /// A digest being computed over a download, of the kind its expected checksum is.
@@ -608,39 +873,51 @@ impl Hasher {
 }
 
 /// One attempt at a download: the whole body into a fresh part file, checked against
-/// `expected` when given.
+/// `expected` when given. The file is written on blocking threads, [`WRITE_BATCH`] at a time.
 async fn fetch(
     inner: &Inner,
     spec: &UnitSpec,
     id: JobId,
     remote: &RemotePath,
-    part: &Path,
+    part_path: &Path,
     expected: Option<&Checksum>,
-) -> Result<(), ProviderError> {
+    part: &PartSlot,
+) -> Result<(), Failure> {
+    let local = |e: LocalError| e.failure(part_path, true, messages::FILE_WORK_STOPPED);
     inner.restart_progress(spec.unit, id);
     let mut body = spec.provider.download(remote).await?;
-    let mut file = std::fs::File::create(extended(part)).map_err(|e| local_error(part, &e))?;
+    part.create(part_path).await.map_err(local)?;
     let mut digest = expected.and_then(Hasher::for_checksum);
+    let mut pending: Vec<u8> = Vec::new();
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
         inner.bucket.take(chunk.len()).await;
-        file.write_all(&chunk).map_err(|e| local_error(part, &e))?;
         if let Some(digest) = digest.as_mut() {
             digest.update(&chunk);
         }
+        pending.extend_from_slice(&chunk);
+        if pending.len() >= WRITE_BATCH {
+            part.write(std::mem::take(&mut pending))
+                .await
+                .map_err(local)?;
+        }
         inner.progress(spec.unit, id, chunk.len() as u64);
     }
-    drop(file);
+    if !pending.is_empty() {
+        part.write(pending).await.map_err(local)?;
+    }
+    part.close().await.map_err(local)?;
     if let (Some(digest), Some(expected)) = (digest, expected)
         && !digest.finish().eq_ignore_ascii_case(&expected.hex)
     {
-        return Err(ProviderError::ChecksumMismatch);
+        return Err(ProviderError::ChecksumMismatch.into());
     }
     Ok(())
 }
 
 /// Deletes one file or folder. `NotFound` after a request whose answer was lost (a retry, or a
-/// request interrupted earlier) means it is gone: success (ledger 179).
+/// request that may have been sent before: interrupted, or before a crash) means it is gone:
+/// success (ledger 179).
 ///
 /// A folder goes with `delete_folder`. With `recursive_delete` that is one request for the
 /// whole subtree; without it the planner has already queued what is inside ahead of the folder
@@ -648,13 +925,14 @@ async fn fetch(
 /// marker is left for `delete_folder`. A folder that is already gone is done as well: one that
 /// only its files implied vanished with the last of them.
 async fn delete(
-    inner: &Inner,
+    inner: &Arc<Inner>,
     spec: &UnitSpec,
+    id: JobId,
     remote: &RemotePath,
     folder: bool,
     sent: bool,
-) -> Result<(), ProviderError> {
-    attempts(inner, spec, |attempt| {
+) -> Result<(), Failure> {
+    attempts(inner, spec, id, |attempt| {
         let request = if folder {
             spec.provider.delete_folder(remote)
         } else {
@@ -663,7 +941,7 @@ async fn delete(
         async move {
             match request.await {
                 Err(ProviderError::NotFound) if folder || sent || attempt > 0 => Ok(()),
-                other => other,
+                other => other.map_err(Failure::from),
             }
         }
     })
@@ -674,11 +952,18 @@ async fn delete(
 /// retryable error are sent again (alone together) after the policy's wait, the others are
 /// done or failed at once. A request that deleted something and wasn't asked to slow down is
 /// one success for the lane's limiter, however many paths it carried (ruling Q37).
-async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePath, bool)]) {
+///
+/// A request that got no answer counts as one network error for the lane. Once the lane is
+/// offline the paths still to delete are left unfinished, so they go back to the queue as they
+/// were.
+async fn delete_files(inner: &Arc<Inner>, spec: &UnitSpec, items: &[(JobId, RemotePath, bool)]) {
     let policy = &spec.policy;
     let mut pending: Vec<(JobId, RemotePath, bool)> = items.to_vec();
     let mut attempt = 0usize;
     loop {
+        if inner.lane_offline(spec.lane) {
+            return;
+        }
         let seen = inner.generation(spec.lane, spec.kind);
         let paths: Vec<RemotePath> = pending.iter().map(|(_, path, _)| path.clone()).collect();
         let mut answers = spec.provider.delete_batch(&paths).await.into_iter();
@@ -686,12 +971,13 @@ async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePat
         let mut wait = Duration::ZERO;
         let mut slowed = false;
         let mut deleted = false;
+        let mut unanswered = false;
         for (id, path, sent) in pending {
-            let answer = answers.next().unwrap_or_else(|| {
-                Err(ProviderError::Permanent(
-                    "the server did not answer for this file".into(),
-                ))
-            });
+            let Some(answer) = answers.next() else {
+                let reason = messages::NO_ANSWER_FOR_FILE.to_owned();
+                inner.finish_in_batch(spec.unit, id, Err(Failure::Reason(reason)));
+                continue;
+            };
             match answer {
                 Ok(()) => {
                     deleted = true;
@@ -703,6 +989,7 @@ async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePat
                 }
                 Err(error) if worth_retrying(&error, policy) => {
                     slowed |= error.is_slow_down();
+                    unanswered |= matches!(error, ProviderError::Network(_));
                     if let ProviderError::RateLimited {
                         retry_after: Some(after),
                     } = &error
@@ -711,7 +998,7 @@ async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePat
                     }
                     again.push((id, path, error));
                 }
-                Err(error) => inner.finish_in_batch(spec.unit, id, Err(error)),
+                Err(error) => inner.finish_in_batch(spec.unit, id, Err(error.into())),
             }
         }
         if slowed {
@@ -722,9 +1009,17 @@ async fn delete_files(inner: &Inner, spec: &UnitSpec, items: &[(JobId, RemotePat
         if again.is_empty() {
             return;
         }
+        if unanswered && inner.network_error(spec.lane) {
+            return;
+        }
         let Some(&delay) = policy.delays.get(attempt) else {
             for (id, _, error) in again {
-                inner.finish_in_batch(spec.unit, id, Err(error));
+                if matches!(error, ProviderError::Network(_))
+                    && !inner.network_exhausted(spec.lane, spec.unit, id)
+                {
+                    continue;
+                }
+                inner.finish_in_batch(spec.unit, id, Err(error.into()));
             }
             return;
         };

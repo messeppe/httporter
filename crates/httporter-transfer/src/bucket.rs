@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use httporter_core::BodyMeter;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 /// How far behind the clock the schedule may fall. A sender that wakes a little late (timers
@@ -17,10 +18,14 @@ const SLACK: Duration = Duration::from_millis(50);
 ///
 /// Each [`take`](Self::take) books its bytes into the schedule and waits until they are paid
 /// for, so the bytes let through by time `t` never exceed `rate × (t + 50 ms)`. Time spent
-/// idle earns no credit beyond those 50 ms.
+/// idle earns no credit beyond those 50 ms. A wait dropped before it ends gives its booking
+/// back, so a paused or cancelled transfer costs the others nothing; a new rate applies at
+/// once, to the waits under way too.
 #[derive(Debug)]
 pub struct TokenBucket {
     state: Mutex<Schedule>,
+    /// Wakes every wait when the rate changes, to book again at the new rate.
+    changed: Notify,
 }
 
 #[derive(Debug)]
@@ -29,6 +34,26 @@ struct Schedule {
     rate: Option<u64>,
     /// When every byte booked so far is paid for.
     paid_until: Option<Instant>,
+    /// Goes up with every rate change. A booking made before the last change is not given
+    /// back: the change already dropped it from the schedule.
+    epoch: u64,
+}
+
+/// Bytes booked into the schedule and not yet paid for. Dropped unpaid, it gives its time back.
+struct Booking<'a> {
+    bucket: &'a TokenBucket,
+    due: Instant,
+    cost: Duration,
+    epoch: u64,
+    paid: bool,
+}
+
+impl Drop for Booking<'_> {
+    fn drop(&mut self) {
+        if !self.paid {
+            self.bucket.refund(self.cost, self.epoch);
+        }
+    }
 }
 
 impl TokenBucket {
@@ -38,35 +63,75 @@ impl TokenBucket {
             state: Mutex::new(Schedule {
                 rate: bytes_per_s.filter(|&rate| rate > 0),
                 paid_until: None,
+                epoch: 0,
             }),
+            changed: Notify::new(),
         }
     }
 
-    /// Changes the limit for the bytes booked from now on.
+    /// Changes the limit at once: bytes booked and not yet paid for are dropped from the
+    /// schedule, and their waits book again at the new rate.
     pub fn set_rate(&self, bytes_per_s: Option<u64>) {
-        let mut state = self.lock();
-        state.rate = bytes_per_s.filter(|&rate| rate > 0);
-        if state.rate.is_none() {
-            state.paid_until = None;
+        {
+            let mut state = self.lock();
+            state.rate = bytes_per_s.filter(|&rate| rate > 0);
+            state.epoch += 1;
+            let now = Instant::now();
+            state.paid_until = match state.rate {
+                Some(_) => state.paid_until.map(|paid| paid.min(now)),
+                None => None,
+            };
         }
+        self.changed.notify_waiters();
     }
 
-    /// Waits until `n` more bytes may go. Dropping the wait part way leaves the bytes booked,
-    /// so a cancelled transfer costs the others a little time, never more than the limit.
+    /// Waits until `n` more bytes may go. Dropping the wait part way gives its bytes back.
     pub async fn take(&self, n: usize) {
-        let due = {
-            let mut state = self.lock();
-            let Some(rate) = state.rate else {
+        loop {
+            // Made before booking, so a rate change after the booking is never missed.
+            let changed = self.changed.notified();
+            let Some(mut booking) = self.book(n) else {
                 return;
             };
-            let now = Instant::now();
-            let earliest = now.checked_sub(SLACK).unwrap_or(now);
-            let start = state.paid_until.map_or(earliest, |paid| paid.max(earliest));
-            let due = start + Duration::from_secs_f64(n as f64 / rate as f64);
-            state.paid_until = Some(due);
-            due
-        };
-        tokio::time::sleep_until(due).await;
+            tokio::select! {
+                () = tokio::time::sleep_until(booking.due) => {
+                    booking.paid = true;
+                    return;
+                }
+                // The rate changed: book again at the new one.
+                () = changed => {}
+            }
+        }
+    }
+
+    /// Books `n` bytes; `None` when there is no limit.
+    fn book(&self, n: usize) -> Option<Booking<'_>> {
+        let mut state = self.lock();
+        let rate = state.rate?;
+        let now = Instant::now();
+        let earliest = now.checked_sub(SLACK).unwrap_or(now);
+        let start = state.paid_until.map_or(earliest, |paid| paid.max(earliest));
+        let cost = Duration::from_secs_f64(n as f64 / rate as f64);
+        let due = start + cost;
+        state.paid_until = Some(due);
+        Some(Booking {
+            bucket: self,
+            due,
+            cost,
+            epoch: state.epoch,
+            paid: false,
+        })
+    }
+
+    /// Gives back `cost` of schedule booked at `epoch` and never used.
+    fn refund(&self, cost: Duration, epoch: u64) {
+        let mut state = self.lock();
+        if state.epoch != epoch {
+            return;
+        }
+        if let Some(paid) = state.paid_until {
+            state.paid_until = Some(paid.checked_sub(cost).unwrap_or(paid));
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Schedule> {
