@@ -1,7 +1,181 @@
 // A publish profile's page (mockup `History.dc.html`), shown in place of the panes while a profile
-// is selected in the sidebar. T1 shell: its properties and callbacks; T8 builds it.
+// is selected in the sidebar:
+//
+// - the header: the folder and where it is published to, the profile's settings as chips, and
+//   Change Folder…, Edit Profile and Publish;
+// - three cards: the last publish, what the site holds now and the schedule (which arrives in a
+//   later version, so its link is shown turned off);
+// - the history of the profile's publishes, with a search field, and under it the detail of the
+//   publish chosen: what failed, with Retry N Failed, Retry Purge and Show All N Files.
+//
+// Every text is the app's (`profile`, `history-rows`, `history-detail`); the page only shows them
+// and says what was pressed. The search field reports each edit; the app waits for a pause.
 
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
 import { HistoryDetail, HistoryRow, ProfileView } from "../types.slint";
+import { CapsuleButton } from "buttons.slint";
+import { Chip } from "chips.slint";
+import { Field } from "form_controls.slint";
+import { VCenter } from "layout.slint";
+
+// The history table's columns, shared by its header and its rows (mockup: 150 px, the rest, 90,
+// 80, 90, 80 and 130 px, with 12 px at the sides and 8 px between).
+global HistoryCols {
+    out property <length> when: 150px;
+    out property <length> uploaded: 90px;
+    out property <length> deleted: 80px;
+    out property <length> size: 90px;
+    out property <length> time: 80px;
+    out property <length> purge: 130px;
+    out property <length> pad: 12px;
+    out property <length> gap: 8px;
+    out property <length> row-height: 34px;
+}
+
+// A rounded box on the page (mockup `.group`).
+component Card inherits Rectangle {
+    background: Theme.content;
+    border-radius: Theme.radius-md;
+    border-width: 0.5px;
+    border-color: Theme.sep-strong;
+}
+
+// One of the three cards under the header (mockup: a small label, a big value, a line of detail).
+component StatCard inherits Card {
+    in property <string> caption;
+    in property <string> value;
+
+    accessible-role: groupbox;
+    accessible-label: root.caption;
+
+    VerticalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        spacing: 4px;
+
+        Text {
+            text: root.caption;
+            color: Theme.label2;
+            font-size: 12px;
+            overflow: elide;
+        }
+        Text {
+            text: root.value;
+            color: Theme.label;
+            font-size: 20px;
+            font-weight: Theme.weight-semibold;
+            overflow: elide;
+        }
+        @children
+    }
+}
+
+// A column header of the history table.
+component HeaderCell inherits Text {
+    color: Theme.label2;
+    font-size: Theme.font-small;
+    font-weight: Theme.weight-semibold;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+// A cell of a history row.
+component Cell inherits Text {
+    in property <bool> lit;
+
+    color: root.lit ? Theme.sel-text : Theme.label;
+    font-size: 12px;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+// One publish in the history table (mockup `.row`): a check for one that went well, a warning for
+// one with failures. Pressing it shows its detail.
+component HistoryLine inherits Rectangle {
+    in property <HistoryRow> item;
+    in property <int> index;
+    in property <int> count;
+    in property <bool> selected;
+    callback clicked();
+
+    height: HistoryCols.row-height;
+    background: root.selected ? Theme.sel : (area.has-hover ? Theme.hover : (Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent));
+    accessible-role: list-item;
+    accessible-label: @tr("{}, {}, {} uploaded, {} deleted, {}, took {}, CDN purge {}", root.item.when, root.item.result, root.item.uploaded, root.item.deleted, root.item.size, root.item.time, root.item.purge);
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: HistoryCols.pad;
+        padding-right: HistoryCols.pad;
+        spacing: HistoryCols.gap;
+
+        Cell {
+            width: HistoryCols.when;
+            text: root.item.when;
+            lit: root.selected;
+        }
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            spacing: 6px;
+
+            VCenter {
+                Image {
+                    source: root.item.failed ? Icons.warn : Icons.check;
+                    colorize: root.selected ? Theme.sel-text : (root.item.failed ? Theme.orange : Theme.green);
+                    width: 14px;
+                    height: 14px;
+                    accessible-role: none;
+                }
+            }
+            Cell {
+                horizontal-stretch: 1;
+                text: root.item.result;
+                lit: root.selected;
+            }
+        }
+        Cell {
+            width: HistoryCols.uploaded;
+            text: root.item.uploaded;
+            horizontal-alignment: right;
+            lit: root.selected;
+        }
+        Cell {
+            width: HistoryCols.deleted;
+            text: root.item.deleted;
+            horizontal-alignment: right;
+            lit: root.selected;
+        }
+        Cell {
+            width: HistoryCols.size;
+            text: root.item.size;
+            horizontal-alignment: right;
+            lit: root.selected;
+        }
+        Cell {
+            width: HistoryCols.time;
+            text: root.item.time;
+            horizontal-alignment: right;
+            lit: root.selected;
+        }
+        Cell {
+            width: HistoryCols.purge;
+            text: root.item.purge;
+            lit: root.selected;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
 
 export component ProfilePage inherits Rectangle {
     in property <ProfileView> profile;
@@ -19,5 +193,453 @@ export component ProfilePage inherits Rectangle {
     callback edit-profile();
     callback publish();
 
-    Rectangle {}
+    // The detail is shown for a publish (ids start at 1).
+    property <bool> has-detail: root.history-detail.id > 0;
+    // The detail's file list: up to six lines, then it scrolls.
+    property <length> path-height: 20px;
+
+    background: Theme.win;
+    accessible-role: region;
+    accessible-label: root.profile.name;
+
+    VerticalLayout {
+        padding-left: 20px;
+        padding-right: 20px;
+        padding-top: 16px;
+        padding-bottom: 10px;
+        spacing: 16px;
+
+        // The header: folder → destination, the chips, and the buttons.
+        Card {
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                padding-top: 16px;
+                padding-bottom: 16px;
+                spacing: 16px;
+
+                VCenter {
+                    Rectangle {
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 10px;
+                        background: @linear-gradient(160deg, Theme.app-icon-top, Theme.app-icon-bottom);
+
+                        Image {
+                            source: Icons.send;
+                            colorize: Theme.on-accent;
+                            width: 20px;
+                            height: 20px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            accessible-role: none;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 6px;
+
+                    // Folder → destination.
+                    HorizontalLayout {
+                        spacing: 8px;
+                        accessible-role: AccessibleRole.text;
+                        accessible-label: @tr("Publishes {} to {}", root.profile.folder, root.profile.destination);
+
+                        VCenter {
+                            Image {
+                                source: Icons.folder;
+                                colorize: Theme.label2;
+                                width: 16px;
+                                height: 16px;
+                                accessible-role: none;
+                            }
+                        }
+                        Text {
+                            text: root.profile.folder;
+                            color: Theme.label;
+                            font-size: Theme.font-body;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            min-width: Math.min(self.preferred-width, 120px);
+                            accessible-role: none;
+                        }
+                        VCenter {
+                            Image {
+                                source: Icons.chev-r;
+                                colorize: Theme.label3;
+                                width: 12px;
+                                height: 12px;
+                                accessible-role: none;
+                            }
+                        }
+                        VCenter {
+                            Image {
+                                source: Icons.lock;
+                                colorize: Theme.green;
+                                width: 16px;
+                                height: 16px;
+                                accessible-role: none;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.profile.destination;
+                            color: Theme.label;
+                            font-family: Theme.font-mono;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                    }
+                    // The chips: skip rules, remove extras, purge, delete guard. Slint has no
+                    // wrapping layout, so a row too narrow for them cuts the last ones off.
+                    Rectangle {
+                        height: 20px;
+                        min-width: 0px;
+                        clip: true;
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 6px;
+
+                            for chip in root.profile.chips: Chip {
+                                text: chip;
+                            }
+                        }
+                    }
+                    if root.profile.status != "": HorizontalLayout {
+                        spacing: 6px;
+
+                        VCenter {
+                            Image {
+                                source: Icons.warn;
+                                colorize: Theme.orange;
+                                width: 14px;
+                                height: 14px;
+                                accessible-role: none;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.profile.status;
+                            color: Theme.orange;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                VCenter {
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        CapsuleButton {
+                            text: @tr("Change Folder…");
+                            clicked => { root.change-folder(); }
+                        }
+                        CapsuleButton {
+                            text: @tr("Edit Profile");
+                            icon: Icons.pencil;
+                            clicked => { root.edit-profile(); }
+                        }
+                        CapsuleButton {
+                            text: @tr("Publish");
+                            icon: Icons.send;
+                            primary: true;
+                            clicked => { root.publish(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The cards: last publish, what the site holds now, the schedule.
+        HorizontalLayout {
+            spacing: 12px;
+
+            StatCard {
+                horizontal-stretch: 1;
+                caption: @tr("Last publish");
+                value: root.profile.last-title;
+
+                Text {
+                    text: root.profile.last-detail;
+                    color: Theme.label2;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+            StatCard {
+                horizontal-stretch: 1;
+                caption: root.profile.remote-label;
+                value: root.profile.remote-title;
+
+                Text {
+                    text: root.profile.remote-detail;
+                    color: Theme.label2;
+                    font-size: 12px;
+                    overflow: elide;
+                }
+            }
+            // Scheduled publishing arrives in a later version (I6): its link is shown, turned off.
+            StatCard {
+                horizontal-stretch: 1;
+                caption: @tr("Schedule");
+                value: root.profile.schedule;
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: @tr("Publish on a schedule… arrives in a later version");
+
+                    Text {
+                        text: @tr("Publish on a schedule…");
+                        color: Theme.accent-text;
+                        opacity: 0.45;
+                        font-size: 12px;
+                        overflow: elide;
+                        accessible-role: none;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: @tr("Arrives in a later version");
+                        color: Theme.label3;
+                        font-size: Theme.font-small;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        accessible-role: none;
+                    }
+                }
+            }
+        }
+
+        // The history (mockup `.pane`): header with the search, column headers, rows, detail.
+        Card {
+            vertical-stretch: 1;
+            clip: true;
+            accessible-role: groupbox;
+            accessible-label: @tr("Publish history");
+
+            VerticalLayout {
+                // Header (mockup `.pane-head`).
+                Rectangle {
+                    height: 40px;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 8px;
+                        spacing: 8px;
+
+                        VCenter {
+                            Image {
+                                source: Icons.clock;
+                                colorize: Theme.label;
+                                width: 16px;
+                                height: 16px;
+                                accessible-role: none;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: @tr("History");
+                            color: Theme.label;
+                            font-size: Theme.font-body;
+                            font-weight: Theme.weight-semibold;
+                            vertical-alignment: center;
+                        }
+                        VCenter {
+                            Field {
+                                width: 220px;
+                                text <=> root.search;
+                                placeholder: @tr("Search history");
+                                label: @tr("Search history");
+                                edited => { root.search-changed(self.text); }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - self.height;
+                        height: 1px;
+                        background: Theme.sep;
+                    }
+                }
+
+                // Column headers (mockup `.cols`).
+                Rectangle {
+                    height: 26px;
+
+                    HorizontalLayout {
+                        padding-left: HistoryCols.pad;
+                        padding-right: HistoryCols.pad;
+                        spacing: HistoryCols.gap;
+
+                        HeaderCell {
+                            width: HistoryCols.when;
+                            text: @tr("When");
+                        }
+                        HeaderCell {
+                            horizontal-stretch: 1;
+                            text: @tr("Result");
+                        }
+                        HeaderCell {
+                            width: HistoryCols.uploaded;
+                            text: @tr("Uploaded");
+                            horizontal-alignment: right;
+                        }
+                        HeaderCell {
+                            width: HistoryCols.deleted;
+                            text: @tr("Deleted");
+                            horizontal-alignment: right;
+                        }
+                        HeaderCell {
+                            width: HistoryCols.size;
+                            text: @tr("Size");
+                            horizontal-alignment: right;
+                        }
+                        HeaderCell {
+                            width: HistoryCols.time;
+                            text: @tr("Time");
+                            horizontal-alignment: right;
+                        }
+                        HeaderCell {
+                            width: HistoryCols.purge;
+                            text: @tr("CDN purge");
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - self.height;
+                        height: 1px;
+                        background: Theme.sep;
+                    }
+                }
+
+                // The rows. The list insets its content by 2 px on every side; it reaches out by
+                // that much so that the rows run edge to edge.
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 2 * HistoryCols.row-height;
+                    clip: true;
+
+                    if root.history-rows.length > 0: ListView {
+                        x: -2px;
+                        y: -2px;
+                        width: parent.width + 4px;
+                        height: parent.height + 4px;
+                        accessible-label: @tr("Publishes");
+                        accessible-item-count: root.history-rows.length;
+
+                        for row[i] in root.history-rows: HistoryLine {
+                            item: row;
+                            index: i;
+                            count: root.history-rows.length;
+                            selected: row.id == root.history-detail.id;
+                            clicked => { root.history-selected(row.id); }
+                        }
+                    }
+                    if root.history-rows.length == 0: Text {
+                        x: 16px;
+                        width: parent.width - 32px;
+                        height: parent.height;
+                        text: root.search != "" ? @tr("No publishes match “{}”.", root.search) : @tr("No publishes yet. Publish copies the folder to the site and lists each run here.");
+                        color: Theme.label2;
+                        font-size: Theme.font-body;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // The detail of the publish chosen (mockup: under the table).
+                if root.has-detail: Rectangle {
+                    height: detail-box.preferred-height;
+
+                    detail-box := VerticalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: root.history-detail.summary;
+                                color: Theme.label;
+                                font-size: Theme.font-body;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                            if !root.history-detail.all-shown && root.history-detail.total > 0: VCenter {
+                                CapsuleButton {
+                                    text: @tr("Show All {} Files", root.history-detail.total);
+                                    clicked => { root.show-all(root.history-detail.id); }
+                                }
+                            }
+                            if root.history-detail.purge-failed: VCenter {
+                                CapsuleButton {
+                                    text: @tr("Retry Purge");
+                                    icon: Icons.refresh;
+                                    primary: root.history-detail.failed == 0;
+                                    clicked => { root.retry-purge(root.history-detail.id); }
+                                }
+                            }
+                            if root.history-detail.failed > 0: VCenter {
+                                CapsuleButton {
+                                    text: @tr("Retry {} Failed", root.history-detail.failed);
+                                    icon: Icons.refresh;
+                                    primary: true;
+                                    clicked => { root.retry(root.history-detail.id); }
+                                }
+                            }
+                        }
+                        // The files: the failed ones in red, or every file once Show All was pressed.
+                        if root.history-detail.paths.length > 0: Rectangle {
+                            height: Math.min(root.history-detail.paths.length, 6) * root.path-height + 4px;
+                            clip: true;
+
+                            ListView {
+                                x: -2px;
+                                y: -2px;
+                                width: parent.width + 4px;
+                                height: parent.height + 4px;
+                                accessible-label: root.history-detail.all-shown ? @tr("Files of this publish") : @tr("Files that failed");
+                                accessible-item-count: root.history-detail.paths.length;
+
+                                for path in root.history-detail.paths: Text {
+                                    height: root.path-height;
+                                    text: path;
+                                    color: root.history-detail.all-shown ? Theme.label : Theme.red;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-small;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        background: Theme.sep;
+                    }
+                }
+            }
+        }
+
+        // What the status bar says in the mockup: "5 publishes · kept for the last 200".
+        Text {
+            text: root.profile.footer;
+            color: Theme.label2;
+            font-size: Theme.font-small;
+            overflow: elide;
+        }
+    }
 }

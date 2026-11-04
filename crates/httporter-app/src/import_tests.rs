@@ -18,6 +18,8 @@ fn parse_env_reads_the_scripts_variables() {
             zone: "exampleshop".into(),
             password: "pw-1234-abcd".into(),
             region: "sg".into(),
+            local_dir: Some(PathBuf::from("C:\\site")),
+            prefix: "wp".into(),
         }
     );
 
@@ -129,6 +131,8 @@ fn import_debug_never_shows_secrets() {
         zone: "exampleshop".into(),
         password: "pw-hunter2".into(),
         region: "sg".into(),
+        local_dir: None,
+        prefix: String::new(),
     };
     let profile = AwsProfile {
         name: "work".into(),
@@ -158,6 +162,8 @@ fn import_prefills_the_add_site_fields_without_the_secret() {
         zone: "exampleshop".into(),
         password: "pw".into(),
         region: "Singapore".into(),
+        local_dir: None,
+        prefix: String::new(),
     });
     assert_eq!(
         (bunny.provider, bunny.zone.as_str(), bunny.region_index),
@@ -168,6 +174,8 @@ fn import_prefills_the_add_site_fields_without_the_secret() {
         zone: "z".into(),
         password: "pw".into(),
         region: String::new(),
+        local_dir: None,
+        prefix: String::new(),
     });
     assert_eq!(unknown.region_index, -1);
 

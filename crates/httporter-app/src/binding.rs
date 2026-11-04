@@ -903,6 +903,8 @@ fn show_result(ui: &AppWindow, s3: bool, ok: bool, text: String) {
 fn show_added(ui: &AppWindow, session: &Session, latest: bool, added: Result<SiteRecord, String>) {
     match added {
         Ok(record) => {
+            // A site a `.env` import described gets the publish profile the file asks for.
+            crate::add_site::site_saved(&record);
             sync_sites(ui, &session.site_items());
             if latest {
                 ui.set_add_site_busy(false);
@@ -1159,6 +1161,7 @@ fn import_env(ctx: &Ctx) {
         let read = read_env_file(&path);
         let _ = weak.upgrade_in_event_loop(move |ui| match read {
             Ok(import) => {
+                crate::add_site::expect_imported_site(&import);
                 lock(&state).profiles.clear();
                 ui.set_import_open(false);
                 ui.set_import_profiles(ModelRc::default());

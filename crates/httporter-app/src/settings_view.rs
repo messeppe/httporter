@@ -12,14 +12,20 @@
 //!
 //! A proxy password never reaches the settings: a custom proxy address with a user name or
 //! password in it is refused, and the form's `Debug` output leaves such an address out.
+//!
+//! The Publish tab lists the Bunny account keys kept for purging the CDN, each with Forget Key.
+//! The keys belong to Publish, which hands this module a [`KeyKeeper`] when the window is wired
+//! ([`set_key_keeper`]); the tab asks it for the list whenever it is opened. No key ever reaches
+//! the window: only the account's name and id.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
 use httporter_core::{ConflictPolicy, HttpProtocol, ProxyMode, TransferSettings};
-use slint::{ComponentHandle, SharedString};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::{SettingsWindow, copy};
+use crate::{ProfileItem, SettingsWindow, copy};
 
 /// The name of the field a refused form is refused for ([`from_form`]'s error).
 pub const FIELD_BANDWIDTH: &str = "bandwidth";
@@ -247,9 +253,13 @@ pub fn from_form(f: &SettingsFormData) -> Result<TransferSettings, (String, Stri
 
 // ---- The window ----
 
-/// Puts `settings` in the window's form and clears the messages under its fields.
+/// Puts `settings` in the window's form and clears the messages under its fields; and lists the
+/// account keys again if the Publish tab is the one shown.
 pub fn show(window: &SettingsWindow, settings: &TransferSettings) {
     show_form(window, &to_form(settings));
+    if window.get_current_tab() == PUBLISH_TAB {
+        keep_keys(window, None);
+    }
 }
 
 /// Puts `form` in the window and clears the messages under its fields.
@@ -305,11 +315,12 @@ fn show_error(window: &SettingsWindow, field: &str, message: &str) {
     }
 }
 
-/// Connects the window's two callbacks. Each edit is read back and checked: a refused form shows
+/// Connects the window's callbacks. Each edit is read back and checked: a refused form shows
 /// its message under the field and changes nothing, an accepted one clears the messages and goes
 /// to `apply`, which stores and uses the settings. Restore Defaults puts the default settings in
-/// the form and goes to `apply` with them.
+/// the form and goes to `apply` with them. The Publish tab's go to the [`KeyKeeper`].
 pub fn wire(window: &SettingsWindow, apply: impl Fn(TransferSettings) + 'static) {
+    wire_publish(window);
     let apply = Rc::new(apply);
 
     let weak = window.as_weak();
@@ -335,6 +346,55 @@ pub fn wire(window: &SettingsWindow, apply: impl Fn(TransferSettings) + 'static)
         let defaults = TransferSettings::default();
         show_form(&window, &to_form(&defaults));
         apply(defaults);
+    });
+}
+
+// ---- The Publish tab ----
+
+/// The Publish tab's position in the row of tabs.
+const PUBLISH_TAB: i32 = 4;
+
+/// What the Publish tab does with the account keys: forgets the one given (its account id), if
+/// any, then shows the keys kept ([`show_keys`]). Publish's; it works off the UI thread.
+pub type KeyKeeper = Rc<dyn Fn(&SettingsWindow, Option<String>)>;
+
+thread_local! {
+    // The UI thread's: the Settings window lives there.
+    static KEY_KEEPER: RefCell<Option<KeyKeeper>> = const { RefCell::new(None) };
+}
+
+/// Hands the Publish tab its [`KeyKeeper`]. Without one (the window's tests) the tab stays empty.
+pub fn set_key_keeper(keeper: KeyKeeper) {
+    KEY_KEEPER.with(|slot| *slot.borrow_mut() = Some(keeper));
+}
+
+fn keep_keys(window: &SettingsWindow, forget: Option<String>) {
+    let keeper = KEY_KEEPER.with(|slot| slot.borrow().clone());
+    if let Some(keeper) = keeper {
+        keeper(window, forget);
+    }
+}
+
+/// Lists `keys` in the Publish tab (`name` the account, `meta` a line about it, `id` its account
+/// id), with `error` under them: what went wrong forgetting one, empty for nothing.
+pub fn show_keys(window: &SettingsWindow, keys: Vec<ProfileItem>, error: &str) {
+    window.set_bunny_keys(ModelRc::new(VecModel::from(keys)));
+    window.set_bunny_keys_error(error.into());
+}
+
+/// Opening the Publish tab lists the keys; Forget Key forgets one and lists them again.
+fn wire_publish(window: &SettingsWindow) {
+    let weak = window.as_weak();
+    window.on_publish_shown(move || {
+        if let Some(window) = weak.upgrade() {
+            keep_keys(&window, None);
+        }
+    });
+    let weak = window.as_weak();
+    window.on_forget_key(move |id| {
+        if let Some(window) = weak.upgrade() {
+            keep_keys(&window, Some(id.to_string()));
+        }
     });
 }
 
