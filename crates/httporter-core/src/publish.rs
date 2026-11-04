@@ -63,9 +63,9 @@ impl Default for DeleteGuard {
 impl DeleteGuard {
     /// Whether `deletes` out of `remote_files` is too many: more than
     /// `min(files, remote_files * percent / 100)`.
-    #[allow(unused_variables)] // T1 skeleton: T2 fills it.
     pub fn trips(&self, deletes: u64, remote_files: u64) -> bool {
-        todo!("T2")
+        let share = remote_files.saturating_mul(u64::from(self.percent)) / 100;
+        deletes > self.files.min(share)
     }
 }
 

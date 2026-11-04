@@ -40,3 +40,23 @@ pub const ACCESS_DENIED: &str = "access to this file was denied";
 /// An upload sent again after a request for it was cut off was answered as stored, then not
 /// found on the site (or found with another size) when checked, three times over (ruling Q55).
 pub const LOST_AFTER_UPLOAD: &str = "the site accepted the file but didn't keep it, three times";
+
+/// The lines of an exported publish plan (`PublishPlan::export_text`). The header's `{…}` parts
+/// are filled in; each file line is its action, its path and its size in bytes.
+pub mod plan_export {
+    pub const DESTINATION: &str = "Destination: {destination}";
+    pub const FOLDER: &str = "Folder: {folder}";
+    pub const DATE: &str = "Made: {date}";
+    pub const COUNTS: &str = "{changed} changed · {new} new · {deleted} to delete · {kept} kept · \
+                              {same} the same · upload {files} files, {bytes} bytes";
+    pub const UPLOAD_CHANGED: &str = "UPLOAD changed";
+    pub const UPLOAD_NEW: &str = "UPLOAD new";
+    /// A changed or new file left out of the publish.
+    pub const SKIP_CHANGED: &str = "SKIP changed";
+    pub const SKIP_NEW: &str = "SKIP new";
+    pub const DELETE: &str = "DELETE";
+    pub const KEEP: &str = "KEEP";
+}
+
+/// Why a publish didn't try to delete a file.
+pub const NOT_DELETED_UPLOADS_FAILED: &str = "Not deleted because uploads failed.";
