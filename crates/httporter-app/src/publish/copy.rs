@@ -182,7 +182,7 @@ pub fn last_detail(h: &httporter_core::HistoryRecord) -> String {
 pub const LAST_NONE: &str = "Publish uploads the folder for the first time.";
 
 /// The second card's label: "On Bunny now", or "On {site} now" for S3.
-pub fn remote_label(site: Option<&httporter_core::SiteRecord>) -> String {
+pub fn on_remote_now(site: Option<&httporter_core::SiteRecord>) -> String {
     match site {
         Some(site) if site.s3.is_some() => format!("On {} now", site.name),
         _ => "On Bunny now".to_owned(),

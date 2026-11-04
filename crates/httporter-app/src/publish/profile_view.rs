@@ -420,7 +420,7 @@ fn page_view(page: &Page, searching: bool, now: DateTime<Local>) -> ProfileView 
                 |h| copy::remote_title(h.remote_files),
             )
             .into(),
-        remote_label: copy::remote_label(site.as_ref()).into(),
+        remote_label: copy::on_remote_now(site.as_ref()).into(),
         remote_detail: newest
             .map_or_else(
                 || copy::REMOTE_UNKNOWN_DETAIL.to_owned(),
