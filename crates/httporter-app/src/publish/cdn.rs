@@ -305,7 +305,7 @@ pub(super) fn retry_purge(p: &Arc<Publisher>, history: i64) {
             this.link.status(copy::history_not_saved(&e));
             return;
         }
-        this.refresh_profile_page();
+        super::profile_view::refresh(&this);
         this.link.status(message);
     });
 }

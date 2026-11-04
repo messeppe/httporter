@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
 use httporter_core::{
     CdnZone, CompareStatus as Status, FileOutcome, HistoryFile, PURGE_URL_LIMIT, ProfileId,
     ProfileRecord, ProviderKind, PurgeMode, PurgeResult, SiteRecord, SkipRules, purge_urls,
@@ -21,20 +20,23 @@ use httporter_transfer::{
     BatchTarget, CompareError, CompareMode, CompareResult, PublishPhase, PublishPlan, ScanProgress,
     compare_trees, run_publish,
 };
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use tokio::task::AbortHandle;
 
 use super::{Publisher, copy, lock};
 use crate::copy::{self as app_copy, Attempt};
 use crate::format::format_size;
 use crate::viewmodel::{kind_for, slint_kind};
-use crate::{AppWindow, FileKind, PlanGroup, PlanRow, ProfileItem, PublishSheetData};
+use crate::{AppWindow, FileKind, PlanGroup, PlanRow, PublishSheetData};
 
 /// The compare's progress line is redrawn at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
 /// The sidebar's "2h ago" is brought up to date this often.
 const AGO_EVERY: Duration = Duration::from_secs(60);
+
+/// How often the toolbar's Publish looks whether a profile page is shown.
+const PAGE_POLL: Duration = Duration::from_millis(250);
 
 /// What the sheet remembers between callbacks.
 #[derive(Default)]
@@ -328,79 +330,12 @@ fn safe_file_name(name: &str) -> String {
         .collect()
 }
 
-/// The sidebar's rows for `profiles`.
-fn sidebar_items(profiles: &[ProfileRecord], now: DateTime<Utc>) -> Vec<ProfileItem> {
-    profiles
-        .iter()
-        .map(|profile| ProfileItem {
-            id: profile.id.0.as_str().into(),
-            name: profile.name.as_str().into(),
-            meta: profile
-                .last_published_at
-                .map_or_else(
-                    || copy::SIDEBAR_NEVER.to_owned(),
-                    |t| copy::ago_short(t, now),
-                )
-                .into(),
-        })
-        .collect()
-}
-
-/// Shows `items` in the sidebar. The selected profile stays selected (by id: a publish may move
-/// it in the list); one that is gone is unselected, which shows the panes again.
-fn apply_profiles(ui: &AppWindow, items: Vec<ProfileItem>) {
-    let selected = ui.get_selected_profile();
-    let selected_id = usize::try_from(selected)
-        .ok()
-        .and_then(|row| ui.get_profiles().row_data(row))
-        .map(|item| item.id);
-    ui.set_profiles(ModelRc::new(VecModel::from(items)));
-    if let Some(id) = selected_id {
-        let row = ui
-            .get_profiles()
-            .iter()
-            .position(|item| item.id == id)
-            .map_or(-1, |row| i32::try_from(row).unwrap_or(-1));
-        if row != selected {
-            ui.set_selected_profile(row);
-        }
-    }
-}
-
 impl Publisher {
-    // ---- The sidebar ----
+    // ---- The sidebar and the profile page ----
 
-    /// Reads the profiles and shows them in the sidebar. Read on a task of its own: a store that
-    /// fails leaves the list as it was.
-    pub(super) async fn reload_profiles(self: &Arc<Self>) {
-        let session = self.session.clone();
-        let read = self
-            .link
-            .rt()
-            .spawn(async move { session.profiles().await });
-        let Ok(profiles) = read.await else {
-            return;
-        };
-        lock(&self.state).profiles = profiles;
-        self.show_profiles();
-    }
-
-    fn show_profiles(&self) {
-        let items = sidebar_items(&lock(&self.state).profiles, Utc::now());
-        let _ = self
-            .link
-            .ui()
-            .upgrade_in_event_loop(move |ui| apply_profiles(&ui, items));
-    }
-
-    /// The profile page shows the history again (its loader runs for the selected profile).
-    pub(super) fn refresh_profile_page(&self) {
-        let _ = self.link.ui().upgrade_in_event_loop(|ui| {
-            let selected = ui.get_selected_profile();
-            if selected >= 0 {
-                ui.invoke_profile_selected(selected);
-            }
-        });
+    /// The profiles, as stored (the sidebar's order).
+    async fn read_profiles(&self) -> Vec<ProfileRecord> {
+        self.session.profiles().await
     }
 
     /// The profile publish `history` belongs to.
@@ -408,9 +343,7 @@ impl Publisher {
         self: &Arc<Self>,
         history: i64,
     ) -> Option<ProfileRecord> {
-        self.reload_profiles().await;
-        let profiles = lock(&self.state).profiles.clone();
-        for profile in profiles {
+        for profile in self.read_profiles().await {
             let records = self
                 .session
                 .history(profile.id.clone(), String::new())
@@ -676,7 +609,8 @@ impl Publisher {
         }
         let this = self.clone();
         self.link.rt().spawn(async move {
-            this.run_plan(profile, site, target, plan, purge).await;
+            this.run_plan(profile, site, target, plan, purge, false)
+                .await;
         });
     }
 
@@ -713,7 +647,7 @@ impl Publisher {
             self.link.status(copy::folder_not_saved(&e));
             return;
         }
-        self.reload_profiles().await;
+        super::profile_view::refresh(&self);
         if self.sheet_of(run).is_some() {
             self.start(profile, site);
         }
@@ -760,7 +694,8 @@ impl Publisher {
 
     /// Runs `plan` for `profile`: the purger first (asking for the key when needed; without one
     /// the publish goes on unpurged), then [`run_publish`], then the history, the sidebar, the
-    /// profile page and the result in the status line.
+    /// profile page and the result in the status line. A `retry` (of a publish's failed files)
+    /// keeps the profile's last "On Bunny now" counts: its plan only knows the files retried.
     async fn run_plan(
         self: Arc<Self>,
         profile: ProfileRecord,
@@ -768,6 +703,7 @@ impl Publisher {
         target: BatchTarget,
         plan: PublishPlan,
         purge: PurgeMode,
+        retry: bool,
     ) {
         let (purger, unavailable) = if purge == PurgeMode::Off {
             (None, None)
@@ -805,12 +741,22 @@ impl Publisher {
             outcome.purge = PurgeResult::Unavailable(why);
         }
         let verified = self.session.settings().verify_checksums;
-        let record = outcome.into_record(profile.id.clone(), &plan, verified);
+        let mut record = outcome.into_record(profile.id.clone(), &plan, verified);
+        if retry {
+            let history = self
+                .session
+                .history(profile.id.clone(), String::new())
+                .await;
+            if let Some(last) = history.first() {
+                record.remote_files = last.remote_files;
+                record.remote_folders = last.remote_folders;
+                record.regions = last.regions;
+            }
+        }
         let message = copy::published(&site.name, &record);
         let saved = self.session.add_history(record).await;
         self.link.refresh_remote_at(&site.id, &profile.remote_dir);
-        self.reload_profiles().await;
-        self.refresh_profile_page();
+        super::profile_view::refresh(&self);
         self.link.status(match saved {
             Ok(_) => message,
             Err(e) => copy::history_not_saved(&e),
@@ -822,12 +768,11 @@ impl Publisher {
 pub(super) fn open(p: &Arc<Publisher>, id: ProfileId) {
     let this = p.clone();
     p.link.rt().spawn(async move {
-        this.reload_profiles().await;
-        let found = lock(&this.state)
-            .profiles
-            .iter()
-            .find(|profile| profile.id == id)
-            .cloned();
+        let found = this
+            .read_profiles()
+            .await
+            .into_iter()
+            .find(|profile| profile.id == id);
         let Some(profile) = found else {
             this.link.status(copy::PROFILE_GONE.to_owned());
             return;
@@ -840,37 +785,41 @@ pub(super) fn open(p: &Arc<Publisher>, id: ProfileId) {
     });
 }
 
-/// The toolbar's Publish and Ctrl+P: the selected profile; else the open site's profile that
-/// published last; else a new profile for the open site, with the two panes' folders.
+/// The toolbar's Publish and Ctrl+P: the profile of the page shown; else the open site's profile
+/// that published last; else a new profile for the open site, with the two panes' folders.
 pub(super) fn publish_current(p: &Arc<Publisher>) {
     let Some(ui) = p.link.ui().upgrade() else {
         return;
     };
-    if let Ok(row) = usize::try_from(ui.get_selected_profile())
-        && let Some(profile) = p.profile_at(row)
-    {
-        p.open_sheet(profile.id);
+    let shown = usize::try_from(ui.get_selected_profile())
+        .ok()
+        .and_then(|row| ui.get_profiles().row_data(row));
+    if let Some(item) = shown {
+        p.open_sheet(ProfileId(item.id.to_string()));
         return;
     }
     let Some(place) = p.session.remote_place() else {
         p.link.status(copy::OPEN_A_SITE.to_owned());
         return;
     };
-    let last = lock(&p.state)
-        .profiles
-        .iter()
-        .filter(|profile| profile.site == place.site.id)
-        .max_by_key(|profile| profile.last_published_at)
-        .cloned();
-    match last {
-        Some(profile) => p.open_sheet(profile.id),
-        None => super::profile_view::open_new(
-            &ui,
-            &place.site,
-            p.session.local_dir().unwrap_or_default(),
-            place.dir.clone(),
-        ),
-    }
+    let local = p.session.local_dir().unwrap_or_default();
+    let this = p.clone();
+    p.link.rt().spawn(async move {
+        let last = this
+            .read_profiles()
+            .await
+            .into_iter()
+            .filter(|profile| profile.site == place.site.id)
+            .max_by_key(|profile| profile.last_published_at);
+        match last {
+            Some(profile) => this.open_sheet(profile.id),
+            None => {
+                let _ = this.link.ui().upgrade_in_event_loop(move |ui| {
+                    super::profile_view::open_new(&ui, &place.site, local, place.dir);
+                });
+            }
+        }
+    });
 }
 
 /// Publishes again the files of publish `history` that failed, were cancelled or didn't run.
@@ -909,16 +858,37 @@ pub(super) fn retry_failed(p: &Arc<Publisher>, history: i64) {
             ProviderKind::Bunny => profile.purge,
             ProviderKind::S3 => PurgeMode::Off,
         };
-        this.run_plan(profile, site, target, plan, purge).await;
+        this.run_plan(profile, site, target, plan, purge, true)
+            .await;
     });
 }
 
 /// Wires the Publish sheet, CDN key sheet, delete-alert purge and sidebar callbacks. Runs at
 /// startup: it only reads the profiles for the sidebar, on a task of its own.
 pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
+    // On a profile page the toolbar's Publish and Ctrl+P publish that profile, a site open or not
+    // (the compare view sets `can-publish` for the panes). The window has no hook for the page
+    // being chosen, so this looks a few times a second; the timer lives as long as the window's
+    // Publish callback.
+    let page_publish = Timer::default();
+    page_publish.start(TimerMode::Repeated, PAGE_POLL, {
+        let ui = ui.as_weak();
+        move || {
+            if let Some(ui) = ui.upgrade() {
+                let on_page = usize::try_from(ui.get_selected_profile())
+                    .is_ok_and(|row| row < ui.get_profiles().row_count());
+                if on_page && !ui.get_can_publish() {
+                    ui.set_can_publish(true);
+                }
+            }
+        }
+    });
     ui.on_publish({
         let p = p.clone();
-        move || p.publish_current()
+        move || {
+            let _alive = &page_publish;
+            p.publish_current();
+        }
     });
     ui.on_plan_toggle({
         let (p, ui) = (p.clone(), ui.as_weak());
@@ -979,7 +949,7 @@ pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
     super::cdn::install(ui, p);
 
     // The sidebar's profiles, and their "2h ago" kept up to date.
-    p.refresh_profiles();
+    super::profile_view::refresh_sidebar(p);
     let weak = Arc::downgrade(p);
     p.link.rt().spawn(async move {
         loop {
@@ -987,7 +957,7 @@ pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
             let Some(p) = weak.upgrade() else {
                 break;
             };
-            p.show_profiles();
+            super::profile_view::refresh_sidebar(&p);
         }
     });
 }

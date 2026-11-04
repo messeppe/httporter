@@ -576,7 +576,7 @@ fn delete_alert_default_is_cancel() {
         )
     );
     assert!(find(&w, AccessibleRole::Button, "Delete 48 Files").is_some());
-    // The CDN purge waits for Publish: off, and it says so.
+    // No CDN purge offered (Publish offers it for a Bunny site): off, and no note.
     let purge = find(
         &w,
         AccessibleRole::Checkbox,
@@ -587,7 +587,7 @@ fn delete_alert_default_is_cancel() {
     assert_eq!(purge.accessible_checked(), Some(false));
     assert_eq!(
         ElementHandle::find_by_accessible_label(&w, "CDN purge arrives with Publish.").count(),
-        1
+        0
     );
 
     // Return presses Cancel, the default.

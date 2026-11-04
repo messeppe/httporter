@@ -911,6 +911,12 @@ impl Transfers {
         affected: Affected,
         purge: Arc<dyn DeletePurge>,
     ) {
+        // Removed while it was asked about, as in `submit`.
+        if self.session.site(&target.site.id).is_none() {
+            self.link
+                .status(copy::transfer_site_gone(&target.site.name));
+            return;
+        }
         let site = target.site.clone();
         let batch = Batch {
             site: site.id.clone(),

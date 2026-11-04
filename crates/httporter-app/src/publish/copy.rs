@@ -352,26 +352,6 @@ pub fn purge_done(result: &httporter_core::PurgeResult) -> String {
 pub const NOTHING_TO_RETRY: &str = "Nothing failed in that publish.";
 pub const HISTORY_GONE: &str = "That publish is no longer in the history.";
 
-/// The sidebar's note for a profile that never published.
-pub const SIDEBAR_NEVER: &str = "Never";
-
-/// How long ago a profile last published, short: "just now", "5m ago", "2h ago", "3d ago".
-pub fn ago_short(
-    then: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> String {
-    let seconds = (now - then).num_seconds();
-    if seconds < 60 {
-        "just now".to_owned()
-    } else if seconds < 3600 {
-        format!("{}m ago", seconds / 60)
-    } else if seconds < 86_400 {
-        format!("{}h ago", seconds / 3600)
-    } else {
-        format!("{}d ago", seconds / 86_400)
-    }
-}
-
 /// The delete alert's note when ticking the purge will ask for the key.
 pub const PURGE_ASKS_KEY: &str = "Asks for your Bunny account key";
 /// The CDN key sheet was cancelled.
