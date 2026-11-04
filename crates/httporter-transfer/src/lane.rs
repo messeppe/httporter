@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -701,10 +702,12 @@ async fn upload(
     });
     let content_type = content_type_for(remote.name().unwrap_or_default());
     let prepared: Mutex<Option<Prepared>> = Mutex::new(None);
+    // An attempt ended by a network error may have left a request the server still ends later.
+    let cut = AtomicBool::new(false);
     let mut mismatches = 0;
     loop {
         let result = attempts(inner, spec, id, |_| {
-            let (prepared, meter, content_type) = (&prepared, &meter, &content_type);
+            let (prepared, meter, content_type, cut) = (&prepared, &meter, &content_type, &cut);
             async move {
                 let current = lock(prepared).clone();
                 let fresh = prepare(&spec.files, local, spec.verify, current).await?;
@@ -731,13 +734,17 @@ async fn upload(
                     path: local.to_owned(),
                     len: fresh.len,
                 };
-                spec.provider
-                    .upload(remote, source, &opts)
-                    .await
-                    .map_err(Failure::from)
+                let sent = spec.provider.upload(remote, source, &opts).await;
+                if matches!(sent, Err(ProviderError::Network(_))) {
+                    cut.store(true, Ordering::Relaxed);
+                }
+                sent.map_err(Failure::from)
             }
         })
         .await;
+        if result.is_ok() && cut.load(Ordering::Relaxed) {
+            inner.recheck_after_cut(spec.unit, id);
+        }
         match result {
             Err(Failure::Provider(ProviderError::ChecksumMismatch)) if mismatches == 0 => {
                 mismatches += 1;

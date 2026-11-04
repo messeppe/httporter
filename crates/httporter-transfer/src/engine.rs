@@ -2106,6 +2106,24 @@ impl Inner {
         }
     }
 
+    /// An attempt at this upload was cut off by a network error and a later one in the same
+    /// unit succeeded: the server may still end the cut-off request and delete the path, so the
+    /// upload is checked as a re-sent one is (ruling Q55, the S5 report's first concern).
+    pub(crate) fn recheck_after_cut(&self, unit: UnitId, id: JobId) {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        if let Some(entry) = st.jobs.get_mut(id)
+            && entry.status == Status::Active(unit)
+            && entry.sent
+            && st.lanes[entry.lane]
+                .provider
+                .capabilities()
+                .cut_uploads_delete_late
+        {
+            entry.recheck = true;
+        }
+    }
+
     /// A job of `unit` ended: done, or failed with `result`'s error. A failure of a job being
     /// cancelled cancels it, whatever the error; otherwise an auth failure stops the job's site
     /// and puts the job back in the queue, an unreachable site puts it back in the queue as it
