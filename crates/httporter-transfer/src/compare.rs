@@ -340,7 +340,9 @@ pub async fn compare_trees(
 
     let mut items = Vec::with_capacity(local.files.len() + remote.files.len());
     // Equal-size pairs to hash: the item, the local file and the digest to check.
-    let mut to_hash: Vec<(usize, &LocalFile, Checksum, CompareBy)> = Vec::new();
+    // Owned, so the hashing stream's closure has no borrowed argument (a `Send` future that
+    // takes one fails rustc's higher-ranked lifetime check when spawned).
+    let mut to_hash: Vec<(usize, LocalFile, Checksum, CompareBy)> = Vec::new();
     let mut remote_files = remote.files;
     for (rel, file) in &local.files {
         let Some(entry) = remote_files.remove(rel) else {
@@ -368,7 +370,7 @@ pub async fn compare_trees(
                 .zip(entry.checksum.clone())
             {
                 item.by = by;
-                to_hash.push((items.len(), file, checksum, by));
+                to_hash.push((items.len(), file.clone(), checksum, by));
             } else if mode.mtime_fallback {
                 item.by_date = true;
                 if newer_or_same(entry.modified, file.modified) {
@@ -396,7 +398,7 @@ pub async fn compare_trees(
     let mut last = tokio::time::Instant::now();
     let mut hashed = stream::iter(to_hash)
         .map(|(i, file, checksum, by)| async move {
-            let same = digest(hashes, file).await.is_ok_and(|digests| {
+            let same = digest(hashes, &file).await.is_ok_and(|digests| {
                 let local = match by {
                     CompareBy::Md5 => hex::encode(digests.md5),
                     _ => hex::encode(digests.sha256),
@@ -467,7 +469,7 @@ impl Drop for StopOnDrop {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LocalFile {
     path: PathBuf,
     size: u64,
