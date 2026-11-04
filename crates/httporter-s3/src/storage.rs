@@ -236,6 +236,9 @@ impl S3Storage {
                 transfer_concurrency_max: TRANSFER_CONCURRENCY_MAX,
                 presign: false, // I4
                 read_only: false,
+                // A PUT replaces the object whole or not at all, and a multipart upload is only
+                // an object once completed (ruling Q55).
+                cut_uploads_delete_late: false,
             },
             list_slots: Semaphore::new(LIST_CONCURRENCY),
             delete_slots: Semaphore::new(DELETE_CONCURRENCY),

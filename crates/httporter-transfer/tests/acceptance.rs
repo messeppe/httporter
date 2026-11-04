@@ -30,7 +30,9 @@
 //! **Diagnostics.** `bunny_protocol_comparison` times every upload call (a pass-through
 //! [`Probe`]) over the default protocol setting and over "HTTP/1.1 only". The crash test probes its
 //! resume the same way, and for any file missing at the end says whether it was in flight at the
-//! kill, re-queued, uploaded again, and what a `GET` of it answers now.
+//! kill, re-queued, uploaded again, and what a `GET` of it answers now. It leaves the resumed
+//! engine running until the uploads the kill cut off have been checked on the zone (ruling Q55:
+//! at least `CHECK_AFTER` after their answer) and reports what the checks found.
 
 use std::collections::HashMap;
 use std::fs;
@@ -57,7 +59,8 @@ use httporter_s3::{
     part_size_for, sha256_hex, sign,
 };
 use httporter_transfer::{
-    Batch, Engine, SiteInfo, plan_delete, plan_upload, policy_to_resolution, resolve_uploads,
+    Batch, CHECK_AFTER, Engine, MAX_CHECKS, SiteInfo, plan_delete, plan_upload,
+    policy_to_resolution, resolve_uploads,
 };
 use tokio::runtime::Runtime;
 
@@ -647,7 +650,8 @@ struct Run {
 }
 
 /// Waits until the engine has nothing queued or running, taking a snapshot every `poll`, then
-/// (untimed) until the journal has caught up.
+/// (untimed) until the journal has caught up. Uploads waiting for their check (ruling Q55) are
+/// not waited for: see [`wait_for_checks`].
 async fn run_until_idle(
     engine: &Engine,
     started: Instant,
@@ -690,7 +694,10 @@ async fn run_until_idle(
     };
     let elapsed = started.elapsed();
     let settle = Instant::now();
-    while stalled.is_none() && engine.is_busy() && settle.elapsed() < Duration::from_secs(60) {
+    while stalled.is_none()
+        && (engine.pending_writes() > 0 || engine.pending_aborts() > 0)
+        && settle.elapsed() < Duration::from_secs(60)
+    {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     Run {
@@ -698,6 +705,46 @@ async fn run_until_idle(
         snapshot: engine.snapshot(),
         max_active,
         stalled,
+    }
+}
+
+/// How the checks of ruling Q55 went: how long they took to be done with, and whether they
+/// were (`false`: still pending at the time limit).
+struct Checks {
+    took: Duration,
+    finished: bool,
+}
+
+/// Waits until no upload waits for its check (ruling Q55) and whatever the checks sent again
+/// has gone and been checked in turn, then until the journal has caught up: the app left open
+/// after a resume. A report every 30 s.
+async fn wait_for_checks(engine: &Engine, limit: Duration, label: &str) -> Checks {
+    let started = Instant::now();
+    let mut last_report = Instant::now();
+    let finished = loop {
+        if !engine.is_busy() {
+            break true;
+        }
+        if started.elapsed() > limit {
+            break false;
+        }
+        if last_report.elapsed() >= Duration::from_secs(30) {
+            last_report = Instant::now();
+            let snap = engine.snapshot();
+            say!(
+                "  [{label}] {:>5.0} s: {} uploads wait for their check, {} queued or running; checked {}, re-sent {}",
+                secs(started.elapsed()),
+                engine.pending_checks(),
+                snap.active_count + snap.queued_count,
+                snap.rechecked.checked,
+                snap.rechecked.resent
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    Checks {
+        took: started.elapsed(),
+        finished,
     }
 }
 
@@ -1475,6 +1522,7 @@ struct ChildRun {
     /// The child's own count of files done, at its last report before the kill.
     done_at_kill: u64,
     killed_after: Duration,
+    killed_at: Instant,
     /// The remote paths of the child's jobs in flight, at most 250 ms before the kill.
     in_flight: Vec<String>,
 }
@@ -1530,6 +1578,7 @@ fn run_child_and_kill(journal: &Path, prefix: &RemotePath, site: &SiteId) -> Chi
         .unwrap_or_else(|e| panic!("the child could not be killed: {e}"));
     let _ = child.0.wait();
     let killed_after = spawned.elapsed();
+    let killed_at = Instant::now();
     drop(child);
     for reader in readers.into_iter().flatten() {
         let _ = reader.join();
@@ -1548,6 +1597,7 @@ fn run_child_and_kill(journal: &Path, prefix: &RemotePath, site: &SiteId) -> Chi
         submitted,
         done_at_kill,
         killed_after,
+        killed_at,
         in_flight,
     }
 }
@@ -1613,9 +1663,13 @@ fn in_flight_file(journal: &Path) -> PathBuf {
     journal.with_extension("in-flight.txt")
 }
 
+/// The words of an upload's "possibly sent" mark in the journal's multipart column (ruling Q55).
+const UPLOAD_SENT: &str = "httporter:upload-sent";
+
 /// The app's next start and Resume on the banner: the journal opened (finished jobs let go), the
 /// unfinished jobs counted, then `resume_from_journal` with the site's client
-/// (`Transfers::resume_journal`). Then every local file is checked on the zone.
+/// (`Transfers::resume_journal`). The app is left open until the uploads the kill cut off have
+/// been checked on the zone (ruling Q55). Then every local file is checked on the zone.
 async fn resume_and_verify(
     h: &Harness,
     site: &Site,
@@ -1632,6 +1686,19 @@ async fn resume_and_verify(
     // Diagnostics: which jobs the journal held unfinished, and every upload call of the resume.
     let unfinished: Vec<String> = records
         .iter()
+        .filter_map(|record| match &record.job {
+            Job::Upload { remote, .. } => Some(remote.as_str().to_owned()),
+            _ => None,
+        })
+        .collect();
+    let marked: Vec<String> = records
+        .iter()
+        .filter(|record| {
+            record
+                .multipart
+                .as_ref()
+                .is_some_and(|mark| mark.upload_id == UPLOAD_SENT)
+        })
         .filter_map(|record| match &record.job {
             Job::Upload { remote, .. } => Some(remote.as_str().to_owned()),
             _ => None,
@@ -1679,6 +1746,14 @@ async fn resume_and_verify(
         "s5 resume",
     )
     .await;
+    let waiting = engine.pending_checks();
+    let checks = wait_for_checks(
+        &engine,
+        CHECK_AFTER * (u32::from(MAX_CHECKS) + 1) + Duration::from_secs(300),
+        "s5 checks",
+    )
+    .await;
+    let checked = engine.snapshot();
     let left_after = journal
         .unfinished()
         .map_or(usize::MAX, |records| records.len());
@@ -1708,11 +1783,60 @@ async fn resume_and_verify(
         child.done_at_kill
     );
     say!(
-        "  resume: {resumed} jobs re-queued; {} done, {} failed in {:.1} s; {left_after} unfinished in the journal afterwards",
+        "  resume: {resumed} jobs re-queued; {} done, {} failed in {:.1} s",
         s.files_done,
         s.files_failed,
         secs(run.elapsed)
     );
+    // Ruling Q55: the uploads the kill cut off, and their checks.
+    let resent_after: Vec<f64> = child
+        .in_flight
+        .iter()
+        .filter_map(|path| probe.answered_for(path).first().copied())
+        .map(|answered| secs(answered.saturating_duration_since(child.killed_at)))
+        .collect();
+    let earliest = resent_after.iter().copied().fold(f64::INFINITY, f64::min);
+    let latest = resent_after.iter().copied().fold(0.0, f64::max);
+    say!(
+        "  cut off by the kill: {} in flight, {} marked in the journal ({} of the in-flight ones); sent again and answered {:.0}-{:.0} s after the kill",
+        child.in_flight.len(),
+        marked.len(),
+        child
+            .in_flight
+            .iter()
+            .filter(|path| marked.contains(path))
+            .count(),
+        earliest,
+        latest
+    );
+    say!(
+        "  checks (ruling Q55): {waiting} waited when the resume ended; done with {:.0} s later (finished: {}); checked {}, re-sent {}, {} listings; afterwards {} done, {} failed; {left_after} unfinished in the journal",
+        secs(checks.took),
+        checks.finished,
+        checked.rechecked.checked,
+        checked.rechecked.resent,
+        probe.lists.load(Ordering::SeqCst),
+        checked.files_done,
+        checked.files_failed
+    );
+    for path in &child.in_flight {
+        let answered = probe.answered_for(path);
+        if answered.len() > 1 {
+            let after: Vec<String> = answered
+                .iter()
+                .map(|at| {
+                    format!(
+                        "{:.0} s",
+                        secs(at.saturating_duration_since(child.killed_at))
+                    )
+                })
+                .collect();
+            say!(
+                "    re-sent after its check: {path}: answered {} after the kill",
+                after.join(", then ")
+            );
+        }
+    }
     say!(
         "  of the {} files already on the zone when resuming, {reuploaded} were uploaded again (jobs in flight at the kill, or whose 'done' had not reached the journal)",
         before.len()
@@ -1739,17 +1863,18 @@ async fn resume_and_verify(
     if let Some(why) = &run.stalled {
         say!("  STALLED: {why}");
     }
-    report_failures(s);
+    report_failures(&checked);
     let pass = left > 0
         && banner.total == left
         && resumed == left
         && run.stalled.is_none()
-        && s.files_failed == 0
+        && checks.finished
+        && checked.files_failed == 0
         && left_after == 0
         && verified.missing.is_empty()
         && verified.wrong_size.is_empty();
     say!(
-        "  target S5 (offers to resume, finishes, nothing failed, completed files not sent again): {}",
+        "  target S5 (offers to resume, finishes, nothing failed, completed files not sent again, every file on the zone): {}",
         verdict(pass)
     );
     assert!(
@@ -1762,7 +1887,8 @@ async fn resume_and_verify(
     );
     assert_eq!(resumed, left, "not every unfinished job was resumed");
     assert!(run.stalled.is_none(), "the resumed upload stalled");
-    assert_eq!(s.files_failed, 0, "resumed uploads failed");
+    assert!(checks.finished, "the checks did not finish");
+    assert_eq!(checked.files_failed, 0, "resumed uploads failed");
     assert_eq!(left_after, 0, "the journal still holds unfinished jobs");
     assert!(
         verified.missing.is_empty() && verified.wrong_size.is_empty(),
@@ -2251,14 +2377,17 @@ fn new_folder_both() {
 // Diagnostics: where an upload's time goes
 // ---------------------------------------------------------------------------------------------
 
-/// One upload call a [`Probe`] saw: the remote path, how long it took, and its error.
-type UploadCall = (String, Duration, Option<String>);
+/// One upload call a [`Probe`] saw: the remote path, when it was answered, how long it took,
+/// and its error.
+type UploadCall = (String, Instant, Duration, Option<String>);
 
 /// A pass-through client that times every upload call (one attempt of a job: the engine retries
-/// by calling again) and notes its path and how it ended. Nothing else changes.
+/// by calling again) and notes its path and how it ended, and counts the listings (during a
+/// resume, the engine's checks of ruling Q55). Nothing else changes.
 struct Probe {
     inner: Arc<dyn StorageProvider>,
     uploads: Mutex<Vec<UploadCall>>,
+    lists: AtomicU64,
 }
 
 impl Probe {
@@ -2266,6 +2395,7 @@ impl Probe {
         Self {
             inner,
             uploads: Mutex::new(Vec::new()),
+            lists: AtomicU64::new(0),
         }
     }
 
@@ -2275,14 +2405,25 @@ impl Probe {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|(called, _, _)| called == path)
-            .map(|(_, _, error)| error.clone().unwrap_or_else(|| "Ok".to_owned()))
+            .filter(|(called, _, _, _)| called == path)
+            .map(|(_, _, _, error)| error.clone().unwrap_or_else(|| "Ok".to_owned()))
+            .collect()
+    }
+
+    /// When each upload call for `path` that succeeded was answered, in order.
+    fn answered_for(&self, path: &str) -> Vec<Instant> {
+        self.uploads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(called, _, _, error)| called == path && error.is_none())
+            .map(|(_, answered, _, _)| *answered)
             .collect()
     }
 
     fn summary(&self) -> String {
         let uploads = self.uploads.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut times: Vec<Duration> = uploads.iter().map(|(_, took, _)| *took).collect();
+        let mut times: Vec<Duration> = uploads.iter().map(|(_, _, took, _)| *took).collect();
         times.sort();
         let at = |share: f64| {
             let last = times.len().saturating_sub(1) as f64;
@@ -2291,7 +2432,7 @@ impl Probe {
                 .map_or(0, Duration::as_millis)
         };
         let mut errors: Vec<(String, usize)> = Vec::new();
-        for (_, _, error) in uploads.iter() {
+        for (_, _, _, error) in uploads.iter() {
             if let Some(error) = error {
                 match errors.iter_mut().find(|(seen, _)| seen == error) {
                     Some((_, count)) => *count += 1,
@@ -2321,6 +2462,7 @@ impl StorageProvider for Probe {
     }
 
     async fn list(&self, dir: &RemotePath) -> Result<Listing, ProviderError> {
+        self.lists.fetch_add(1, Ordering::SeqCst);
         self.inner.list(dir).await
     }
 
@@ -2336,7 +2478,12 @@ impl StorageProvider for Probe {
         self.uploads
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push((path.as_str().to_owned(), started.elapsed(), outcome));
+            .push((
+                path.as_str().to_owned(),
+                Instant::now(),
+                started.elapsed(),
+                outcome,
+            ));
         result
     }
 

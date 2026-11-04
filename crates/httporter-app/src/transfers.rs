@@ -130,6 +130,8 @@ struct Feed {
     taskbar_tried: bool,
     taskbar_shown: Option<TaskbarState>,
     taskbar_pace: Throttle,
+    /// How many cut-off uploads the status line has said were sent again (ruling Q55).
+    resent_told: u64,
 }
 
 impl Default for Feed {
@@ -142,6 +144,7 @@ impl Default for Feed {
             taskbar_tried: false,
             taskbar_shown: None,
             taskbar_pace: Throttle::new(TASKBAR_EVERY),
+            resent_told: 0,
         }
     }
 }
@@ -928,6 +931,13 @@ impl Transfers {
         }
 
         let taskbar = self.taskbar_update(&mut state.feed, &snapshot, hwnd);
+        // Uploads cut off mid-way are checked on their site; only when some had gone and were
+        // sent again does the status line say so (ruling Q55).
+        let rechecked = snapshot.rechecked;
+        let resent_note = (rechecked.resent > state.feed.resent_told).then(|| {
+            state.feed.resent_told = rechecked.resent;
+            copy::rechecked(rechecked.checked, rechecked.resent)
+        });
         drop(state);
 
         apply_drawer(ui, &drawer_view(&snapshot, Utc::now()));
@@ -935,6 +945,9 @@ impl Transfers {
         let notice =
             (snapshot.journal_errors > 0).then(|| copy::journal_errors(snapshot.journal_errors));
         self.link.set_notice(ui, notice);
+        if let Some(note) = resent_note {
+            self.link.status(note);
+        }
         if let Some((progress, wanted)) = taskbar {
             progress.set(wanted);
         }

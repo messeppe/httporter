@@ -341,6 +341,9 @@ pub(crate) enum Work {
         id: JobId,
         local: PathBuf,
         remote: RemotePath,
+        /// The journal's count of updates dealt with once it holds this upload's "possibly
+        /// sent" mark, which must be there before anything is sent (ruling Q55).
+        journalled: Option<u64>,
     },
     Download {
         id: JobId,
@@ -469,7 +472,16 @@ pub(crate) fn run_unit(inner: Arc<Inner>, spec: UnitSpec) -> impl Future<Output 
 
 async fn run(inner: &Arc<Inner>, spec: &UnitSpec, part: Option<&PartSlot>) {
     match &spec.work {
-        Work::Upload { id, local, remote } => {
+        Work::Upload {
+            id,
+            local,
+            remote,
+            journalled,
+        } => {
+            // A crash from here on leaves the upload marked possibly sent (ruling Q55).
+            if let Some(mark) = journalled {
+                inner.journalled(*mark).await;
+            }
             let result = upload(inner, spec, *id, local, remote).await;
             inner.finish(spec.unit, *id, result);
         }

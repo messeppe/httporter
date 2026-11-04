@@ -31,10 +31,18 @@ pub struct Capabilities {
     /// Pre-signed links can be generated.
     pub presign: bool,
     pub read_only: bool,
+    /// An upload cut off part way (the app killed or closed, its connection lost) can still
+    /// delete its path later, when the service gets round to ending it, even after a newer
+    /// upload of the same path has been answered. Bunny Storage does, up to about a minute after
+    /// the cut-off upload's last bytes (ruling Q55). The engine then checks such an upload on
+    /// the site once it has been sent again, after a settle delay, and sends it once more if it
+    /// has gone. Off for a service whose uploads replace a file whole or not at all (S3).
+    pub cut_uploads_delete_late: bool,
 }
 
 impl Default for Capabilities {
-    /// The most conservative assumptions: nothing optional is supported.
+    /// The most conservative assumptions: nothing optional is supported, and an upload that
+    /// was answered stays.
     fn default() -> Self {
         Self {
             checksum_in_listing: None,
@@ -47,6 +55,7 @@ impl Default for Capabilities {
             transfer_concurrency_max: 32,
             presign: false,
             read_only: false,
+            cut_uploads_delete_late: false,
         }
     }
 }
@@ -68,5 +77,6 @@ mod tests {
         assert_eq!(c.transfer_concurrency_max, 32);
         assert!(!c.presign);
         assert!(!c.read_only);
+        assert!(!c.cut_uploads_delete_late);
     }
 }

@@ -1,4 +1,5 @@
 //! Resume after a crash, offline pauses, damaged or changing files and a full disk (Task 14),
+//! and uploads a crash cut off on a service that deletes them late (ruling Q55),
 //! against `MockProvider` on a paused tokio clock: every wait below is virtual time.
 
 use std::collections::{HashMap, HashSet};
@@ -13,10 +14,13 @@ use futures_util::StreamExt;
 use httporter_core::{
     ByteStream, Capabilities, Checksum, ChecksumKind, EngineSnapshot, EngineState, Job, JobId,
     JobRecord, JobState, Journal, JournalError, Listing, MemoryJournal, MockOp, MockProvider,
-    MultipartProgress, ProviderError, RemotePath, SiteId, StorageProvider, TransferSettings,
-    UploadOptions, UploadSource,
+    MultipartProgress, ProviderError, Rechecked, RemotePath, SiteId, StorageProvider,
+    TransferSettings, UploadOptions, UploadSource,
 };
-use httporter_transfer::{Batch, Engine, FileHashes, LocalFiles, SiteInfo, hash_file, messages};
+use httporter_platform::SqliteJournal;
+use httporter_transfer::{
+    Batch, CHECK_AFTER, Engine, FileHashes, LocalFiles, MAX_CHECKS, SiteInfo, hash_file, messages,
+};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
@@ -203,6 +207,39 @@ fn count(journal: &MemoryJournal, state: JobState) -> usize {
         .count()
 }
 
+/// The words of an upload's "possibly sent" mark in the journal (ruling Q55), part of its file
+/// format.
+const UPLOAD_SENT: &str = "httporter:upload-sent";
+
+/// The mark itself, as the engine writes it.
+fn upload_sent() -> MultipartProgress {
+    MultipartProgress {
+        upload_id: UPLOAD_SENT.into(),
+        part_size: 0,
+        parts: Vec::new(),
+        file: None,
+    }
+}
+
+/// A service that can delete a cut-off upload's path late, as Bunny Storage does (ruling Q55).
+fn deletes_late() -> Capabilities {
+    Capabilities {
+        cut_uploads_delete_late: true,
+        ..Capabilities::default()
+    }
+}
+
+/// The remote paths of the unfinished records marked as possibly sent uploads, in id order.
+fn marked(journal: &MemoryJournal) -> Vec<String> {
+    journal
+        .unfinished()
+        .unwrap()
+        .iter()
+        .filter(|r| matches!(r.job, Job::Upload { .. }) && r.multipart == Some(upload_sent()))
+        .map(|r| remote_of(&r.job))
+        .collect()
+}
+
 fn offline() -> EngineState {
     EngineState::Offline {
         site: SITE_NAME.into(),
@@ -225,6 +262,14 @@ struct Faults {
     /// Every upload of this remote path gets no answer (a proxy that resets this one file),
     /// while everything else, the probe included, gets through.
     stubborn: Option<String>,
+    /// Bunny Storage ending an upload that was cut off (ruling Q55): the next this many uploads
+    /// of each of these paths that succeed are deleted [`Self::delete_after`] later, as the
+    /// service deletes the path when it gets round to the cut-off one.
+    delete_late: HashMap<String, usize>,
+    delete_after: Duration,
+    /// The journal to look at as each upload starts: one sent before the journal had its
+    /// "possibly sent" mark is noted (ruling Q55).
+    journal: Option<Arc<MemoryJournal>>,
 }
 
 /// Forwards to a mock, with faults a `MockProvider` can't make on its own, and counts the
@@ -236,6 +281,8 @@ struct Faulty {
     uploads: Mutex<HashMap<String, usize>>,
     /// `reachable` calls, whatever they answer.
     probes: AtomicUsize,
+    /// Uploads that started while [`Faults::journal`] had no "possibly sent" mark for them.
+    unmarked: Mutex<Vec<String>>,
 }
 
 impl Faulty {
@@ -245,6 +292,7 @@ impl Faulty {
             faults: Mutex::new(faults),
             uploads: Mutex::new(HashMap::new()),
             probes: AtomicUsize::new(0),
+            unmarked: Mutex::new(Vec::new()),
         }
     }
 
@@ -312,6 +360,12 @@ impl StorageProvider for Faulty {
             .unwrap()
             .entry(path.as_str().to_owned())
             .or_default() += 1;
+        let journal = self.faults.lock().unwrap().journal.clone();
+        if let Some(journal) = journal
+            && !marked(&journal).contains(&path.as_str().to_owned())
+        {
+            self.unmarked.lock().unwrap().push(path.as_str().to_owned());
+        }
         self.down()?;
         let stubborn = self.faults.lock().unwrap().stubborn.clone();
         if stubborn.as_deref() == Some(path.as_str()) {
@@ -327,7 +381,26 @@ impl StorageProvider for Faulty {
                 detail: "bad gateway".into(),
             });
         }
-        self.mock.upload(path, source, opts).await
+        let stored = self.mock.upload(path, source, opts).await;
+        let late = {
+            let mut faults = self.faults.lock().unwrap();
+            let after = faults.delete_after;
+            match faults.delete_late.get_mut(path.as_str()) {
+                Some(left) if stored.is_ok() && *left > 0 => {
+                    *left -= 1;
+                    Some(after)
+                }
+                _ => None,
+            }
+        };
+        if let Some(after) = late {
+            let (mock, path) = (self.mock.clone(), path.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                let _ = mock.delete_file(&path).await;
+            });
+        }
+        stored
     }
     async fn download(&self, path: &RemotePath) -> Result<ByteStream, ProviderError> {
         self.down()?;
@@ -1382,4 +1455,363 @@ async fn cancels_reach_the_journal_in_chunks() {
     assert_eq!(journal.largest.load(Ordering::SeqCst), 512);
     assert!(journal.records.unfinished().unwrap().is_empty());
     assert_eq!(engine.snapshot().journal_errors, 0);
+}
+
+// ---- Ruling Q55: uploads a crash cut off, on a service that deletes them late ----
+
+/// Journals `jobs` on `site()` as a crash leaves uploads that were in flight on such a service:
+/// queued, marked as possibly sent.
+fn left_in_flight(journal: &MemoryJournal, jobs: Vec<Job>) {
+    let mut records = queued_records(&site(), jobs);
+    journal.insert(&mut records).unwrap();
+    for record in &records {
+        journal
+            .set_multipart(record.id, Some(&upload_sent()))
+            .unwrap();
+    }
+}
+
+/// Acceptance S5: the uploads in flight when the app is killed are marked in the journal. Sent
+/// again on resume and answered, they are then deleted by the site as it ends the killed
+/// uploads (50 s on; Bunny's live probes put it about a minute after the cut). Each waits,
+/// counted done, until its lane has finished and [`CHECK_AFTER`] has passed, is found missing in
+/// its folder's one listing, is sent once more and checked again. The uploads that never
+/// started are sent once and never looked for, and the journal says done only once checked.
+#[tokio::test(start_paused = true)]
+async fn uploads_a_crash_cut_off_are_checked_after_the_resume_and_sent_again_if_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(MemoryJournal::new());
+    let mock = Arc::new(MockProvider::new(deletes_late()));
+    mock.set_latency(MockOp::Upload, Duration::from_secs(1));
+    let jobs = upload_jobs(dir.path(), 20, 10);
+    let paths: Vec<String> = jobs.iter().map(remote_of).collect();
+
+    let a = engine_on(journal.clone(), with(4));
+    let start = Instant::now();
+    a.submit(batch(mock.clone(), jobs)).unwrap();
+    // Two rounds of 4 are done and the third is under way.
+    tokio::time::sleep_until(start + secs(2.5)).await;
+    assert_eq!(a.snapshot().files_done, 8);
+    drop(a);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let cut = marked(&journal);
+    assert_eq!(cut, paths[8..12], "the four in flight are marked");
+    assert_eq!(journal.unfinished().unwrap().len(), 12);
+
+    let site = Arc::new(Faulty::new(
+        mock.clone(),
+        Faults {
+            delete_late: cut.iter().map(|path| (path.clone(), 1)).collect(),
+            delete_after: Duration::from_secs(50),
+            ..Faults::default()
+        },
+    ));
+    let b = engine_on(journal.clone(), with(4));
+    assert_eq!(b.resume_from_journal(&only_site(site.clone())), 12);
+    let resumed = Instant::now();
+    let s = wait_for(&b, "the resumed uploads to be answered", |s| {
+        s.files_done == 12 && !b.has_work() && b.pending_writes() == 0
+    })
+    .await;
+    assert!(resumed.elapsed() < secs(5.0), "{:?}", resumed.elapsed());
+    assert_eq!((s.files_failed, s.state), (0, EngineState::Idle));
+    assert_eq!(
+        b.pending_checks(),
+        4,
+        "the four sent again wait for their check"
+    );
+    assert_eq!(
+        marked(&journal),
+        cut,
+        "not done in the journal before the check"
+    );
+    assert_eq!(b.unfinished_count(), 0, "held, not offered to resume");
+    assert_eq!(mock.calls(MockOp::List), 0);
+
+    let s = wait_idle(&b).await;
+    assert_eq!((s.files_done, s.files_failed), (12, 0), "{}", brief(&s));
+    assert_eq!(
+        s.rechecked,
+        Rechecked {
+            checked: 8,
+            resent: 4
+        },
+        "four missing at the first check, four there at the second"
+    );
+    assert_eq!(mock.calls(MockOp::List), 2, "one listing of up/ per round");
+    assert!(
+        resumed.elapsed() >= CHECK_AFTER * 2,
+        "each round waited the settle delay: {:?}",
+        resumed.elapsed()
+    );
+    for path in &paths {
+        assert!(mock.contents(&p(path)).is_some(), "{path} is on the site");
+    }
+    for path in &paths[8..] {
+        let sent = if cut.contains(path) { 2 } else { 1 };
+        assert_eq!(site.uploads_of(path), sent, "{path}");
+    }
+    assert!(journal.unfinished().unwrap().is_empty());
+    assert_eq!(count(&journal, JobState::Done), 20);
+}
+
+/// A journal in memory on a slow disk: every write takes 200 ms (of real time, on the writer's
+/// blocking thread).
+struct SlowDisk(Arc<MemoryJournal>);
+
+impl SlowDisk {
+    fn wait() {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+impl Journal for SlowDisk {
+    fn insert(&self, records: &mut [JobRecord]) -> Result<(), JournalError> {
+        self.0.insert(records)
+    }
+    fn set_state(&self, id: i64, state: JobState, error: Option<&str>) -> Result<(), JournalError> {
+        Self::wait();
+        self.0.set_state(id, state, error)
+    }
+    fn set_multipart(&self, id: i64, mp: Option<&MultipartProgress>) -> Result<(), JournalError> {
+        Self::wait();
+        self.0.set_multipart(id, mp)
+    }
+    fn apply(&self, updates: &[httporter_core::JournalUpdate]) -> Result<(), JournalError> {
+        Self::wait();
+        self.0.apply(updates)
+    }
+    fn unfinished(&self) -> Result<Vec<JobRecord>, JournalError> {
+        self.0.unfinished()
+    }
+    fn clear_finished(&self) -> Result<(), JournalError> {
+        self.0.clear_finished()
+    }
+    fn discard_unfinished(&self) -> Result<(), JournalError> {
+        self.0.discard_unfinished()
+    }
+}
+
+/// Ruling Q55: on such a service an upload sent for the first time is marked in the journal
+/// before its request goes out (the unit waits for the write, here on a slow disk), and is done
+/// as soon as it is answered: never held for a check, never looked for.
+#[tokio::test(start_paused = true)]
+async fn an_upload_sent_once_is_marked_before_it_goes_and_never_looked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(MemoryJournal::new());
+    let mock = Arc::new(MockProvider::new(deletes_late()));
+    mock.set_latency(MockOp::Upload, Duration::from_secs(1));
+    let site = Arc::new(Faulty::new(
+        mock.clone(),
+        Faults {
+            journal: Some(journal.clone()),
+            ..Faults::default()
+        },
+    ));
+    let e = engine_on(Arc::new(SlowDisk(journal.clone())), with(4));
+    e.submit(batch(site.clone(), upload_jobs(dir.path(), 10, 10)))
+        .unwrap();
+    let s = wait_for(&e, "the uploads", |s| s.files_done == 10 && !e.has_work()).await;
+    assert_eq!(e.pending_checks(), 0);
+    assert_eq!(site.unmarked.lock().unwrap().clone(), Vec::<String>::new());
+    tokio::time::sleep(CHECK_AFTER * 2).await;
+    let s2 = wait_idle(&e).await;
+    assert_eq!((s.files_failed, s2.files_done), (0, 10));
+    assert_eq!(s2.rechecked, Rechecked::default());
+    assert_eq!(mock.calls(MockOp::List), 0, "nothing was looked for");
+    assert_eq!(count(&journal, JobState::Done), 10);
+    let records = journal.records();
+    assert!(
+        records.iter().all(|r| r.multipart == Some(upload_sent())),
+        "each was marked before it went"
+    );
+
+    // A service that answers for its uploads gets neither the mark nor a check.
+    let journal = Arc::new(MemoryJournal::new());
+    let plain = Arc::new(MockProvider::new(Capabilities::default()));
+    let e = engine_on(journal.clone(), with(4));
+    e.submit(batch(
+        plain.clone(),
+        upload_jobs(&dir.path().join("p"), 4, 10),
+    ))
+    .unwrap();
+    wait_idle(&e).await;
+    assert!(journal.records().iter().all(|r| r.multipart.is_none()));
+    assert_eq!(plain.calls(MockOp::List), 0);
+}
+
+/// Ruling Q55: a file the site keeps deleting after answering for it is sent again after each
+/// check that misses it, and fails at the [`MAX_CHECKS`]th, with the engine's words for it.
+#[tokio::test(start_paused = true)]
+async fn a_file_the_site_keeps_losing_fails_after_the_last_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(MemoryJournal::new());
+    left_in_flight(&journal, upload_jobs(dir.path(), 1, 10));
+    let mock = Arc::new(MockProvider::new(deletes_late()));
+    let site = Arc::new(Faulty::new(
+        mock.clone(),
+        Faults {
+            delete_late: [("up/f0.txt".to_owned(), 99)].into(),
+            delete_after: Duration::from_secs(50),
+            ..Faults::default()
+        },
+    ));
+    let e = engine_on(journal.clone(), TransferSettings::default());
+    assert_eq!(e.resume_from_journal(&only_site(site.clone())), 1);
+    let s = wait_idle(&e).await;
+    assert_eq!((s.files_done, s.files_failed), (0, 1), "{}", brief(&s));
+    assert_eq!(
+        s.failed[0].error.as_deref(),
+        Some(messages::LOST_AFTER_UPLOAD)
+    );
+    let checks = u64::from(MAX_CHECKS);
+    assert_eq!(site.uploads_of("up/f0.txt") as u64, checks);
+    assert_eq!(
+        s.rechecked,
+        Rechecked {
+            checked: checks,
+            resent: checks - 1
+        }
+    );
+    assert_eq!(journal.records()[0].state, JobState::Failed);
+
+    // Retry starts it afresh: the site keeps it this time.
+    site.faults.lock().unwrap().delete_late.clear();
+    e.retry_all_failed();
+    let s = wait_idle(&e).await;
+    assert_eq!((s.files_done, s.files_failed), (1, 0), "{}", brief(&s));
+    assert!(mock.contents(&p("up/f0.txt")).is_some());
+    assert_eq!(journal.records()[0].state, JobState::Done);
+}
+
+/// Ruling Q55: closing doesn't wait for a check, and the quit alert doesn't ask about one. An
+/// engine that goes while uploads wait for theirs leaves their records unfinished and marked;
+/// the next start sends them again and checks them (here the site had deleted them meanwhile).
+#[tokio::test(start_paused = true)]
+async fn a_quit_before_the_check_leaves_it_to_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(MemoryJournal::new());
+    left_in_flight(&journal, upload_jobs(dir.path(), 2, 10));
+    let mock = Arc::new(MockProvider::new(deletes_late()));
+    let site = Arc::new(Faulty::new(
+        mock.clone(),
+        Faults {
+            delete_late: [("up/f0.txt".to_owned(), 1), ("up/f1.txt".to_owned(), 1)].into(),
+            delete_after: Duration::from_secs(50),
+            ..Faults::default()
+        },
+    ));
+    let b = engine_on(journal.clone(), TransferSettings::default());
+    assert_eq!(b.resume_from_journal(&only_site(site.clone())), 2);
+    wait_for(&b, "the uploads", |s| s.files_done == 2 && !b.has_work()).await;
+    assert_eq!(b.pending_checks(), 2);
+    assert!(!b.has_work(), "nothing for the quit alert to ask about");
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(mock.contents(&p("up/f0.txt")), None, "deleted late");
+    drop(b);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(marked(&journal).len(), 2, "still unfinished and marked");
+
+    let c = engine_on(journal.clone(), TransferSettings::default());
+    assert_eq!(c.unfinished_count(), 2);
+    assert_eq!(c.resume_from_journal(&only_site(site.clone())), 2);
+    let s = wait_idle(&c).await;
+    assert_eq!((s.files_done, s.files_failed), (2, 0), "{}", brief(&s));
+    assert_eq!(
+        s.rechecked,
+        Rechecked {
+            checked: 2,
+            resent: 0
+        }
+    );
+    assert!(mock.contents(&p("up/f0.txt")).is_some());
+    assert!(mock.contents(&p("up/f1.txt")).is_some());
+    assert_eq!(site.uploads_of("up/f0.txt"), 2);
+    assert!(journal.unfinished().unwrap().is_empty());
+}
+
+/// Ruling Q55: an upload cut off in this run (Pause All, then Resume) is checked once sent
+/// again, as one a crash cut off is.
+#[tokio::test(start_paused = true)]
+async fn an_upload_a_pause_cut_off_is_checked_once_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(MemoryJournal::new());
+    let mock = Arc::new(MockProvider::new(deletes_late()));
+    mock.set_latency(MockOp::Upload, Duration::from_secs(10));
+    let e = engine_on(journal.clone(), with(4));
+    e.submit(batch(mock.clone(), upload_jobs(dir.path(), 3, 10)))
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(e.snapshot().active_count, 3);
+    e.pause_all();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    e.resume_all();
+    let s = wait_idle(&e).await;
+    assert_eq!((s.files_done, s.files_failed), (3, 0), "{}", brief(&s));
+    assert_eq!(
+        s.rechecked,
+        Rechecked {
+            checked: 3,
+            resent: 0
+        }
+    );
+    assert_eq!(mock.calls(MockOp::List), 1);
+    assert_eq!(count(&journal, JobState::Done), 3);
+}
+
+/// Ruling Q55: the "possibly sent" mark is kept in the SQLite journal's multipart column and
+/// read back after a reopen. A record without it, as every journal written before has them,
+/// still opens and resumes as before: sent once, never looked for.
+#[tokio::test(start_paused = true)]
+async fn the_upload_mark_survives_sqlite_and_unmarked_records_resume_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("httporter.db");
+    let journal: Arc<dyn Journal> = Arc::new(SqliteJournal::open(&path).unwrap());
+    let mut older = queued_records(&site(), upload_jobs(&dir.path().join("old"), 1, 10));
+    if let Job::Upload { remote, .. } = &mut older[0].job {
+        *remote = p("up/older.txt");
+    }
+    journal.insert(&mut older).unwrap();
+    let mock = Arc::new(MockProvider::new(deletes_late()));
+    mock.set_latency(MockOp::Upload, Duration::from_secs(10));
+    let a = engine_on(journal.clone(), with(4));
+    a.submit(batch(mock.clone(), upload_jobs(dir.path(), 2, 10)))
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for(&a, "the marks to be written", |s| {
+        s.active_count == 2 && a.pending_writes() == 0
+    })
+    .await;
+    drop(a);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drop(journal);
+
+    let journal: Arc<dyn Journal> = Arc::new(SqliteJournal::open(&path).unwrap());
+    let left = journal.unfinished().unwrap();
+    let marks: Vec<(String, Option<MultipartProgress>)> = left
+        .iter()
+        .map(|r| (remote_of(&r.job), r.multipart.clone()))
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("up/older.txt".to_owned(), None),
+            ("up/f0.txt".to_owned(), Some(upload_sent())),
+            ("up/f1.txt".to_owned(), Some(upload_sent())),
+        ]
+    );
+
+    let b = engine_on(journal.clone(), with(4));
+    assert_eq!(b.resume_from_journal(&only_site(mock.clone())), 3);
+    let s = wait_idle(&b).await;
+    assert_eq!((s.files_done, s.files_failed), (3, 0), "{}", brief(&s));
+    assert_eq!(
+        s.rechecked,
+        Rechecked {
+            checked: 2,
+            resent: 0
+        },
+        "only the two marked ones"
+    );
+    assert!(journal.unfinished().unwrap().is_empty());
 }

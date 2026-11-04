@@ -36,3 +36,7 @@ pub fn local_file(path: &Path, error: &io::Error) -> String {
 /// The site refused one file while it still lets its folder be listed: a key or a bucket policy
 /// that allows some paths only (review I5).
 pub const ACCESS_DENIED: &str = "access to this file was denied";
+
+/// An upload sent again after a request for it was cut off was answered as stored, then not
+/// found on the site (or found with another size) when checked, three times over (ruling Q55).
+pub const LOST_AFTER_UPLOAD: &str = "the site accepted the file but didn't keep it, three times";

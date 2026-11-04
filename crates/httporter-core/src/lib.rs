@@ -28,6 +28,6 @@ pub use settings::{ConflictPolicy, HttpProtocol, ProxyMode, TransferSettings};
 pub use site::{AccountId, ProviderKind, S3Preset, S3Site, SiteId, SiteRecord};
 pub use transfer::{
     BatchSummary, CompareBy, Conflict, DeleteSummary, Direction, EngineSnapshot, EngineState, Job,
-    JobId, JobKind, JobView, Resolution,
+    JobId, JobKind, JobView, Rechecked, Resolution,
 };
 pub use walk::walk;

@@ -252,6 +252,11 @@ impl BunnyStorage {
                 transfer_concurrency_max: TRANSFER_CONCURRENCY_MAX,
                 presign: false,
                 read_only: false,
+                // Live probe (ruling Q55, `tests/live.rs`): when Bunny ends an upload cut off
+                // mid-body (at once when it sees the connection close, about 60 s after the last
+                // bytes when it doesn't), it deletes the path, a newer upload answered 201
+                // included. Acceptance S5 lost 2-3 files of a resume this way.
+                cut_uploads_delete_late: true,
             },
             list_slots: Semaphore::new(LIST_CONCURRENCY),
             delete_slots: Semaphore::new(delete_concurrency),

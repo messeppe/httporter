@@ -686,6 +686,7 @@ async fn capabilities_match_bunny_limits() {
             transfer_concurrency_max: 96,
             presign: false,
             read_only: false,
+            cut_uploads_delete_late: true,
         }
     );
 

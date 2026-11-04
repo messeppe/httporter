@@ -19,16 +19,32 @@
 //! An upload the user cancels or discards is given up on the service
 //! ([`StorageProvider::abort_multipart`]) by a task the app waits for as it closes
 //! ([`Engine::pending_aborts`]), so its stored parts aren't left to be billed.
+//!
+//! On a service that can delete a cut-off upload's path late
+//! ([`Capabilities::cut_uploads_delete_late`](httporter_core::Capabilities), Bunny Storage), an
+//! upload is marked in the journal as possibly sent before its first request goes out, the way a
+//! delete is: the [`UPLOAD_SENT`] marker in the multipart column, which such an upload doesn't
+//! otherwise use (ruling Q55). The unit waits until the journal has the mark before it sends.
+//! An upload sent again after an earlier request for it may have been cut off (a crash or a quit,
+//! read back from the mark, or a pause, an offline spell or an auth stop in this run) is not done
+//! in the journal when the service answers: it waits, counted done in the drawer, until its
+//! site's lane has nothing left to do and [`CHECK_AFTER`] has passed since that answer, and is
+//! then looked for in its folder's listing, one listing per folder. There with its size, it is
+//! done; missing or of another size, it is sent again, and after [`MAX_CHECKS`] such checks it
+//! fails. A quit before the check leaves its record unfinished, so the next start sends it and
+//! checks it again. An upload sent for the first time is never checked.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use chrono::Utc;
 use httporter_core::{
     BatchSummary, Checksum, Direction, EngineSnapshot, EngineState, FileStamp, Job, JobId, JobKind,
-    JobRecord, JobState, JobView, Journal, JournalError, JournalUpdate, MultipartProgress,
-    PartJournal, ProviderError, RemotePath, SiteId, StorageProvider, TransferSettings,
+    JobRecord, JobState, JobView, Journal, JournalError, JournalUpdate, Listing, MultipartProgress,
+    PartJournal, ProviderError, Rechecked, RemotePath, RetryPolicy, SiteId, StorageProvider,
+    TransferSettings, with_retry,
 };
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, mpsc, watch};
@@ -46,14 +62,38 @@ use crate::rate::{RateWindow, eta};
 /// The `upload_id` of the multipart progress that marks a delete as possibly sent.
 pub(crate) const DELETE_SENT: &str = "httporter:delete-sent";
 
+/// The `upload_id` of the multipart progress that marks an upload as possibly sent, on a service
+/// that can delete a cut-off upload's path late (ruling Q55). Part of the file format: never
+/// rename it.
+pub(crate) const UPLOAD_SENT: &str = "httporter:upload-sent";
+
+/// How long after an upload sent again was answered it is checked (ruling Q55). Bunny Storage
+/// deleted a cut-off upload's path when it ended that upload: at once when it saw the connection
+/// close, and 54 to 59 s after a newer upload's answer (about a minute after the cut-off
+/// upload's last bytes) when it never did (live probes, `httporter-bunny/tests/live.rs`). Three
+/// times that, for a loaded server: S5's upload calls took up to 65 s.
+pub const CHECK_AFTER: Duration = Duration::from_secs(180);
+
+/// How long after a check whose listing failed it is tried again. It doesn't count as a check.
+const CHECK_RETRY: Duration = Duration::from_secs(60);
+
+/// How often a check that is due looks again whether its site's lane has finished its work.
+const CHECK_POLL: Duration = Duration::from_secs(5);
+
+/// How many times an upload may be found missing after it was answered, and sent again, before
+/// it fails (ruling Q55).
+pub const MAX_CHECKS: u8 = 3;
+
 /// Whether `progress` is a real multipart upload on the service, one that can be resumed or must
-/// be given up: not the "possibly sent" mark of a delete.
+/// be given up: not the "possibly sent" mark of a delete or of an upload.
 pub(crate) fn is_upload(progress: &MultipartProgress) -> bool {
-    !progress.upload_id.is_empty() && progress.upload_id != DELETE_SENT
+    !progress.upload_id.is_empty()
+        && progress.upload_id != DELETE_SENT
+        && progress.upload_id != UPLOAD_SENT
 }
 
 /// The multipart progress a journal record carries for its job: an upload's own, never a
-/// delete's "possibly sent" mark (review C2 b).
+/// "possibly sent" mark (review C2 b, ruling Q55).
 fn upload_progress(job: &Job, multipart: Option<MultipartProgress>) -> Option<MultipartProgress> {
     match job {
         Job::Upload { .. } => multipart.filter(is_upload),
@@ -61,10 +101,15 @@ fn upload_progress(job: &Job, multipart: Option<MultipartProgress>) -> Option<Mu
     }
 }
 
-/// Whether a journal record is a delete whose request may have reached the server: only a
-/// delete's record is read that way (review C2 b).
+/// Whether a journal record's request may have reached the server: a delete with anything in
+/// its column (review C2 b), or an upload whose column holds the [`UPLOAD_SENT`] mark, never
+/// its multipart progress (ruling Q55).
 fn possibly_sent(job: &Job, multipart: Option<&MultipartProgress>) -> bool {
-    matches!(job, Job::Delete { .. }) && multipart.is_some()
+    match job {
+        Job::Delete { .. } => multipart.is_some(),
+        Job::Upload { .. } => multipart.is_some_and(|progress| progress.upload_id == UPLOAD_SENT),
+        Job::Download { .. } | Job::CreateFolder { .. } => false,
+    }
 }
 
 /// What didn't finish last time, for the resume banner.
@@ -133,6 +178,8 @@ pub(crate) struct Inner {
     state: Mutex<State>,
     /// Wakes the dispatcher.
     wake: Notify,
+    /// Wakes the checker (ruling Q55): a check was added, or the engine is stopping.
+    check_wake: Notify,
     changes: Arc<watch::Sender<u64>>,
 }
 
@@ -216,8 +263,15 @@ pub(crate) struct Entry {
     done_bytes: u64,
     error: Option<String>,
     stop: Option<Stop>,
-    /// A delete request for it may have reached the server, so a later `NotFound` means done.
+    /// A request for it may have reached the server. For a delete, a later `NotFound` then means
+    /// done; for an upload on a service that can delete a cut-off upload late, the next one that
+    /// succeeds is checked (ruling Q55).
     sent: bool,
+    /// The upload in flight was sent with `sent` already set: once answered, it is checked
+    /// before it is done in the journal (ruling Q55).
+    recheck: bool,
+    /// How many checks found it missing, each followed by sending it again (ruling Q55).
+    checks: u8,
     /// What a download's contents must hash to, when its batch said.
     checksum: Option<Checksum>,
     /// How many offline cycles its own network errors started or met (see [`MAX_STRIKES`]).
@@ -330,6 +384,43 @@ struct Run {
     host: String,
 }
 
+/// An upload sent again after a request for it may have been cut off, counted done but not yet
+/// in the journal, waiting to be looked for on its site (ruling Q55). Kept apart from the jobs,
+/// which let a done job go.
+#[derive(Debug)]
+struct Check {
+    /// To queue it again if it has gone.
+    job: Job,
+    lane: usize,
+    batch: u64,
+    /// The size it was sent with: what the listing must show.
+    size: u64,
+    /// When it may be looked for: [`CHECK_AFTER`] after its answer.
+    due: Instant,
+    /// Which check this is for it, from 1.
+    round: u8,
+    /// The run it was counted done in ([`State::run_seq`]).
+    run: u64,
+}
+
+/// One folder's uploads that are due for their check, and how to list it.
+struct CheckFolder {
+    dir: RemotePath,
+    ids: Vec<JobId>,
+    provider: Arc<dyn StorageProvider>,
+    policy: RetryPolicy,
+}
+
+/// What the checker is to do next.
+enum Due {
+    /// Nothing waits to be checked.
+    Nothing,
+    /// Look again then.
+    At(Instant),
+    /// List these folders now.
+    Now(Vec<CheckFolder>),
+}
+
 /// A submitted batch, until all of its jobs have ended.
 #[derive(Debug)]
 struct BatchInfo {
@@ -366,6 +457,13 @@ struct State {
     files: Arc<dyn LocalFiles>,
     /// Where cancelled uploads are given up.
     aborts: Aborts,
+    /// Uploads waiting for their check (ruling Q55), by id.
+    checks: HashMap<JobId, Check>,
+    /// Counts the runs, so a check knows whether the run it was counted done in is still the
+    /// one the drawer shows.
+    run_seq: u64,
+    /// What the checks found since the engine started.
+    rechecked: Rechecked,
 }
 
 impl Engine {
@@ -393,9 +491,11 @@ impl Engine {
             bucket: TokenBucket::new(settings.bandwidth_limit_bytes()),
             state: Mutex::new(State::new(settings, aborts)),
             wake: Notify::new(),
+            check_wake: Notify::new(),
             changes,
         });
         rt.spawn(dispatch_loop(inner.clone()));
+        rt.spawn(check_loop(inner.clone()));
         Self {
             _owner: Arc::new(Owner(inner.clone())),
             inner,
@@ -741,7 +841,8 @@ impl Engine {
     }
 
     /// As [`Self::cancel_site`]; returns the ids of every job of the site the engine held, done
-    /// ones included: their records are the engine's to write.
+    /// ones included: their records are the engine's to write. Its uploads waiting for their
+    /// check are not checked: their records are marked Cancelled (ruling Q55).
     fn cancel_site_held(&self, site: &SiteId) -> HashSet<JobId> {
         let held = {
             let mut guard = self.inner.lock();
@@ -749,7 +850,18 @@ impl Engine {
             let Some(&lane) = st.lane_of.get(site) else {
                 return HashSet::new();
             };
-            let held = st.jobs.on_lane(lane);
+            let mut held = st.jobs.on_lane(lane);
+            let checked: Vec<JobId> = st
+                .checks
+                .iter()
+                .filter(|(_, check)| check.lane == lane)
+                .map(|(&id, _)| id)
+                .collect();
+            for id in checked {
+                st.checks.remove(&id);
+                self.inner.writer.set_state(id, JobState::Cancelled, None);
+                held.insert(id);
+            }
             let queued: Vec<JobId> = st.lanes[lane].queue.drain(..).collect();
             st.lanes[lane].paused = 0;
             for id in queued {
@@ -799,7 +911,7 @@ impl Engine {
                 let Some(id) = job_id(record.id) else {
                     continue;
                 };
-                if held.contains(&id) || st.jobs.get(id).is_some() {
+                if held.contains(&id) || st.holds(id) {
                     continue;
                 }
                 if let Some(provider) = &provider {
@@ -827,10 +939,22 @@ impl Engine {
         self.inner.changes.subscribe()
     }
 
-    /// Something is queued (paused ones too), running, not yet written to the journal, or a
-    /// multipart upload is still being given up.
+    /// Something is queued (paused ones too), running, not yet written to the journal, a
+    /// multipart upload is still being given up, or an upload waits for its check.
     pub fn is_busy(&self) -> bool {
-        self.has_work() || self.pending_writes() > 0 || self.pending_aborts() > 0
+        self.has_work()
+            || self.pending_writes() > 0
+            || self.pending_aborts() > 0
+            || self.pending_checks() > 0
+    }
+
+    /// Uploads sent again after a request for them may have been cut off, counted done and
+    /// waiting to be looked for on their site (ruling Q55). They are not transfers: the quit
+    /// alert doesn't ask about them and closing doesn't wait for them. Their records stay
+    /// unfinished until they are checked, so after a quit the next start sends and checks them
+    /// again.
+    pub fn pending_checks(&self) -> usize {
+        self.inner.lock().checks.len()
     }
 
     /// Transfers are queued (paused ones too) or running: what the quit alert asks about. The
@@ -884,7 +1008,7 @@ impl Engine {
         let st = self.inner.lock();
         let mut left = Unfinished::default();
         for record in &records {
-            if job_id(record.id).is_some_and(|id| st.jobs.get(id).is_none()) {
+            if job_id(record.id).is_some_and(|id| !st.holds(id)) {
                 left.total += 1;
                 if matches!(record.job, Job::Delete { .. }) {
                     left.deletes += 1;
@@ -896,11 +1020,12 @@ impl Engine {
 
     /// Re-queues every unfinished journal record whose site `lookup` still knows, at the back
     /// of its site's queue, and returns how many. Failed records go back to the queue too: a
-    /// resume is a retry. A delete marked as possibly sent treats `NotFound` as done.
+    /// resume is a retry. A delete marked as possibly sent treats `NotFound` as done; an upload
+    /// marked so is checked on its site once sent again (ruling Q55).
     ///
     /// The records of a site that no longer exists are marked Cancelled, so they aren't
-    /// offered again; records this engine already holds are left alone. Downloads resume
-    /// unverified (their listed checksums aren't journalled).
+    /// offered again; records this engine already holds (or is about to check) are left alone.
+    /// Downloads resume unverified (their listed checksums aren't journalled).
     pub fn resume_from_journal(&self, lookup: SiteLookup<'_>) -> usize {
         let records = match self.inner.journal.unfinished() {
             Ok(records) => records,
@@ -928,7 +1053,7 @@ impl Engine {
                 let Some(id) = job_id(record.id) else {
                     continue;
                 };
-                if st.jobs.get(id).is_some() {
+                if st.holds(id) {
                     continue;
                 }
                 let Some(Some((name, host, provider))) = sites.get(&record.site) else {
@@ -1005,7 +1130,7 @@ impl Engine {
     pub fn discard_journal(&self, lookup: SiteLookup<'_>) {
         let holds_unfinished = {
             let st = self.inner.lock();
-            st.has_work() || !st.failed.is_empty()
+            st.has_work() || !st.failed.is_empty() || !st.checks.is_empty()
         };
         let journal = &self.inner.journal;
         let records = match journal.unfinished() {
@@ -1020,7 +1145,7 @@ impl Engine {
             let st = self.inner.lock();
             records
                 .into_iter()
-                .filter(|record| job_id(record.id).is_none_or(|id| st.jobs.get(id).is_none()))
+                .filter(|record| job_id(record.id).is_none_or(|id| !st.holds(id)))
                 .collect()
         };
         let mut sites: HashMap<SiteId, Option<Arc<dyn StorageProvider>>> = HashMap::new();
@@ -1041,7 +1166,7 @@ impl Engine {
         if holds_unfinished {
             let st = self.inner.lock();
             for id in others.iter().filter_map(|record| job_id(record.id)) {
-                if st.jobs.get(id).is_none() {
+                if !st.holds(id) {
                     self.inner.writer.set_state(id, JobState::Cancelled, None);
                 }
             }
@@ -1109,6 +1234,38 @@ async fn dispatch_loop(inner: Arc<Inner>) {
     }
 }
 
+/// Checks the uploads waiting for it (ruling Q55), for as long as the engine runs: each folder
+/// due is listed once, under the retry policy, through its site's current client. Sleeps until
+/// the next check is due, or until one is added; ends when the engine stops, leaving what it
+/// had not checked unfinished in the journal.
+async fn check_loop(inner: Arc<Inner>) {
+    loop {
+        let due = {
+            let st = inner.lock();
+            if st.shut_down {
+                return;
+            }
+            st.due_checks(Instant::now())
+        };
+        match due {
+            Due::Nothing => inner.check_wake.notified().await,
+            Due::At(at) => {
+                tokio::select! {
+                    () = tokio::time::sleep_until(at) => {}
+                    () = inner.check_wake.notified() => {}
+                }
+            }
+            Due::Now(folders) => {
+                for folder in folders {
+                    let listed =
+                        with_retry(&folder.policy, |_| folder.provider.list(&folder.dir)).await;
+                    inner.checked(folder, listed);
+                }
+            }
+        }
+    }
+}
+
 /// Asks every job of an active unit to stop for `reason`, and wakes the unit.
 fn interrupt(jobs: &mut Slab, unit: UnitId, active: &ActiveUnit, reason: Stop) {
     for &id in &active.jobs {
@@ -1134,6 +1291,8 @@ impl Entry {
             error: None,
             stop: None,
             sent: false,
+            recheck: false,
+            checks: 0,
             checksum: None,
             strikes: 0,
             struck: None,
@@ -1185,6 +1344,9 @@ impl State {
             disk_full: None,
             files: Arc::new(DiskFiles),
             aborts,
+            checks: HashMap::new(),
+            run_seq: 0,
+            rechecked: Rechecked::default(),
         }
     }
 
@@ -1192,9 +1354,16 @@ impl State {
         self.lanes.iter().any(Lane::has_work)
     }
 
+    /// Whether job `id` is the engine's: in memory, or waiting for its check (ruling Q55). Its
+    /// journal record is then the engine's to write, never one to offer, resume or discard.
+    fn holds(&self, id: JobId) -> bool {
+        self.jobs.get(id).is_some() || self.checks.contains_key(&id)
+    }
+
     /// A new run: the done jobs are let go and the totals start again from the failed jobs,
     /// which carry over.
     fn start_run(&mut self, now: Instant) {
+        self.run_seq += 1;
         for id in self.done.drain(..) {
             self.jobs.remove(id);
         }
@@ -1238,7 +1407,9 @@ impl State {
     }
 
     /// Takes every unit that may start now off the lanes' queues. A delete about to be sent
-    /// for the first time is marked possibly sent, in memory and in the journal.
+    /// for the first time is marked possibly sent, in memory and in the journal; so is an upload,
+    /// on a service that can delete a cut-off upload late, and one sent with the mark already
+    /// set is to be checked once answered (ruling Q55).
     fn dispatch(&mut self, writer: &JournalWriter) -> Vec<UnitSpec> {
         let mut units = Vec::new();
         if self.paused || self.shut_down || self.disk_full.is_some() {
@@ -1247,6 +1418,10 @@ impl State {
         let policy = self.settings.retry_policy();
         let verify = self.settings.verify_checksums;
         for lane in 0..self.lanes.len() {
+            let late = self.lanes[lane]
+                .provider
+                .capabilities()
+                .cut_uploads_delete_late;
             while let Some((kind, ids)) = self.lanes[lane].next_unit(&self.jobs) {
                 let unit = UnitId(self.next_unit);
                 self.next_unit += 1;
@@ -1256,22 +1431,46 @@ impl State {
                         entry.status = Status::Active(unit);
                         entry.stop = None;
                         let sent = entry.sent;
-                        if matches!(entry.job, Job::Delete { .. }) && !sent {
-                            entry.sent = true;
-                            writer.set_multipart(id, Some(delete_sent()));
+                        // The writer's count once the mark is queued: the unit sends nothing
+                        // until the journal has it.
+                        let mut journalled = None;
+                        match entry.job.kind() {
+                            JobKind::Delete if !sent => {
+                                entry.sent = true;
+                                writer.set_multipart(id, Some(delete_sent()));
+                            }
+                            JobKind::Upload if late => {
+                                entry.recheck = sent;
+                                if !sent {
+                                    entry.sent = true;
+                                    // An upload's own multipart progress keeps the column
+                                    // (ruling Q49): no service that sends in parts deletes late.
+                                    if entry.multipart.is_none() {
+                                        writer.set_multipart(id, Some(upload_sent()));
+                                        journalled = Some(writer.queued());
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
-                        items.push((id, entry.job.clone(), sent, entry.checksum.clone()));
+                        items.push((
+                            id,
+                            entry.job.clone(),
+                            sent,
+                            entry.checksum.clone(),
+                            journalled,
+                        ));
                     }
                 }
                 let work = match items.len() {
                     1 => {
-                        let (id, job, sent, checksum) = items.remove(0);
-                        work_for(id, job, sent, checksum)
+                        let (id, job, sent, checksum, journalled) = items.remove(0);
+                        work_for(id, job, sent, checksum, journalled)
                     }
                     _ => Work::DeleteFiles {
                         items: items
                             .into_iter()
-                            .map(|(id, job, sent, _)| {
+                            .map(|(id, job, sent, _, _)| {
                                 (id, crate::lane::remote_of(&job).clone(), sent)
                             })
                             .collect(),
@@ -1367,6 +1566,9 @@ impl State {
 
     /// A job is done. `own_request` counts it as a success for the lane's limiter; the jobs of
     /// a `delete_batch` request count once for the whole request instead (ruling Q37).
+    ///
+    /// An upload sent again after a request for it may have been cut off is done in the drawer
+    /// but not yet in the journal: it waits for its check (ruling Q55).
     fn mark_done(&mut self, id: JobId, writer: &JournalWriter, now: Instant, own_request: bool) {
         self.leave_active(id);
         let Some(entry) = self.jobs.get_mut(id) else {
@@ -1383,7 +1585,21 @@ impl State {
             entry.lane,
             SlotKind::of(&entry.job),
         );
-        writer.set_state(id, JobState::Done, None);
+        let check = std::mem::take(&mut entry.recheck).then(|| Check {
+            job: entry.job.clone(),
+            lane,
+            batch,
+            size,
+            due: now + CHECK_AFTER,
+            round: entry.checks.saturating_add(1),
+            run: self.run_seq,
+        });
+        match check {
+            Some(check) => {
+                self.checks.insert(id, check);
+            }
+            None => writer.set_state(id, JobState::Done, None),
+        }
         self.run.files_done += 1;
         self.run.bytes_finished += size;
         self.rates.record(now, 1, unmetered);
@@ -1479,9 +1695,10 @@ impl State {
         entry.status = Status::Queued;
         entry.error = None;
         entry.done_bytes = 0;
-        // The user's Retry starts it afresh (ruling Q50).
+        // The user's Retry starts it afresh (rulings Q50, Q55).
         entry.strikes = 0;
         entry.struck = None;
+        entry.checks = 0;
         let (lane, batch, size) = (entry.lane, entry.batch, entry.size);
         self.failed.remove(&id);
         self.run.bytes_failed -= size;
@@ -1490,6 +1707,86 @@ impl State {
             info.open += 1;
         }
         self.lanes[lane].queue.push_back(id);
+    }
+
+    /// An upload counted done whose check found it gone (ruling Q55) is queued again in memory:
+    /// taken off the run's done count (or, if a new run has started since, added to its totals),
+    /// its batch opened again if it is still kept (a batch that has closed for good stays closed,
+    /// so the drawer's "last transfer" keeps its whole count), and its entry back as Queued (made
+    /// again if the done jobs let it go). The caller puts it in its lane's queue, or fails it.
+    fn reopen(&mut self, id: JobId, check: &Check) {
+        if check.run == self.run_seq {
+            self.run.files_done = self.run.files_done.saturating_sub(1);
+            self.run.bytes_finished = self.run.bytes_finished.saturating_sub(check.size);
+        } else {
+            self.run.files_total += 1;
+            self.run.bytes_total += check.size;
+            self.run.kinds.note(JobKind::Upload);
+        }
+        match self.jobs.get_mut(id) {
+            Some(entry) => {
+                entry.status = Status::Queued;
+                entry.done_bytes = 0;
+                entry.error = None;
+                entry.checks = check.round;
+                if let Some(pos) = self.done.iter().position(|&done| done == id) {
+                    self.done.remove(pos);
+                }
+            }
+            None => {
+                let mut entry = Entry::new(check.job.clone(), check.lane, check.batch, check.size);
+                entry.sent = true;
+                entry.checks = check.round;
+                self.jobs.insert(id, entry);
+            }
+        }
+        if let Some(info) = self.batches.get_mut(&check.batch) {
+            info.open += 1;
+            info.done_files = info.done_files.saturating_sub(1);
+            info.done_bytes = info.done_bytes.saturating_sub(check.size);
+        }
+    }
+
+    /// The checks that may be made now (ruling Q55), grouped by folder: those past their settle
+    /// delay whose site's lane is running with nothing queued or in flight (the batch has
+    /// finished). Otherwise when to look again.
+    fn due_checks(&self, now: Instant) -> Due {
+        let mut folders: HashMap<(usize, RemotePath), Vec<JobId>> = HashMap::new();
+        let mut next: Option<Instant> = None;
+        for (&id, check) in &self.checks {
+            let lane = &self.lanes[check.lane];
+            let idle = lane.state == LaneState::Running && !lane.has_work();
+            if check.due <= now && idle {
+                let remote = crate::lane::remote_of(&check.job);
+                let dir = remote.parent().unwrap_or_else(RemotePath::root);
+                folders.entry((check.lane, dir)).or_default().push(id);
+            } else {
+                let at = if check.due <= now {
+                    now + CHECK_POLL
+                } else {
+                    check.due
+                };
+                next = Some(next.map_or(at, |next| next.min(at)));
+            }
+        }
+        if folders.is_empty() {
+            return next.map_or(Due::Nothing, Due::At);
+        }
+        let policy = self.settings.retry_policy();
+        let mut due: Vec<CheckFolder> = folders
+            .into_iter()
+            .map(|((lane, dir), mut ids)| {
+                ids.sort_unstable();
+                CheckFolder {
+                    dir,
+                    ids,
+                    provider: self.lanes[lane].provider.clone(),
+                    policy: policy.clone(),
+                }
+            })
+            .collect();
+        due.sort_by(|a, b| a.ids.cmp(&b.ids));
+        Due::Now(due)
     }
 
     /// A batch whose last open job just ended (`closed`) is summarised as the last batch;
@@ -1643,6 +1940,7 @@ impl State {
             last_batch: self.last_batch.clone(),
             // Filled in by `Engine::snapshot`, from the journal writer.
             journal_errors: 0,
+            rechecked: self.rechecked,
         }
     }
 }
@@ -1657,10 +1955,33 @@ fn delete_sent() -> MultipartProgress {
     }
 }
 
-/// The work a single job does.
-fn work_for(id: JobId, job: Job, sent: bool, checksum: Option<Checksum>) -> Work {
+/// The journal's mark on an upload that may have been sent, on a service that can delete a
+/// cut-off upload late (see the module's notes, ruling Q55).
+fn upload_sent() -> MultipartProgress {
+    MultipartProgress {
+        upload_id: UPLOAD_SENT.to_owned(),
+        part_size: 0,
+        parts: Vec::new(),
+        file: None,
+    }
+}
+
+/// The work a single job does. `journalled`: an upload's "possibly sent" mark is in the journal
+/// once the writer has dealt with this many updates.
+fn work_for(
+    id: JobId,
+    job: Job,
+    sent: bool,
+    checksum: Option<Checksum>,
+    journalled: Option<u64>,
+) -> Work {
     match job {
-        Job::Upload { local, remote, .. } => Work::Upload { id, local, remote },
+        Job::Upload { local, remote, .. } => Work::Upload {
+            id,
+            local,
+            remote,
+            journalled,
+        },
         Job::Download { remote, local, .. } => Work::Download {
             id,
             remote,
@@ -1703,6 +2024,19 @@ impl Inner {
             st.interrupt_all(Stop::Requeue);
         }
         self.wake.notify_one();
+        self.check_wake.notify_one();
+    }
+
+    /// Waits until the journal writer has dealt with the first `mark` updates queued (written
+    /// them, or counted them as failed): an upload's "possibly sent" mark is then in the journal
+    /// before its request goes out (ruling Q55). Ends at once if the engine's watchers are gone.
+    pub(crate) async fn journalled(&self, mark: u64) {
+        let mut changes = self.changes.subscribe();
+        while self.writer.dealt_with() < mark {
+            if changes.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     /// The lane's slow-down generation for `kind`, read as a request starts.
@@ -1795,7 +2129,7 @@ impl Inner {
 
     fn end(&self, unit: UnitId, id: JobId, result: Result<(), Failure>, own_request: bool) {
         let now = Instant::now();
-        {
+        let checking = {
             let mut guard = self.lock();
             let st = &mut *guard;
             let Some(entry) = st.jobs.get(id) else {
@@ -1804,6 +2138,7 @@ impl Inner {
             if entry.status != Status::Active(unit) {
                 return;
             }
+            let checks = st.checks.len();
             let (lane, stop) = (entry.lane, entry.stop);
             let drive = match &entry.job {
                 Job::Download { local, .. } => drive_of(local),
@@ -1833,6 +2168,58 @@ impl Inner {
                     st.mark_failed(id, (self.describe)(&error), &self.writer);
                 }
                 Err(Failure::Reason(reason)) => st.mark_failed(id, reason, &self.writer),
+            }
+            st.checks.len() > checks
+        };
+        if checking {
+            self.check_wake.notify_one();
+        }
+        self.poke();
+    }
+
+    /// What the listing of a folder of uploads due for their check found (ruling Q55). Each one
+    /// there with the size it was sent with is done in the journal. One missing, of another size,
+    /// or in a folder that is gone is queued again, or fails once it has been found missing
+    /// [`MAX_CHECKS`] times. A listing that failed (after the retry policy's tries) tells nothing:
+    /// those checks wait [`CHECK_RETRY`] and are made again, uncounted.
+    fn checked(&self, folder: CheckFolder, listed: Result<Listing, ProviderError>) {
+        {
+            let mut guard = self.lock();
+            let st = &mut *guard;
+            if st.shut_down {
+                return;
+            }
+            let now = Instant::now();
+            for id in folder.ids {
+                // Gone meanwhile: its site was removed.
+                let Some(mut check) = st.checks.remove(&id) else {
+                    continue;
+                };
+                let remote = crate::lane::remote_of(&check.job);
+                let there = match &listed {
+                    Ok(listing) => listing.entries.iter().any(|entry| {
+                        !entry.is_folder && entry.path == *remote && entry.size == check.size
+                    }),
+                    Err(ProviderError::NotFound) => false,
+                    Err(_) => {
+                        check.due = now + CHECK_RETRY;
+                        st.checks.insert(id, check);
+                        continue;
+                    }
+                };
+                st.rechecked.checked += 1;
+                if there {
+                    self.writer.set_state(id, JobState::Done, None);
+                    continue;
+                }
+                st.reopen(id, &check);
+                if check.round >= MAX_CHECKS {
+                    let reason = messages::LOST_AFTER_UPLOAD.to_owned();
+                    st.mark_failed(id, reason, &self.writer);
+                } else {
+                    st.rechecked.resent += 1;
+                    st.lanes[check.lane].queue.push_back(id);
+                }
             }
         }
         self.poke();
@@ -2283,11 +2670,12 @@ mod tests {
         }
     }
 
-    /// Review C2 (b): the multipart column holds an upload's progress or a delete's "possibly
-    /// sent" mark. A record's progress is read as an upload only for an upload, and as the mark
-    /// only for a delete.
+    /// Review C2 (b), ruling Q55: the multipart column holds an upload's progress, a delete's
+    /// "possibly sent" mark, or an upload's. A record's progress is read as an upload's only for
+    /// an upload and never from a mark; a delete was possibly sent with anything there, an upload
+    /// only with its own mark.
     #[test]
-    fn only_an_upload_has_progress_and_only_a_delete_was_possibly_sent() {
+    fn only_an_upload_has_progress_and_each_reads_only_its_own_mark() {
         let upload = Job::Upload {
             local: "big.bin".into(),
             remote: RemotePath::parse("big.bin").unwrap(),
@@ -2299,12 +2687,15 @@ mod tests {
         };
         let real = progress("u-1");
         let mark = delete_sent();
+        let sent = upload_sent();
         assert!(is_upload(&real) && !is_upload(&mark) && !is_upload(&progress("")));
+        assert!(!is_upload(&sent));
         assert_eq!(
             upload_progress(&upload, Some(real.clone())),
             Some(real.clone())
         );
         assert_eq!(upload_progress(&upload, Some(mark.clone())), None);
+        assert_eq!(upload_progress(&upload, Some(sent.clone())), None);
         assert_eq!(upload_progress(&delete, Some(real.clone())), None);
         assert_eq!(upload_progress(&delete, Some(mark.clone())), None);
         assert_eq!(upload_progress(&upload, None), None);
@@ -2313,6 +2704,11 @@ mod tests {
         assert!(!possibly_sent(&delete, None));
         assert!(!possibly_sent(&upload, Some(&real)));
         assert!(!possibly_sent(&upload, Some(&mark)));
+        assert!(!possibly_sent(&upload, None));
+        assert!(possibly_sent(&upload, Some(&sent)));
+        // The words are part of the journal's file format.
+        assert_eq!(UPLOAD_SENT, "httporter:upload-sent");
+        assert_eq!(DELETE_SENT, "httporter:delete-sent");
     }
 
     /// Review C2 (b): a part journal told about an upload never writes its id onto a delete's

@@ -1112,10 +1112,27 @@ fn the_engines_words_become_sentences_and_notifications_name_the_run() {
             messages::DAMAGED_TWICE,
             "The file arrived damaged twice (checksum mismatch).",
         ),
+        (
+            messages::LOST_AFTER_UPLOAD,
+            "The site accepted the file but didn't keep it, three times. Retry to send it again.",
+        ),
         ("No connection", "No connection"),
     ] {
         assert_eq!(copy::transfer_message(said), sentence);
     }
+    // Ruling Q55: the note once cut-off uploads were checked and some sent again.
+    assert_eq!(
+        copy::rechecked(3, 2),
+        "Checked 3 files that were cut off mid-upload; re-sent 2."
+    );
+    assert_eq!(
+        copy::rechecked(1, 1),
+        "Checked 1 file that was cut off mid-upload; re-sent it."
+    );
+    assert_eq!(
+        copy::rechecked(1_204, 1),
+        "Checked 1,204 files that were cut off mid-upload; re-sent 1."
+    );
     let note = |direction, done, failed| {
         copy::finished_notification(direction, done, failed, "example-shop.com")
     };

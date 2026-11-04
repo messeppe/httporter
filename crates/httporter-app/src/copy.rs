@@ -1159,9 +1159,29 @@ pub fn transfer_message(text: &str) -> String {
         messages::NO_ANSWER_FOR_FILE => "The server didn't answer for this file.",
         messages::DAMAGED_TWICE => "The file arrived damaged twice (checksum mismatch).",
         messages::ACCESS_DENIED => FILE_ACCESS_DENIED,
+        messages::LOST_AFTER_UPLOAD => {
+            "The site accepted the file but didn't keep it, three times. Retry to send it again."
+        }
         other => other,
     };
     words.to_owned()
+}
+
+/// The status line once uploads cut off mid-way (by a crash, a quit, a pause or the site going
+/// offline) were checked on their site and some had gone and were sent again (ruling Q55):
+/// "Checked 3 files that were cut off mid-upload; re-sent 2.".
+pub fn rechecked(checked: u64, resent: u64) -> String {
+    let what = if checked == 1 {
+        "1 file that was".to_owned()
+    } else {
+        format!("{} that were", files(checked))
+    };
+    let again = if checked == 1 && resent == 1 {
+        "re-sent it".to_owned()
+    } else {
+        format!("re-sent {}", format_count(resent))
+    };
+    format!("Checked {what} cut off mid-upload; {again}.")
 }
 
 #[cfg(test)]

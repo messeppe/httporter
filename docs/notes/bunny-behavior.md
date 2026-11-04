@@ -54,6 +54,16 @@ Every probe works in its own `probe-<time>-<name>/` folder and deletes it at the
 - Consequence, **not applied** (outside this crate): with the Transfers request timeout (60, 120 or 300 s), deleting a large folder (the reference export has 13,793 files: roughly half an hour at this rate) times out as a network error and is retried; each retry continues the server's work, but the retries can run out first. The engine or the app needs a strategy: a much longer timeout for folder deletes, treating a timed-out folder delete as in progress and checking by listing, or deleting the files one by one (16 at once) before the folders.
 - Once, in the first full run, a probe folder was still there after the cleanup's `delete_folder` returned. That was right after the 1,050-file delete had timed out on the client and was still running on the server. Not seen again in three later runs; the probe's cleanup now checks and retries.
 
+## Uploads cut off part way (ruling Q55)
+
+Probes `cut_upload_then_full_upload`, `full_upload_while_a_cut_one_hangs` and `a_held_upload_left_for_the_server_to_end` (2026-11-04), after acceptance S5 lost 2-3 files of a resume that had answered 201 for each.
+
+- **Ending a cut-off upload deletes its path, whatever is there by then.** With a first `PUT` hanging mid-body (half of 3 MiB or of 64 KiB sent, connection open) and a second, full `PUT` of the same path answered `201 {"HttpCode":201,"Message":"File uploaded."}`, the file was there until the first was cut, then gone within one 2 s look, for good: 9 of 9 trials, cut 0, 10 or 45 s after the 201, with or without `Checksum`.
+- **Bunny ends a silent upload about a minute after its last bytes, and deletes then too.** Left open and silent (as after a power cut or a lost network), the first `PUT` was closed by the server 54-59 s after the second's 201, and the file vanished at that moment (2 of 2). One cut by the client 120 s after the 201 had already vanished at 55 s.
+- **On an idle server a cut-off upload is ended at once.** Cut first and followed by a full upload 0, 5 or 30 s later, none of 12 files went missing over three minutes. A cut-off upload whose whole body had been sent was sometimes stored although its answer was never read.
+- Consequence, **applied** (ruling Q55): Bunny's client says `cut_uploads_delete_late`. The engine marks an upload in the journal before it is sent; one sent again after a crash, a quit, a pause or an offline spell is looked for in its folder's listing 180 s after its answer (three times the minute above) and sent again if it has gone.
+- Not applied: an upload retried within one attempt after a network error (a connection reset this side saw and the server didn't) can meet the same delete; the engine checks only uploads it re-dispatched.
+
 ## Not probed
 
 - The account API (zone discovery, `page=0`): these tests never call account-level APIs.

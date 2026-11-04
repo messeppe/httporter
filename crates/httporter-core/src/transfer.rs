@@ -161,6 +161,20 @@ pub struct EngineSnapshot {
     /// Journal reads and writes that failed since the engine started. Above 0, a crash may
     /// offer finished jobs again or forget unfinished ones, so the app can warn.
     pub journal_errors: u64,
+    /// Uploads checked on their site after a cut-off request for them (ruling Q55), since the
+    /// engine started.
+    pub rechecked: Rechecked,
+}
+
+/// What the engine found checking uploads it had sent again after a request for them may have
+/// been cut off (a crash, a quit, a pause, the site going offline), on a service that can delete
+/// such a file late (ruling Q55): counted since the engine started, for the app's one-line note.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Rechecked {
+    /// Checks made: one per file each time it was looked for.
+    pub checked: u64,
+    /// Of those, the files missing or of another size, and sent once more.
+    pub resent: u64,
 }
 
 /// How a conflict told whether two files have the same contents.
