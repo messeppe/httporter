@@ -86,6 +86,15 @@ struct Pending {
     planned: Planned,
 }
 
+/// What Publish adds to the delete alert (T7): its CDN purge. Installed once, by `publish`.
+pub trait DeletePurge: Send + Sync {
+    /// The alert is up for a delete on `site`: offer the purge (the checkbox and its note).
+    fn offer(&self, site: &SiteRecord);
+    /// A delete with the purge ticked went to the engine as tracked batch `batch`: purge what it
+    /// removed once all of it is done. The delete never waits for this.
+    fn after(&self, site: SiteRecord, batch: String);
+}
+
 /// A delete waiting for the delete alert's answer.
 struct PendingDelete {
     target: Target,
@@ -202,6 +211,8 @@ pub struct Transfers {
     /// Goes up with every change of settings: the clients built for one are handed to the
     /// engine only while no other change came since (see `apply_settings`).
     settings_generation: AtomicU64,
+    /// Publish's purge for the delete alert, once installed.
+    delete_purge: std::sync::OnceLock<Arc<dyn DeletePurge>>,
 }
 
 /// Marks the picker closed when dropped (also if the picker panicked).
@@ -229,6 +240,7 @@ impl Transfers {
             state: Mutex::new(State::default()),
             applying: Mutex::new(()),
             settings_generation: AtomicU64::new(0),
+            delete_purge: std::sync::OnceLock::new(),
         })
     }
 
@@ -245,14 +257,12 @@ impl Transfers {
     }
 
     /// The transfer engine, for Publish's batches.
-    #[allow(dead_code)] // T1 skeleton: T7 uses it.
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
 
     /// Where a publish's batches for `site` go: the site with the client a batch for it should
     /// use (as [`Self::target`] picks it), or `None` when no client can be made.
-    #[allow(dead_code)] // T1 skeleton: T7 uses it.
     pub async fn batch_target(&self, site: &SiteRecord) -> Option<BatchTarget> {
         let provider = match self.session.remote_place() {
             Some(place) if place.site.id == site.id => self.target(place).await.provider,
@@ -523,8 +533,18 @@ impl Transfers {
     fn show_delete_alert(&self, alert: (String, String, String)) {
         let _ = self.link.ui().upgrade_in_event_loop(move |ui| {
             crate::binding::show_status(&ui, None, String::new());
+            // The CDN purge starts off; Publish offers it below, for the site it deletes from.
+            ui.set_delete_purge(false);
+            ui.set_delete_purge_available(false);
             sheets_view::show_delete_alert(&ui, &alert);
         });
+        let site = lock(&self.state)
+            .delete
+            .as_ref()
+            .map(|pending| pending.target.site.clone());
+        if let (Some(site), Some(purge)) = (site, self.delete_purge.get()) {
+            purge.offer(&site);
+        }
     }
 
     /// The question on screen was answered: the next one waiting, if any, is asked.
@@ -655,17 +675,68 @@ impl Transfers {
         });
     }
 
+    /// Publish's CDN purge for the delete alert (`publish::install` sets it).
+    pub fn set_delete_purge(&self, purge: Arc<dyn DeletePurge>) {
+        let _ = self.delete_purge.set(purge);
+    }
+
     fn delete_confirm(self: &Arc<Self>) {
         let Some(PendingDelete { target, dir, jobs }) = lock(&self.state).delete.take() else {
             return;
         };
+        // "Also purge these URLs from the CDN": read while the alert's answer is fresh (this runs
+        // on the UI thread, from the alert's button).
+        let purge = self
+            .link
+            .ui()
+            .upgrade()
+            .is_some_and(|ui| ui.get_delete_purge() && ui.get_delete_purge_available())
+            .then(|| self.delete_purge.get().cloned())
+            .flatten();
         let this = self.clone();
         self.link.rt().spawn(async move {
             let affected = Affected::Remote(target.site.id.clone(), dir);
-            this.submit(target, jobs, HashMap::new(), affected, None)
-                .await;
+            match purge {
+                Some(purge) if !jobs.is_empty() => {
+                    this.submit_purged_delete(target, jobs, affected, purge)
+                        .await;
+                }
+                _ => {
+                    this.submit(target, jobs, HashMap::new(), affected, None)
+                        .await;
+                }
+            }
         });
         self.ask_next();
+    }
+
+    /// As [`Self::submit`] for a delete, tracked, so that Publish can purge what it removed once
+    /// it is all done (including the late checks, ruling Q55).
+    async fn submit_purged_delete(
+        &self,
+        target: Target,
+        jobs: Vec<Job>,
+        affected: Affected,
+        purge: Arc<dyn DeletePurge>,
+    ) {
+        let site = target.site.clone();
+        let batch = Batch {
+            site: site.id.clone(),
+            site_name: site.name.clone(),
+            host: site.host.clone(),
+            provider: target.provider,
+            jobs,
+            checksums: HashMap::new(),
+        };
+        let engine = self.engine.clone();
+        match blocking(move || engine.submit_tracked(batch)).await {
+            Ok(id) => {
+                lock(&self.state).affected.push(affected);
+                self.link.status(String::new());
+                purge.after(site, id);
+            }
+            Err(e) => self.link.status(copy::transfer_not_started(e.0)),
+        }
     }
 
     fn delete_cancel(&self) {

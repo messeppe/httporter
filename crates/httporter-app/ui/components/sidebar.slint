@@ -1,4 +1,5 @@
-// Left sidebar (mockup `.sidebar`): the site list and the Add Site / Settings footer.
+// Left sidebar (mockup `.sidebar`): the site list, the publish profiles and the Add Site / Settings
+// footer.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
@@ -112,6 +113,80 @@ component SiteRow inherits Rectangle {
     }
 }
 
+// One publish profile (mockup `.sb-item` in the Publish section): the send icon, its name and when
+// it last published ("2h ago", "Never"). Reachable with Tab, chosen with Space or Return.
+component ProfileRow inherits Rectangle {
+    in property <ProfileItem> profile;
+    in property <bool> selected;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    height: Theme.sidebar-item-height;
+    border-radius: Theme.radius-sm;
+    background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
+    forward-focus: key-focus;
+    accessible-role: list-item;
+    accessible-label: @tr("{}, last published {}", root.profile.name, root.profile.meta);
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        VCenter {
+            Image {
+                source: Icons.send;
+                colorize: root.selected ? Theme.accent : Theme.label2;
+                width: 16px;
+                height: 16px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.profile.name;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            font-weight: root.selected ? Theme.weight-medium : 400;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        Text {
+            text: root.profile.meta;
+            color: Theme.label2;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 export component Sidebar inherits Rectangle {
     in property <[SiteItem]> sites;
     in property <int> selected-site: -1;
@@ -124,7 +199,8 @@ export component Sidebar inherits Rectangle {
     // The site menu's commands can be used (Ruling Q10: off, with a note, until they are wired).
     in property <bool> site-menu-available: false;
     callback site-selected(int);
-    // The Publish section (T7 builds it): one row per profile, and the one selected (-1 for none).
+    // The Publish section: one row per profile, and the one selected (-1 for none). While a
+    // profile is selected its page is shown, so no site row is drawn selected.
     in property <[ProfileItem]> profiles;
     in property <int> selected-profile: -1;
     callback profile-selected(int);
@@ -204,11 +280,27 @@ export component Sidebar inherits Rectangle {
                 }
                 for site[i] in root.sites: SiteRow {
                     site: site;
-                    selected: i == root.selected-site;
+                    selected: i == root.selected-site && root.selected-profile < 0;
                     clicked => { root.site-selected(i); }
                     context-pressed(point) => { root.show-site-menu(i, point); }
                 }
-                if root.sites.length == 0: SectionTitle { text: @tr("Publish"); }
+                SectionTitle { text: @tr("Publish"); }
+                for profile[i] in root.profiles: ProfileRow {
+                    profile: profile;
+                    selected: i == root.selected-profile;
+                    clicked => { root.profile-selected(i); }
+                }
+                if root.sites.length > 0 && root.profiles.length == 0: HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+
+                    Text {
+                        text: @tr("Click Publish to make a profile for the open site.");
+                        color: Theme.label2;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
                 if root.sites.length == 0: HorizontalLayout {
                     padding-left: 8px;
                     padding-right: 8px;

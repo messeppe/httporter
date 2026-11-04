@@ -9,7 +9,7 @@
 //! - [`profile_view`] (T8): the profile page, Edit Profile and the history;
 //! - [`copy`]: the words of all of the above, one section per task.
 
-// T1 skeleton: drop this once T6, T7 and T8 fill the bodies.
+// T1 skeleton: drop this once T6 and T8 fill the bodies.
 #![allow(dead_code, unused_variables)]
 
 mod cdn;
@@ -18,9 +18,9 @@ mod copy;
 mod profile_view;
 mod sheet_view;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use httporter_core::{CdnPurger, ProfileId, SiteRecord};
+use httporter_core::{CdnPurger, ProfileId, ProfileRecord, SiteRecord};
 use httporter_transfer::HashCache;
 
 use crate::AppWindow;
@@ -39,7 +39,13 @@ pub enum PurgerAnswer {
 
 /// What the Publisher remembers between callbacks (T7).
 #[derive(Default)]
-struct State {}
+struct State {
+    /// The publish profiles, in the sidebar's order (the store's): row `i` of the sidebar is
+    /// `profiles[i]`.
+    profiles: Vec<ProfileRecord>,
+    /// The CDN key sheet, while it is up.
+    key: Option<cdn::KeyAsk>,
+}
 
 /// Compare, publish and the profile pages. Shared as `Arc<Publisher>` by the window's callbacks
 /// and the tasks they start.
@@ -54,6 +60,10 @@ pub struct Publisher {
     compare: Mutex<compare_view::CompareState>,
     sheet: Mutex<sheet_view::SheetState>,
     profile: Mutex<profile_view::ProfileState>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Publisher {
@@ -72,29 +82,46 @@ impl Publisher {
 
     /// Compares the profile's folders, then shows the Publish sheet.
     pub fn open_sheet(self: &Arc<Self>, profile: ProfileId) {
-        todo!("T7")
+        sheet_view::open(self, profile);
     }
 
     /// The toolbar's Publish and Ctrl+P.
     pub fn publish_current(self: &Arc<Self>) {
-        todo!("T7")
+        sheet_view::publish_current(self);
     }
 
+    /// Publishes the files that failed (or didn't run) in publish `history` again, with the
+    /// profile's purge.
     pub fn retry_failed(self: &Arc<Self>, history: i64) {
-        todo!("T7")
+        sheet_view::retry_failed(self, history);
     }
 
+    /// Purges the files publish `history` uploaded or deleted again, and stores how it went.
     pub fn retry_purge(self: &Arc<Self>, history: i64) {
-        todo!("T7")
+        cdn::retry_purge(self, history);
     }
 
     pub async fn purger_for(&self, site: &SiteRecord) -> PurgerAnswer {
-        todo!("T7")
+        cdn::purger_for(self, site).await
     }
 
     /// Opens the CDN key sheet for `site` (Edit Profile uses it too).
     pub fn ask_cdn_key(self: &Arc<Self>, site: SiteRecord) {
-        todo!("T7")
+        cdn::ask_key(self, site, None);
+    }
+
+    /// The profile in row `index` of the sidebar.
+    fn profile_at(&self, index: usize) -> Option<ProfileRecord> {
+        lock(&self.state).profiles.get(index).cloned()
+    }
+
+    /// Reads the profiles again and shows them in the sidebar (after a profile is saved or
+    /// removed). The selected profile stays selected.
+    pub fn refresh_profiles(self: &Arc<Self>) {
+        let this = self.clone();
+        self.link
+            .rt()
+            .spawn(async move { this.reload_profiles().await });
     }
 }
 

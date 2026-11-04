@@ -29,3 +29,19 @@ pub fn pick_file(title: &str, filters: &[(&str, &[&str])]) -> Option<PathBuf> {
     }
     dialog.pick_file()
 }
+
+/// Asks where to save a file, offering `default_name`. `filters` are as for [`pick_file`]. `None`
+/// if the user cancelled.
+pub fn pick_save_file(
+    title: &str,
+    default_name: &str,
+    filters: &[(&str, &[&str])],
+) -> Option<PathBuf> {
+    let mut dialog = FileDialog::new()
+        .set_title(title)
+        .set_file_name(default_name);
+    for &(name, extensions) in filters {
+        dialog = dialog.add_filter(name, extensions);
+    }
+    dialog.save_file()
+}

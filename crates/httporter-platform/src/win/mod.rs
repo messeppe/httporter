@@ -12,7 +12,7 @@ mod taskbar;
 
 pub use clipboard::clipboard_files;
 pub use notify::{ensure_app_identity, notify, notify_or_flash};
-pub use pickers::{pick_file, pick_files, pick_folder};
+pub use pickers::{pick_file, pick_files, pick_folder, pick_save_file};
 pub use taskbar::{TaskbarProgress, TaskbarState, flash, is_foreground};
 
 use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};

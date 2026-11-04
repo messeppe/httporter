@@ -32,7 +32,7 @@ global Cols {
 // control took it (`confirm`, the default button) and Tab and Shift+Tab at the ends of the Tab
 // order (`focus-first`, `focus-last`). The dialog says where the focus is with `at-first-stop` and
 // `at-last-stop`.
-component Modal inherits Rectangle {
+export component Modal inherits Rectangle {
     // The focus is on the first control of the dialog.
     in property <bool> at-first-stop;
     // The focus is on the last control of the dialog.
@@ -85,7 +85,7 @@ component Modal inherits Rectangle {
 // A sheet that hangs from the toolbar (the way a macOS sheet hangs from the title bar): flat at
 // the top, rounded below. It fills its parent and draws the sheet centred under the toolbar, as
 // high as its content and as wide as `sheet-width` allows.
-component AttachedSheet inherits Rectangle {
+export component AttachedSheet inherits Rectangle {
     in property <length> sheet-width: 460px;
     // What assistive technology calls the sheet.
     in property <string> label;
@@ -847,7 +847,8 @@ export component NewFolderSheet inherits Rectangle {
 
 // The delete alert (mockup `DeleteAlert.dc.html`): what goes and that it can't be undone. Cancel
 // is the default button (Return and Escape press it, and it has the focus); the delete button is
-// red and never the default. The CDN purge choice is shown turned off until Publish exists.
+// red and never the default. The CDN purge checkbox can be ticked on a Bunny site; the note under
+// it says why it can't be, or what ticking it will ask for.
 export component DeleteAlert inherits Rectangle {
     in property <string> title;
     in property <string> body;
@@ -863,11 +864,17 @@ export component DeleteAlert inherits Rectangle {
     init => { cancel-button.focus(); }
 
     Modal {
-        at-first-stop: delete-button.has-focus;
+        at-first-stop: root.purge-available ? purge-check.has-focus : delete-button.has-focus;
         at-last-stop: cancel-button.has-focus;
         cancel => { root.cancelled(); }
         confirm => { root.cancelled(); }
-        focus-first => { delete-button.focus(); }
+        focus-first => {
+            if (root.purge-available) {
+                purge-check.focus();
+            } else {
+                delete-button.focus();
+            }
+        }
         focus-last => { cancel-button.focus(); }
 
         AlertCard {
@@ -883,17 +890,19 @@ export component DeleteAlert inherits Rectangle {
                 HorizontalLayout {
                     alignment: center;
 
-                    CheckRow {
+                    purge-check := CheckRow {
                         text: @tr("Also purge these URLs from the CDN");
                         font-size: 12px;
-                        enabled: false;
+                        enabled: root.purge-available;
+                        checked <=> root.purge;
                     }
                 }
-                Text {
-                    text: @tr("CDN purge arrives with Publish.");
+                if root.purge-note != "": Text {
+                    text: root.purge-note;
                     color: Theme.label2;
                     font-size: Theme.font-small;
                     horizontal-alignment: center;
+                    wrap: word-wrap;
                 }
             }
             HorizontalLayout {

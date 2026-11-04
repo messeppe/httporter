@@ -182,6 +182,10 @@ export struct PublishSheetData {
     can-publish: bool,
     needs-review: bool,
     review-name: string,
+    // T7: the summary chip's "only on Bunny" ("only on {site}" for S3), and how many files the
+    // publish deletes (Review Deletions says it).
+    remote-label: string,
+    deletes: int,
 }
 
 // One publish in the profile page's history table.
