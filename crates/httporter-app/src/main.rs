@@ -29,6 +29,7 @@ mod selection;
 mod session;
 mod settings_view;
 mod sheets_view;
+mod single_instance;
 mod site_hub;
 mod sort;
 mod transfers;
@@ -44,6 +45,12 @@ mod lint_tests;
 mod pane_tests;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // A second HTTPorter would take the first one's live queue for unfinished work (review
+    // M10): it shows the first one's window instead.
+    if !single_instance::first() {
+        single_instance::show_first(copy::APP_NAME);
+        return Ok(());
+    }
     // Before any window exists: Windows reads the identity when it makes the taskbar button.
     // Without it notifications still try again, so a failure here is only noted by them.
     let _ = win::ensure_app_identity();

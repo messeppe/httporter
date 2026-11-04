@@ -290,6 +290,18 @@ impl S3Storage {
         let mut waiting: VecDeque<u32> = (1..=job.total_parts())
             .filter(|number| !done.contains_key(number))
             .collect();
+        // The parts an earlier attempt stored count as done, but not as sent now, so they don't
+        // make a burst of speed.
+        if let Some(meter) = &job.opts.meter {
+            let stored: u64 = done
+                .keys()
+                .filter(|&&number| (1..=job.total_parts()).contains(&number))
+                .map(|&number| job.range(number).1)
+                .sum();
+            if stored > 0 {
+                meter.skipped(stored).await;
+            }
+        }
         let mut running = FuturesUnordered::new();
         let mut failed: Option<ProviderError> = None;
         loop {

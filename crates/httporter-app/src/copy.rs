@@ -997,6 +997,27 @@ pub const PREPARING_UPLOAD: &str = "Preparing the upload…";
 pub const PREPARING_DOWNLOAD: &str = "Preparing the download…";
 pub const PREPARING_DELETE: &str = "Counting what to delete…";
 
+/// The drawer while a plan is worked out (review M4): one of the `PREPARING_*` lines, and how
+/// many items its listings have found so far ("Preparing the upload… 1,204 items").
+pub fn preparing(what: &str, found: u64) -> String {
+    if found == 0 {
+        what.to_owned()
+    } else {
+        format!(
+            "{what} {}",
+            items(usize::try_from(found).unwrap_or(usize::MAX))
+        )
+    }
+}
+
+/// The drawer's Cancel stopped the plans being worked out.
+pub const PREPARING_CANCELLED: &str = "Cancelled before anything was transferred.";
+
+/// A batch whose site was removed while it was being planned or asked about.
+pub fn transfer_site_gone(site: &str) -> String {
+    format!("Nothing was transferred: {site} was removed.")
+}
+
 /// Ctrl+V in the cloud pane with no files on the clipboard.
 pub const NOTHING_TO_PASTE: &str = "There are no files on the clipboard to upload.";
 
