@@ -13,11 +13,14 @@ export component Toolbar inherits Rectangle {
     in property <bool> connection-ok;
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
+    // A site is open: Publish may be pressed (on a profile's page it always may).
     in property <bool> can-publish: false;
-    // Compare (T6 builds the toggle): it may be turned on, and it is on.
+    // Compare: it may be turned on (This PC and the cloud pane each show a folder), and it is on.
+    // The toggle only calls `toggle-compare`; the app turns it on or off.
     in property <bool> can-compare: false;
     in property <bool> comparing: false;
-    // A publish profile's page is shown: the toolbar offers Edit Profile (T6 builds the button).
+    // A publish profile's page is shown in place of the panes: the toolbar offers Edit Profile and
+    // Publish, without the panes' Compare and file actions (mockup `History.dc.html`).
     in property <bool> profile-page: false;
     // File actions (the mockup's second capsule group): each is turned off unless the app says it
     // may be pressed.
@@ -119,8 +122,31 @@ export component Toolbar inherits Rectangle {
 
         Rectangle { horizontal-stretch: 1; }
 
+        // Compare the panes (mockup `.tgroup` "View": the layout toggles beside it arrive later).
+        if !root.profile-page: VCenter {
+            Rectangle {
+                background: Theme.control;
+                border-radius: self.height / 2;
+                border-width: 0.5px;
+                border-color: Theme.control-border;
+                height: 32px;
+
+                HorizontalLayout {
+                    padding: 2px;
+                    ToolButton {
+                        icon: Icons.compare;
+                        label: @tr("Compare panes");
+                        description: root.comparing ? @tr("On") : (root.can-compare ? @tr("Off") : @tr("Open a folder on This PC and a site folder to compare them"));
+                        active: root.comparing;
+                        enabled: root.can-compare || root.comparing;
+                        clicked => { root.toggle-compare(); }
+                    }
+                }
+            }
+        }
+
         // Upload, Download, New folder and Delete (mockup `.tgroup` "File actions").
-        VCenter {
+        if !root.profile-page: VCenter {
             Rectangle {
                 background: Theme.control;
                 border-radius: self.height / 2;
@@ -163,12 +189,20 @@ export component Toolbar inherits Rectangle {
             }
         }
 
+        if root.profile-page: VCenter {
+            CapsuleButton {
+                text: @tr("Edit Profile");
+                icon: Icons.pencil;
+                clicked => { root.edit-profile(); }
+            }
+        }
+
         VCenter {
             CapsuleButton {
                 text: @tr("Publish");
                 icon: Icons.send;
                 primary: true;
-                enabled: root.can-publish;
+                enabled: root.can-publish || root.profile-page;
                 clicked => { root.publish(); }
             }
         }
