@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -44,6 +44,7 @@ use reqwest::{Method, StatusCode};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 /// The only zones these tests may touch.
 const ZONE_PREFIX: &str = "httporter-test";
@@ -311,6 +312,20 @@ impl Live {
         body: Option<Vec<u8>>,
         headers: &[(&str, String)],
     ) -> Answer {
+        self.try_raw(method, url, body, headers)
+            .await
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// As [`Self::raw`], with a request that got no answer as an error (scrubbed, without its
+    /// URL) rather than a panic.
+    async fn try_raw(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<Vec<u8>>,
+        headers: &[(&str, String)],
+    ) -> Result<Answer, String> {
         let mut request = self
             .http
             .request(method, url)
@@ -321,27 +336,25 @@ impl Live {
         if let Some(body) = body {
             request = request.header("Content-Length", body.len()).body(body);
         }
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(error) => panic!(
+        let response = request.send().await.map_err(|error| {
+            format!(
                 "request failed: {}",
                 self.scrub(error.without_url().to_string())
-            ),
-        };
+            )
+        })?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = match response.bytes().await {
-            Ok(body) => body,
-            Err(error) => panic!(
+        let body = response.bytes().await.map_err(|error| {
+            format!(
                 "reading failed: {}",
                 self.scrub(error.without_url().to_string())
-            ),
-        };
-        Answer {
+            )
+        })?;
+        Ok(Answer {
             status,
             headers,
             body,
-        }
+        })
     }
 
     /// The listing of `dir` as the service sends it.
@@ -1206,4 +1219,651 @@ async fn client_folders_after_the_findings() {
         assert_eq!(file.err(), Some(ProviderError::NotFound));
     })
     .await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// An upload cut off part way, then sent again in full (acceptance S5, ruling Q55)
+// ---------------------------------------------------------------------------------------------
+
+/// How long a trial's file is watched once its full upload was answered.
+const WATCH: Duration = Duration::from_secs(180);
+/// How often every trial's file is looked at: one listing of their folder, and a direct
+/// request for each.
+const WATCH_EVERY: Duration = Duration::from_secs(2);
+/// The pieces a cut upload's body is handed over in.
+const CUT_PIECE: usize = 64 * 1024;
+
+/// How a trial's first upload is cut off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cut {
+    /// Half the body handed over, a second for it to cross, then the connection closed: a
+    /// process killed while sending a big file.
+    Half,
+    /// The whole body handed over, the connection closed before the answer is read: a process
+    /// killed while a small file's upload waits for its answer, as most of S5's 32 were.
+    AfterBody,
+}
+
+/// When a trial's full upload goes, against its cut one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Order {
+    /// The cut upload ends, and the full one goes this long after.
+    CutFirst(Duration),
+    /// The full upload goes while the cut one hangs mid-body, its connection open, as a killed
+    /// upload the server has not finished with yet would; the cut comes this long after the
+    /// full upload was answered.
+    FullWhileHeld(Duration),
+    /// As [`Self::FullWhileHeld`], but the first upload is never cut by this side: its
+    /// connection stays open, silent, until the server ends it (a PC that lost power or its
+    /// network mid-upload sends no close either), or this long has passed.
+    FullWhileHeldUntilServerEnds(Duration),
+}
+
+impl Order {
+    fn describe(self) -> String {
+        match self {
+            Self::CutFirst(delay) => format!("cut, full {} s later", delay.as_secs()),
+            Self::FullWhileHeld(hold) => format!("full while held, cut {} s later", hold.as_secs()),
+            Self::FullWhileHeldUntilServerEnds(limit) => format!(
+                "full while held, left for the server to end (at most {} s)",
+                limit.as_secs()
+            ),
+        }
+    }
+}
+
+/// One trial: a file uploaded and cut off, and uploaded again in full, in `order`.
+#[derive(Debug, Clone, Copy)]
+struct Trial {
+    n: usize,
+    size: usize,
+    cut: Cut,
+    /// Both uploads send the file's SHA-256 as `Checksum`, as the app does by default.
+    checksum: bool,
+    order: Order,
+}
+
+impl Trial {
+    fn rel(&self) -> String {
+        format!("cut/t{:02}.bin", self.n)
+    }
+}
+
+/// What a listing or a direct request said of a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    There(u64),
+    Missing,
+    /// The request failed, or answered something else.
+    Unknown(String),
+}
+
+/// One look at a trial's file.
+#[derive(Debug, Clone)]
+struct Look {
+    at: Instant,
+    listed: Seen,
+    direct: Seen,
+}
+
+/// How a trial went, up to its full upload and its cut.
+struct TrialRun {
+    trial: Trial,
+    /// "cut", or what the cut upload got before it could be cut.
+    cut: String,
+    /// When the cut upload was cut.
+    cut_at: Instant,
+    /// When the full upload was sent, and what it was answered.
+    sent: Instant,
+    reupload: String,
+    answered: Instant,
+}
+
+/// `len` bytes that don't compress, from `seed`.
+fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        })
+        .collect()
+}
+
+/// The body of a cut upload: `data` in pieces up to where `cut` stops it. `taken` hears when
+/// the connection asks for more than that; a [`Cut::Half`] body then waits for `go` and fails,
+/// which closes the connection mid-body.
+fn cut_body(
+    data: Bytes,
+    cut: Cut,
+    taken: tokio::sync::oneshot::Sender<()>,
+    go: Arc<tokio::sync::Notify>,
+) -> impl futures_util::Stream<Item = std::io::Result<Bytes>> + Send + 'static {
+    let limit = match cut {
+        Cut::Half => data.len() / 2,
+        Cut::AfterBody => data.len(),
+    };
+    futures_util::stream::unfold((0, Some(taken)), move |(at, mut taken)| {
+        let (data, go) = (data.clone(), go.clone());
+        async move {
+            if at < limit {
+                let end = limit.min(at + CUT_PIECE);
+                return Some((Ok(data.slice(at..end)), (end, taken)));
+            }
+            if let Some(taken) = taken.take() {
+                let _ = taken.send(());
+            }
+            if at >= data.len() {
+                return None;
+            }
+            go.notified().await;
+            Some((Err(std::io::Error::other("cut off")), (data.len(), None)))
+        }
+    })
+}
+
+/// An upload on its way to being cut off.
+struct CutUpload {
+    /// Its own client, dropped with the request.
+    client: reqwest::Client,
+    task: tokio::task::JoinHandle<Result<u16, reqwest::Error>>,
+    /// Fails a [`Cut::Half`] body.
+    go: Arc<tokio::sync::Notify>,
+    /// Whether the connection took the body up to where it stops.
+    taken: bool,
+}
+
+/// Starts uploading `data` to `url` on a client of its own, with the length declared, and
+/// waits until the connection has taken the body up to where `trial`'s cut stops it.
+async fn start_cut_upload(
+    live: &Live,
+    url: &str,
+    data: Bytes,
+    trial: Trial,
+    sum: &str,
+) -> CutUpload {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("HTTPorter-live-probe")
+        .build()
+        .unwrap_or_else(|_| panic!("could not build the HTTP client"));
+    let (taken_tx, taken_rx) = tokio::sync::oneshot::channel();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let len = data.len();
+    let body = cut_body(data, trial.cut, taken_tx, go.clone());
+    let mut request = client
+        .put(url)
+        .header("AccessKey", live.access_key.clone())
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", len)
+        .body(reqwest::Body::wrap_stream(body));
+    if trial.checksum {
+        request = request.header("Checksum", sum);
+    }
+    let task = tokio::spawn(async move { request.send().await.map(|r| r.status().as_u16()) });
+    let taken = tokio::time::timeout(Duration::from_secs(120), taken_rx)
+        .await
+        .is_ok();
+    if trial.cut == Cut::Half {
+        // Time for what was handed over to cross.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    CutUpload {
+        client,
+        task,
+        go,
+        taken,
+    }
+}
+
+/// Cuts the upload off: a held body fails, the request is dropped and its client with it.
+/// Says how it ended.
+async fn cut_off(live: &Live, upload: CutUpload) -> String {
+    let CutUpload {
+        client,
+        task,
+        go,
+        taken,
+    } = upload;
+    go.notify_one();
+    task.abort();
+    let ended = match task.await {
+        Err(error) if error.is_cancelled() => "cut".to_owned(),
+        Err(_) => "the request's task panicked".to_owned(),
+        Ok(Ok(status)) => format!("answered {status} first"),
+        Ok(Err(error)) if error.is_body() || error.is_request() => "cut".to_owned(),
+        Ok(Err(error)) => live.scrub(format!("cut ({})", error.without_url())),
+    };
+    drop(client);
+    if taken {
+        ended
+    } else {
+        format!("{ended}; the body was never all taken")
+    }
+}
+
+/// Runs `trial`: its cut upload and its full one (as the client sends it: length declared,
+/// `Checksum` when the trial says) in the trial's order. Notes in `settled` when both are
+/// over.
+async fn run_trial(
+    live: &Live,
+    trial: Trial,
+    settled: &std::sync::Mutex<Vec<Option<Instant>>>,
+) -> TrialRun {
+    let data = Bytes::from(noise(trial.n as u64 + 1, trial.size));
+    let sum = upper_hex(&sha256(&data));
+    let url = live.url(&live.path(&trial.rel()), false);
+    let mut headers = vec![("Content-Type", "application/octet-stream".to_owned())];
+    if trial.checksum {
+        headers.push(("Checksum", sum.clone()));
+    }
+    let first = start_cut_upload(live, &url, data.clone(), trial, &sum).await;
+    let answer = |result: Result<Answer, String>| match result {
+        Ok(answer) => answer.summary(),
+        Err(failure) => failure,
+    };
+    let run = match trial.order {
+        Order::CutFirst(delay) => {
+            let cut = cut_off(live, first).await;
+            let cut_at = Instant::now();
+            tokio::time::sleep(delay).await;
+            let sent = Instant::now();
+            let reupload = answer(
+                live.try_raw(Method::PUT, &url, Some(data.to_vec()), &headers)
+                    .await,
+            );
+            TrialRun {
+                trial,
+                cut,
+                cut_at,
+                sent,
+                reupload,
+                answered: Instant::now(),
+            }
+        }
+        Order::FullWhileHeld(hold) => {
+            let sent = Instant::now();
+            let full = live.try_raw(Method::PUT, &url, Some(data.to_vec()), &headers);
+            tokio::pin!(full);
+            // The server may hold the full upload until the first ends: then it is cut after
+            // a minute, and the full one waited for.
+            let early = tokio::time::timeout(Duration::from_secs(60), &mut full).await;
+            let answered = Instant::now();
+            if early.is_ok() {
+                tokio::time::sleep(hold).await;
+            }
+            let cut = cut_off(live, first).await;
+            let cut_at = Instant::now();
+            let (reupload, answered) = match early {
+                Ok(result) => (answer(result), answered),
+                Err(_) => {
+                    let result = full.await;
+                    (
+                        format!("{} (only after the cut)", answer(result)),
+                        Instant::now(),
+                    )
+                }
+            };
+            TrialRun {
+                trial,
+                cut,
+                cut_at,
+                sent,
+                reupload,
+                answered,
+            }
+        }
+        Order::FullWhileHeldUntilServerEnds(limit) => {
+            let sent = Instant::now();
+            let reupload = answer(
+                live.try_raw(Method::PUT, &url, Some(data.to_vec()), &headers)
+                    .await,
+            );
+            let answered = Instant::now();
+            let mut first = first;
+            let ended = tokio::time::timeout(limit, &mut first.task).await;
+            let cut_at = Instant::now();
+            let cut = match ended {
+                Ok(joined) => {
+                    drop(first);
+                    let how = match joined {
+                        Ok(Ok(status)) => format!("HTTP {status}"),
+                        Ok(Err(error)) => live.scrub(error.without_url().to_string()),
+                        Err(_) => "its task failed".to_owned(),
+                    };
+                    format!(
+                        "the server ended it {:.0} s after the full answer: {how}",
+                        (cut_at - answered).as_secs_f64()
+                    )
+                }
+                Err(_) => format!(
+                    "still open after {} s, then {}",
+                    limit.as_secs(),
+                    cut_off(live, first).await
+                ),
+            };
+            TrialRun {
+                trial,
+                cut,
+                cut_at,
+                sent,
+                reupload,
+                answered,
+            }
+        }
+    };
+    settled.lock().unwrap_or_else(PoisonError::into_inner)[trial.n] =
+        Some(run.answered.max(run.cut_at));
+    run
+}
+
+fn content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+/// A direct request for the file at `url`: a `HEAD`, or a `GET` whose body is never read when
+/// the `HEAD` answers neither 200 nor 404.
+async fn look_at(live: &Live, url: &str) -> Seen {
+    let ask = |method: Method| {
+        live.http
+            .request(method, url)
+            .header("AccessKey", live.access_key.clone())
+            .send()
+    };
+    let answer = match ask(Method::HEAD).await {
+        Ok(head) if matches!(head.status().as_u16(), 200 | 404) => head,
+        _ => match ask(Method::GET).await {
+            Ok(get) => get,
+            Err(error) => return Seen::Unknown(live.scrub(error.without_url().to_string())),
+        },
+    };
+    match answer.status().as_u16() {
+        200 => Seen::There(content_length(answer.headers()).unwrap_or(u64::MAX)),
+        404 => Seen::Missing,
+        status => Seen::Unknown(format!("HTTP {status}")),
+    }
+}
+
+/// Looks at every trial's file every [`WATCH_EVERY`], from the start until each trial
+/// `settled` (its full upload answered and its cut made) [`WATCH`] ago, fifteen minutes at
+/// most: one listing of their folder, and a direct request for each file.
+async fn watch(
+    live: &Live,
+    trials: &[Trial],
+    settled: &std::sync::Mutex<Vec<Option<Instant>>>,
+) -> Vec<Vec<Look>> {
+    let dir = live.path("cut");
+    let urls: Vec<String> = trials
+        .iter()
+        .map(|trial| live.url(&live.path(&trial.rel()), false))
+        .collect();
+    let mut looks = vec![Vec::new(); trials.len()];
+    let started = Instant::now();
+    loop {
+        let round = Instant::now();
+        let listing = live
+            .try_raw(
+                Method::GET,
+                &live.url(&dir, true),
+                None,
+                &[("Accept", "application/json".to_owned())],
+            )
+            .await;
+        let listed: Result<HashMap<String, u64>, String> = match listing {
+            Ok(answer) if answer.status == StatusCode::OK => match answer.json() {
+                Some(Value::Array(objects)) => Ok(objects
+                    .iter()
+                    .filter_map(|object| {
+                        Some((
+                            object["ObjectName"].as_str()?.to_owned(),
+                            object["Length"].as_u64()?,
+                        ))
+                    })
+                    .collect()),
+                _ => Err("not a listing".to_owned()),
+            },
+            // The folder doesn't exist yet: nothing is in it.
+            Ok(answer) if answer.status == StatusCode::NOT_FOUND => Ok(HashMap::new()),
+            Ok(answer) => Err(format!("HTTP {}", answer.status.as_u16())),
+            Err(failure) => Err(failure),
+        };
+        let directs = join_all(urls.iter().map(|url| look_at(live, url))).await;
+        for ((trial, direct), seen) in trials.iter().zip(directs).zip(looks.iter_mut()) {
+            let name = format!("t{:02}.bin", trial.n);
+            let listed = match &listed {
+                Ok(names) => names
+                    .get(&name)
+                    .map_or(Seen::Missing, |&len| Seen::There(len)),
+                Err(failure) => Seen::Unknown(failure.clone()),
+            };
+            seen.push(Look {
+                at: round,
+                listed,
+                direct,
+            });
+        }
+        let settled = settled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let all_watched = settled
+            .iter()
+            .all(|at| at.is_some_and(|at| at.elapsed() >= WATCH));
+        if all_watched || started.elapsed() >= Duration::from_secs(900) {
+            return looks;
+        }
+        tokio::time::sleep_until(round + WATCH_EVERY).await;
+    }
+}
+
+/// How `pick` saw the file from `from` on, as its changes: `there 0 s; missing 34 s` (seconds
+/// after `from`). A size other than `size` is named; answers that said nothing are counted.
+fn timeline(looks: &[Look], from: Instant, size: u64, pick: fn(&Look) -> &Seen) -> String {
+    let mut changes: Vec<String> = Vec::new();
+    let mut last: Option<String> = None;
+    let mut unknown = 0;
+    for look in looks.iter().filter(|look| look.at >= from) {
+        let state = match pick(look) {
+            Seen::There(len) if *len == size => "there".to_owned(),
+            Seen::There(len) => format!("size {len}"),
+            Seen::Missing => "missing".to_owned(),
+            Seen::Unknown(_) => {
+                unknown += 1;
+                continue;
+            }
+        };
+        if last.as_ref() != Some(&state) {
+            changes.push(format!(
+                "{state} {} s",
+                look.at.saturating_duration_since(from).as_secs()
+            ));
+            last = Some(state);
+        }
+    }
+    if changes.is_empty() {
+        changes.push("never seen".to_owned());
+    }
+    if unknown > 0 {
+        changes.push(format!("({unknown} looks said nothing)"));
+    }
+    changes.join("; ")
+}
+
+/// What `pick` saw last before `before`.
+fn last_before(looks: &[Look], before: Instant, size: u64, pick: fn(&Look) -> &Seen) -> String {
+    match looks.iter().rev().find(|look| look.at < before).map(pick) {
+        Some(Seen::There(len)) if *len == size => "there".to_owned(),
+        Some(Seen::There(len)) => format!("size {len}"),
+        Some(Seen::Missing) => "missing".to_owned(),
+        Some(Seen::Unknown(why)) => format!("? ({why})"),
+        None => "not looked at".to_owned(),
+    }
+}
+
+/// Seconds from `from` to `to`, signed.
+fn signed_secs(from: Instant, to: Instant) -> String {
+    if to >= from {
+        format!("{:.1} s", (to - from).as_secs_f64())
+    } else {
+        format!("-{:.1} s", (from - to).as_secs_f64())
+    }
+}
+
+/// Runs `trials` at once in a probe folder named `name`, watches their files, and prints a
+/// table: how each cut and full upload went, what the listing said just before the full upload,
+/// and what the listing and a direct request said from its answer on.
+async fn cut_trials(name: &str, trials: Vec<Trial>) {
+    probe(name, |live| async move {
+        let settled = std::sync::Mutex::new(vec![None; trials.len()]);
+        let me: &Live = &live;
+        let (runs, looks) = tokio::join!(
+            join_all(trials.iter().map(|&trial| run_trial(me, trial, &settled))),
+            watch(me, &trials, &settled)
+        );
+        live.observe(
+            "cut: trials",
+            format!(
+                "{} files, watched every {} s until {} s after the later of the full upload's answer and the cut",
+                trials.len(),
+                WATCH_EVERY.as_secs(),
+                WATCH.as_secs()
+            ),
+        );
+        println!(
+            "| trial | size | checksum | cut | order | cut upload | full upload | took | cut (from the full answer) | listing before the full upload | listing from its answer | direct from its answer |"
+        );
+        println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+        let mut vanished = 0;
+        for (run, looks) in runs.iter().zip(&looks) {
+            let size = run.trial.size as u64;
+            let listing = timeline(looks, run.answered, size, |look| &look.listed);
+            let direct = timeline(looks, run.answered, size, |look| &look.direct);
+            if listing.contains("missing") || direct.contains("missing") {
+                vanished += 1;
+            }
+            println!(
+                "{}",
+                live.scrub(format!(
+                    "| {} | {} | {} | {:?} | {} | {} | {} | {:.1} s | {} | {} | {listing} | {direct} |",
+                    run.trial.n,
+                    run.trial.size,
+                    if run.trial.checksum { "yes" } else { "no" },
+                    run.trial.cut,
+                    run.trial.order.describe(),
+                    run.cut,
+                    run.reupload,
+                    run.answered.saturating_duration_since(run.sent).as_secs_f64(),
+                    signed_secs(run.answered, run.cut_at),
+                    last_before(looks, run.sent, size, |look| &look.listed),
+                ))
+            );
+        }
+        live.observe(
+            "cut: files missing at some point after their full upload was answered",
+            format!("{vanished} of {}", runs.len()),
+        );
+    })
+    .await;
+}
+
+/// Ruling Q55's question, from acceptance S5: an upload cut off part way (a process killed
+/// mid-upload), then sent again in full and answered 201: is the file there afterwards, and
+/// does it stay? Twelve trials at once, each its own 3 MiB file: half the body or all of it
+/// sent before the cut, with and without `Checksum`, the full upload right away, 5 s or 30 s
+/// later. Every file is watched for three minutes, in the folder's listing and with a direct
+/// request, every two seconds.
+///
+/// Seen (2026-11-04): none of the twelve went missing. A cut upload whose whole body was sent
+/// was sometimes stored although its answer was never read.
+#[tokio::test]
+#[ignore = "live: needs .env.test and the Bunny test zone; about four minutes"]
+async fn cut_upload_then_full_upload() {
+    let mut trials = Vec::new();
+    for checksum in [true, false] {
+        for cut in [Cut::Half, Cut::AfterBody] {
+            for delay in [0, 5, 30] {
+                trials.push(Trial {
+                    n: trials.len(),
+                    size: 3 << 20,
+                    cut,
+                    checksum,
+                    order: Order::CutFirst(Duration::from_secs(delay)),
+                });
+            }
+        }
+    }
+    cut_trials("cut", trials).await;
+}
+
+/// As [`cut_upload_then_full_upload`], with the server not done with the cut upload when the
+/// full one lands, as a slow server (S5's p99 was about 20 s) can be after a kill: the full
+/// upload goes while the first hangs mid-body with its connection open, and the first is cut
+/// 0, 10 or 45 s after the full upload's answer. 3 MiB files with and without `Checksum`, and
+/// 64 KiB ones (S5's files were small) with it.
+///
+/// Seen (2026-11-04): all nine went missing, each within one look (2 s) of its cut, and none
+/// came back: the full upload is answered 201 and is there until the older, cut-off upload of
+/// the same path is ended, which deletes the path.
+#[tokio::test]
+#[ignore = "live: needs .env.test and the Bunny test zone; about five minutes"]
+async fn full_upload_while_a_cut_one_hangs() {
+    let mut trials = Vec::new();
+    for (size, checksum) in [(3 << 20, true), (3 << 20, false), (64 << 10, true)] {
+        for hold in [0, 10, 45] {
+            trials.push(Trial {
+                n: trials.len(),
+                size,
+                cut: Cut::Half,
+                checksum,
+                order: Order::FullWhileHeld(Duration::from_secs(hold)),
+            });
+        }
+    }
+    cut_trials("held", trials).await;
+}
+
+/// How long Bunny waits on an upload that stops mid-body without its connection closing (a PC
+/// that lost power or its network sends no close), and whether giving up on it deletes a newer
+/// full upload of the same path too: two such uploads (3 MiB and 64 KiB) are left for the
+/// server to end, at most eight minutes; a third is cut 120 s after its full upload, to see the
+/// delete still comes that late.
+///
+/// Seen (2026-11-04): the server closed both held uploads 54 and 59 s after the full upload's
+/// answer (about a minute after their last bytes), and the full upload was gone from then on;
+/// the third had gone at 55 s, before its cut. The 3 MiB one was not seen at all after its 201.
+#[tokio::test]
+#[ignore = "live: needs .env.test and the Bunny test zone; up to fourteen minutes"]
+async fn a_held_upload_left_for_the_server_to_end() {
+    let limit = Duration::from_secs(480);
+    let trials = vec![
+        Trial {
+            n: 0,
+            size: 3 << 20,
+            cut: Cut::Half,
+            checksum: true,
+            order: Order::FullWhileHeldUntilServerEnds(limit),
+        },
+        Trial {
+            n: 1,
+            size: 64 << 10,
+            cut: Cut::Half,
+            checksum: true,
+            order: Order::FullWhileHeldUntilServerEnds(limit),
+        },
+        Trial {
+            n: 2,
+            size: 64 << 10,
+            cut: Cut::Half,
+            checksum: true,
+            order: Order::FullWhileHeld(Duration::from_secs(120)),
+        },
+    ];
+    cut_trials("server-end", trials).await;
 }
