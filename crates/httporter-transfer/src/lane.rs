@@ -126,6 +126,8 @@ pub(crate) struct Lane {
     pub(crate) network: NetworkErrors,
     /// How many times the lane has gone offline: a job's strikes are counted once per cycle.
     pub(crate) cycle: u64,
+    /// A probe task is asking the site whether it answers again (one per lane at most).
+    pub(crate) probing: bool,
 }
 
 impl Lane {
@@ -148,6 +150,7 @@ impl Lane {
             paths: ActivePaths::default(),
             network: NetworkErrors::default(),
             cycle: 0,
+            probing: false,
         };
         lane.configure(settings);
         lane
@@ -593,7 +596,8 @@ where
 
 /// What an unexplained refusal of one file's request (`error`, S3 `AccessDenied` with no hint)
 /// means (review I5). It may be the sign-in failing, or a key or a bucket policy that allows some
-/// paths only: the file's folder is listed to tell. Listed, or found missing (S3 answers so for
+/// paths only: one page of the file's folder is listed to tell, at most one name, the file's own
+/// ([`StorageProvider::list_prefix`]). Listed, or found missing (S3 answers so for
 /// a folder with no key under it yet, the folder an upload makes), the sign-in works, and only
 /// this file fails, with [`messages::ACCESS_DENIED`]; stopping the site would loop, since Edit
 /// Site's test would pass and the same file be refused again. Any other answer to the listing
@@ -608,7 +612,8 @@ async fn denied_or_auth(inner: &Arc<Inner>, spec: &UnitSpec, error: ProviderErro
         return error.into();
     }
     let dir = remote.parent().unwrap_or_else(RemotePath::root);
-    match spec.provider.list(&dir).await {
+    let name = remote.name().unwrap_or_default();
+    match spec.provider.list_prefix(&dir, name, 1).await {
         Ok(_) | Err(ProviderError::NotFound) => Failure::Reason(messages::ACCESS_DENIED.to_owned()),
         Err(_) => error.into(),
     }
@@ -626,6 +631,10 @@ impl BodyMeter for JobMeter {
     async fn chunk(&self, len: usize) {
         self.inner.bucket.take(len).await;
         self.inner.progress(self.unit, self.id, len as u64);
+    }
+
+    async fn skipped(&self, len: u64) {
+        self.inner.already_stored(self.unit, self.id, len);
     }
 }
 

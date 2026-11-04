@@ -32,6 +32,13 @@ pub trait BodyMeter: Send + Sync {
     /// The next `len` bytes of the body are about to be sent. The upload
     /// waits for this to return, so a bandwidth limit can hold it back.
     async fn chunk(&self, len: usize);
+
+    /// `len` bytes of the body an earlier attempt already stored, which this
+    /// one doesn't send (the parts a resumed multipart upload skips): done,
+    /// but not sent now. The default does nothing.
+    async fn skipped(&self, len: u64) {
+        let _ = len;
+    }
 }
 
 /// How far a multipart upload got: enough to resume it. The journal stores it as JSON.
@@ -218,6 +225,20 @@ pub trait StorageProvider: Send + Sync {
             results.push(self.delete_file(path).await);
         }
         results
+    }
+
+    /// One page of at most `limit` children of `dir` whose names start with
+    /// `prefix`: a cheap probe of whether `dir` may be listed (S3
+    /// `ListObjectsV2` with `prefix` and `max-keys`). The default lists the
+    /// whole folder, so its answer may hold more, and other names.
+    async fn list_prefix(
+        &self,
+        dir: &RemotePath,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Listing, ProviderError> {
+        let _ = (prefix, limit);
+        self.list(dir).await
     }
 
     /// Whether the store answers at all, for telling when a connection is

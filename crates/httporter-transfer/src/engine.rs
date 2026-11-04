@@ -132,6 +132,13 @@ pub const WINDOW: usize = 200;
 /// The journal writer takes at most this many updates in one go.
 const JOURNAL_CHUNK: usize = 512;
 
+/// The waits before a chunk the journal failed to write is tried again, once after each.
+const JOURNAL_RETRIES: [Duration; 3] = [
+    Duration::from_millis(100),
+    Duration::from_millis(500),
+    Duration::from_secs(2),
+];
+
 /// Jobs for one site, submitted together.
 pub struct Batch {
     pub site: SiteId,
@@ -203,23 +210,27 @@ struct Aborts {
 }
 
 /// Counts one abort as running until it is dropped: when the task ends, or is dropped unrun.
-struct AbortRunning(Arc<AtomicUsize>, Arc<watch::Sender<u64>>);
+/// Only counts: a task dropped unrun (the runtime shutting down) is dropped where it was
+/// spawned, which may be with the engine's state locked, where watchers must not be told.
+struct AbortRunning(Arc<AtomicUsize>);
 
 impl Drop for AbortRunning {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
-        self.1.send_modify(|n| *n = n.wrapping_add(1));
     }
 }
 
 impl Aborts {
-    /// Gives up the upload `upload_id` of `remote` through `provider`, in a task.
+    /// Gives up the upload `upload_id` of `remote` through `provider`, in a task, which tells
+    /// the watchers once it is no longer counted.
     fn send(&self, provider: Arc<dyn StorageProvider>, remote: RemotePath, upload_id: String) {
         self.running.fetch_add(1, Ordering::SeqCst);
-        let running = AbortRunning(self.running.clone(), self.changes.clone());
+        let running = AbortRunning(self.running.clone());
+        let changes = self.changes.clone();
         self.rt.spawn(async move {
-            let _running = running;
             let _ = provider.abort_multipart(&remote, &upload_id).await;
+            drop(running);
+            changes.send_modify(|n| *n = n.wrapping_add(1));
         });
     }
 
@@ -1108,6 +1119,17 @@ impl Engine {
     /// offered again; records this engine already holds (or is about to check) are left alone.
     /// Downloads resume unverified (their listed checksums aren't journalled).
     pub fn resume_from_journal(&self, lookup: SiteLookup<'_>) -> usize {
+        self.resume_from_journal_except(lookup, &HashSet::new())
+    }
+
+    /// As [`Self::resume_from_journal`], leaving the records of the sites in `keep` as they are:
+    /// neither resumed nor cancelled, so they are offered again (review M14: a site whose
+    /// password can't be read now doesn't hold the other sites back).
+    pub fn resume_from_journal_except(
+        &self,
+        lookup: SiteLookup<'_>,
+        keep: &HashSet<SiteId>,
+    ) -> usize {
         let records = match self.inner.journal.unfinished() {
             Ok(records) => records,
             Err(_) => {
@@ -1115,6 +1137,10 @@ impl Engine {
                 return 0;
             }
         };
+        let records: Vec<JobRecord> = records
+            .into_iter()
+            .filter(|record| !keep.contains(&record.site))
+            .collect();
         // Each site is looked up once, before the lock is taken: `lookup` is the app's code.
         let mut sites: HashMap<SiteId, Option<SiteInfo>> = HashMap::new();
         for record in &records {
@@ -2006,6 +2032,11 @@ impl State {
                 site: lane.name.clone(),
             };
         }
+        // The user's pause outranks an offline site (review M13): nothing would be sent anyway,
+        // and the drawer then offers Resume.
+        if self.paused && self.has_work() {
+            return EngineState::Paused;
+        }
         if let Some(lane) = self
             .lanes
             .iter()
@@ -2015,9 +2046,7 @@ impl State {
                 site: lane.name.clone(),
             };
         }
-        if self.paused && self.has_work() {
-            EngineState::Paused
-        } else if self.lanes.iter().any(Lane::is_moving) {
+        if self.lanes.iter().any(Lane::is_moving) {
             EngineState::Running
         } else {
             EngineState::Idle
@@ -2234,6 +2263,26 @@ impl Inner {
             entry.done_bytes += counted;
             st.run.bytes_in_flight += counted;
             st.rates.record(now, 0, bytes);
+        }
+        self.bump();
+    }
+
+    /// `bytes` of an upload in flight were stored by an earlier attempt (the parts a resumed
+    /// multipart upload skips): counted done, but not as sent now, so they make no speed (and
+    /// aren't counted at once when the job is done either).
+    pub(crate) fn already_stored(&self, unit: UnitId, id: JobId, bytes: u64) {
+        {
+            let mut guard = self.lock();
+            let st = &mut *guard;
+            let Some(entry) = st.jobs.get_mut(id) else {
+                return;
+            };
+            if entry.status != Status::Active(unit) {
+                return;
+            }
+            let counted = bytes.min(entry.size.saturating_sub(entry.done_bytes));
+            entry.done_bytes += counted;
+            st.run.bytes_in_flight += counted;
         }
         self.bump();
     }
@@ -2474,7 +2523,7 @@ impl Inner {
     /// touched (review N1): sending them back to the queue would restart each from byte 0, twice
     /// for every such job.
     fn go_offline(self: &Arc<Self>, lane: usize) {
-        let cycle = {
+        let start_probe = {
             let mut guard = self.lock();
             let st = &mut *guard;
             if st.shut_down {
@@ -2487,9 +2536,13 @@ impl Inner {
             lane_ref.state = LaneState::Offline;
             lane_ref.network.clear();
             lane_ref.cycle += 1;
-            lane_ref.cycle
+            // One probe per lane: one still waiting from a cycle that ended within its last
+            // sleep takes this cycle on.
+            !std::mem::replace(&mut lane_ref.probing, true)
         };
-        self.rt.spawn(offline::probe(self.clone(), lane, cycle));
+        if start_probe {
+            self.rt.spawn(offline::probe(self.clone(), lane));
+        }
         self.bump();
     }
 
@@ -2542,17 +2595,26 @@ impl Inner {
 
     /// The client to probe an offline lane's site with; `None` once the lane isn't offline or
     /// the engine has stopped.
-    pub(crate) fn offline_provider(&self, lane: usize) -> Option<Arc<dyn StorageProvider>> {
-        let st = self.lock();
-        let lane = &st.lanes[lane];
-        (!st.shut_down && lane.state == LaneState::Offline).then(|| lane.provider.clone())
+    /// With its offline cycle. `None` also ends the lane's probing: the next time it goes offline
+    /// starts a new probe.
+    pub(crate) fn offline_provider(&self, lane: usize) -> Option<(Arc<dyn StorageProvider>, u64)> {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        let shut_down = st.shut_down;
+        let lane = &mut st.lanes[lane];
+        if shut_down || lane.state != LaneState::Offline {
+            lane.probing = false;
+            return None;
+        }
+        Some((lane.provider.clone(), lane.cycle))
     }
 
-    /// An offline lane's site answered: back to work.
+    /// An offline lane's site answered: back to work. Its probe ends.
     pub(crate) fn back_online(&self, lane: usize) {
         {
             let mut st = self.lock();
             let lane = &mut st.lanes[lane];
+            lane.probing = false;
             if lane.state != LaneState::Offline {
                 return;
             }
@@ -2794,10 +2856,13 @@ impl JournalWriter {
 /// [`Journal::apply`]: one transaction, one disk sync, however many there are (review C1:
 /// cancelling 13,793 jobs one commit at a time took about 9 s, longer than closing waited).
 ///
-/// A write that fails leaves the job's older record: after a crash a finished job may be
-/// offered again, or a failed one forgotten. The job's state in memory is unaffected; the
-/// failure is counted (every update of the chunk, since the journal can't say which were
-/// written), and the snapshot's `journal_errors` lets the app warn.
+/// A chunk that fails to be written stays at the head and is tried again after each of the
+/// [`JOURNAL_RETRIES`] waits (a busy disk, a locked file); the updates queued meanwhile wait
+/// behind it, so the order holds. Only once every try failed is it given up: the job's older
+/// record stays, so after a crash a finished job may be offered again, or a failed one
+/// forgotten. The job's state in memory is unaffected; the failure is counted (every update of
+/// the chunk, since the journal can't say which were written), and the snapshot's
+/// `journal_errors` lets the app warn.
 async fn write_journal(
     mut rx: mpsc::UnboundedReceiver<JournalUpdate>,
     journal: Arc<dyn Journal>,
@@ -2815,10 +2880,18 @@ async fn write_journal(
             }
         }
         let n = updates.len();
-        let journal = journal.clone();
-        let written = tokio::task::spawn_blocking(move || journal.apply(&updates).is_ok())
-            .await
-            .unwrap_or(false);
+        let updates = Arc::new(updates);
+        let mut waits = JOURNAL_RETRIES.iter();
+        let written = loop {
+            let (journal, chunk) = (journal.clone(), updates.clone());
+            let written = tokio::task::spawn_blocking(move || journal.apply(&chunk).is_ok())
+                .await
+                .unwrap_or(false);
+            match waits.next() {
+                Some(&wait) if !written => tokio::time::sleep(wait).await,
+                _ => break written,
+            }
+        };
         if !written {
             errors.fetch_add(n as u64, Ordering::SeqCst);
         }

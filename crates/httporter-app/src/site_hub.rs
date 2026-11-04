@@ -14,6 +14,7 @@
 //! never kept here, logged or shown, and [`HubError`] carries none of it.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -252,6 +253,15 @@ impl StorageProvider for Interactive {
         list_interactive(&*self.0, dir).await
     }
 
+    async fn list_prefix(
+        &self,
+        dir: &RemotePath,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Listing, ProviderError> {
+        self.0.list_prefix(dir, prefix, limit).await
+    }
+
     async fn upload(
         &self,
         path: &RemotePath,
@@ -291,5 +301,79 @@ impl StorageProvider for Interactive {
         upload_id: &str,
     ) -> Result<(), ProviderError> {
         self.0.abort_multipart(path, upload_id).await
+    }
+}
+
+/// [`Interactive`], counting the entries its listings find: how far a plan has got (review M4).
+pub struct Counting {
+    pub inner: Interactive,
+    pub found: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl StorageProvider for Counting {
+    fn capabilities(&self) -> &Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn endpoint(&self) -> String {
+        self.inner.endpoint()
+    }
+
+    async fn list(&self, dir: &RemotePath) -> Result<Listing, ProviderError> {
+        let listing = self.inner.list(dir).await?;
+        self.found
+            .fetch_add(listing.entries.len() as u64, Ordering::Relaxed);
+        Ok(listing)
+    }
+
+    async fn list_prefix(
+        &self,
+        dir: &RemotePath,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Listing, ProviderError> {
+        self.inner.list_prefix(dir, prefix, limit).await
+    }
+
+    async fn upload(
+        &self,
+        path: &RemotePath,
+        source: UploadSource,
+        opts: &UploadOptions,
+    ) -> Result<(), ProviderError> {
+        self.inner.upload(path, source, opts).await
+    }
+
+    async fn download(&self, path: &RemotePath) -> Result<ByteStream, ProviderError> {
+        self.inner.download(path).await
+    }
+
+    async fn delete_file(&self, path: &RemotePath) -> Result<(), ProviderError> {
+        self.inner.delete_file(path).await
+    }
+
+    async fn delete_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
+        self.inner.delete_folder(dir).await
+    }
+
+    async fn create_folder(&self, dir: &RemotePath) -> Result<(), ProviderError> {
+        self.inner.create_folder(dir).await
+    }
+
+    async fn delete_batch(&self, paths: &[RemotePath]) -> Vec<Result<(), ProviderError>> {
+        self.inner.delete_batch(paths).await
+    }
+
+    async fn reachable(&self) -> Result<(), ProviderError> {
+        self.inner.reachable().await
+    }
+
+    async fn abort_multipart(
+        &self,
+        path: &RemotePath,
+        upload_id: &str,
+    ) -> Result<(), ProviderError> {
+        self.inner.abort_multipart(path, upload_id).await
     }
 }
