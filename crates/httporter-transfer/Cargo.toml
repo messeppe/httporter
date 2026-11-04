@@ -16,5 +16,15 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+# The rest is for the acceptance harness (tests/acceptance.rs): the real providers, the SQLite
+# journal and the git-ignored `.env.test`, signed raw requests to R2 (served headers, keys left
+# under a prefix) and the process's private bytes.
+dotenvy.workspace = true
+httporter-bunny = { version = "0.1.0", path = "../httporter-bunny" }
+httporter-platform = { version = "0.1.0", path = "../httporter-platform" }
+httporter-s3 = { version = "0.1.0", path = "../httporter-s3" }
+reqwest = { workspace = true, features = ["rustls", "http2"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+# rt-multi-thread: the harness runs the engine on a runtime made as the app makes its own.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
+windows-sys = { workspace = true, features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }

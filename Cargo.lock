@@ -2036,14 +2036,20 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dotenvy",
  "futures-util",
  "hex",
+ "httporter-bunny",
  "httporter-core",
+ "httporter-platform",
+ "httporter-s3",
  "md-5",
+ "reqwest",
  "sha2",
  "tempfile",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
