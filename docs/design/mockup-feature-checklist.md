@@ -19,15 +19,15 @@ Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = wher
 | Toolbar: green "HTTPS · {ms} ms" connection pill | I1 | ✅ |
 | Toolbar: view toggle, two panes / single pane + inspector | I4 | ⬜ |
 | Toolbar: Compare toggle | I3 | ⬜ |
-| Toolbar: Upload, Download, New folder, Delete buttons | I2 | ⬜ |
+| Toolbar: Upload, Download, New folder, Delete buttons | I2 | ✅ |
 | Toolbar: Publish button | I3 | ⬜ (disabled now) |
 | Toolbar: search field "Search {site}" (recursive remote search) | I4 | ⬜ |
-| Sidebar: Sites with provider tile, subtitle, health dot | I1 (Bunny) / I2 (S3 sites) | ✅ / ⬜ |
+| Sidebar: Sites with provider tile, subtitle, health dot | I1 (Bunny) / I2 (S3 sites) | ✅ / ✅ |
 | Sidebar: Publish profiles with "last published" time | I3 | ⬜ |
 | Sidebar: Favorites (local and remote folders) | I4 | ⬜ |
 | Sidebar: Editing (files open for edit, auto re-upload) | I4 | ⬜ |
 | Sidebar: Add Site button | I1 | ✅ |
-| Sidebar: Settings button → Settings window | I2 | ⬜ (disabled with "later version" note until then ✅) |
+| Sidebar: Settings button → Settings window | I2 | ✅ |
 | Pane header: icon, title, clickable breadcrumbs | I1 | ✅ |
 | Pane header: storage endpoint chip (https://…) | I1 | ✅ |
 | Pane header: "Comparing" chip | I3 | ⬜ |
@@ -35,10 +35,10 @@ Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = wher
 | Status column with Changed / New / Only on Bunny / Same chips | I3 | ⬜ |
 | Folders first, disclosure chevrons, kind icons, selection highlight | I1 | ✅ |
 | Keyboard browsing (arrows, Enter, Backspace, Tab, focus ring) | I1 | ✅ |
-| Drag files from Explorer onto the cloud pane (hover ring + "Release to upload") | I1 (hook) / I2 (upload) | ✅ / ⬜ |
-| Drag between panes (upload / download) | I2 | ⬜ |
-| Transfer drawer, collapsed: "No transfers running · Last publish …" | I2 | ⬜ |
-| Status bar: selection summary ("index.html selected · 383.4 KB") | I2 | ⬜ |
+| Drag files from Explorer onto the cloud pane (hover ring + "Release to upload") | I1 (hook) / I2 (upload) | ✅ / ✅ |
+| Drag between panes (upload / download) | I2 | ✅ |
+| Transfer drawer, collapsed: "No transfers running · Last publish …" | I2 | ✅ |
+| Status bar: selection summary ("index.html selected · 383.4 KB") | I2 | ✅ |
 | Status bar: compare summary chips (34 changed · 2 new · 1 only on Bunny) | I3 | ⬜ |
 | Status bar: "HTTP/2 · host · N connections ready" | I1 | ✅ (connections count I2) |
 
@@ -60,11 +60,11 @@ Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = wher
 
 | Feature | Screen | Milestone | Status |
 |---|---|---|---|
-| Transfer drawer expanded: progress ring, "Uploading to {site}", file and MB counts, files/s, MB/s, time left | `Transfers.dc.html` | I2 | ⬜ |
-| Tabs Active / Queued / Failed / Done with counts | `Transfers.dc.html` | I2 | ⬜ |
-| Pause / Cancel all; per-row progress bar and cancel | `Transfers.dc.html` | I2 | ⬜ |
-| Batch "file exists" sheet: default action (Replace if different / Replace all / Skip all / Keep both), per-row action, "Remember for uploads to this site", Cancel Upload / Continue | `Conflicts.dc.html` | I2 | ⬜ |
-| Delete alert: counts and size, "can't be undone", "Also purge these URLs from the CDN", Delete N Files / Cancel (default) | `DeleteAlert.dc.html` | I2 (alert) / I3 (purge option) | ⬜ |
+| Transfer drawer expanded: progress ring, "Uploading to {site}", file and MB counts, files/s, MB/s, time left | `Transfers.dc.html` | I2 | ✅ |
+| Tabs Active / Queued / Failed / Done with counts | `Transfers.dc.html` | I2 | ✅ |
+| Pause / Cancel all; per-row progress bar and cancel | `Transfers.dc.html` | I2 | ✅ |
+| Batch "file exists" sheet: default action (Replace if different / Replace all / Skip all / Keep both), per-row action, "Remember for uploads to this site", Cancel Upload / Continue | `Conflicts.dc.html` | I2 | ✅ |
+| Delete alert: counts and size, "can't be undone", "Also purge these URLs from the CDN", Delete N Files / Cancel (default) | `DeleteAlert.dc.html` | I2 (alert) / I3 (purge option) | ✅ / ⬜ |
 
 ## Publish (`PublishPreview.dc.html`, `History.dc.html`)
 
@@ -96,15 +96,15 @@ Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = wher
 
 | Feature | Screen | Milestone | Status |
 |---|---|---|---|
-| Welcome (first run): icon, wordmark, three feature rows, Add Your First Site | `Welcome.dc.html` | I2 | ⬜ |
-| Welcome: Import from .env or AWS profile… | `Welcome.dc.html` | I2 | ⬜ |
+| Welcome (first run): icon, wordmark, three feature rows, Add Your First Site | `Welcome.dc.html` | I2 | ✅ |
+| Welcome: Import from .env or AWS profile… | `Welcome.dc.html` | I2 | ✅ |
 | Add Site: Bunny with storage zone password, endpoint preview, Test Connection | `AddSite.dc.html` | I1 | ✅ |
-| Add Site: Bunny account key sign-in (pick zones) | `AddSite.dc.html` | I2 | ⬜ |
-| Add Site: S3 providers (Amazon S3, R2, B2, Wasabi, DigitalOcean Spaces, MinIO, Other S3) | `AddSite.dc.html` | I2 | ⬜ |
-| Settings window with tabs General / Sites / Transfers / Security / Publish / Advanced | `Settings.dc.html` | I2 (window + Transfers) / I4–I5 (other tabs) | ⬜ |
-| Settings › Transfers: simultaneous transfers, slow down on 429/503, retries, bandwidth limit | `Settings.dc.html` | I2 | ⬜ |
-| Settings › Transfers: HTTP protocol, keep connections open, timeout, proxy | `Settings.dc.html` | I2 | ⬜ |
-| Settings › Transfers: verify checksums, "file exists" defaults, Restore Defaults | `Settings.dc.html` | I2 | ⬜ |
+| Add Site: Bunny account key sign-in (pick zones) | `AddSite.dc.html` | I2 | ✅ |
+| Add Site: S3 providers (Amazon S3, R2, B2, Wasabi, DigitalOcean Spaces, MinIO, Other S3) | `AddSite.dc.html` | I2 | ✅ |
+| Settings window with tabs General / Sites / Transfers / Security / Publish / Advanced | `Settings.dc.html` | I2 (window + Transfers) / I4–I5 (other tabs) | ✅ / ⬜ |
+| Settings › Transfers: simultaneous transfers, slow down on 429/503, retries, bandwidth limit | `Settings.dc.html` | I2 | ✅ |
+| Settings › Transfers: HTTP protocol, keep connections open, timeout, proxy | `Settings.dc.html` | I2 | ✅ |
+| Settings › Transfers: verify checksums, "file exists" defaults, Restore Defaults | `Settings.dc.html` | I2 | ✅ |
 
 ## Spec features without a mockup screen
 
@@ -113,15 +113,15 @@ The design document (§8) also requires these; they have no dedicated mockup but
 | Feature | Spec | Milestone | Status |
 |---|---|---|---|
 | Test connection on save (refuse to save a site that fails) | §8.1.2 | I1 | 🔧 (final fix wave) |
-| Edit, duplicate and remove sites (remove deletes its Credential Manager entry) | §8.1.6 | I2 | ⬜ |
+| Edit, duplicate and remove sites (remove deletes its Credential Manager entry) | §8.1.6 | I2 | ✅ |
 | Read-only sites (read-only password / keys disable writes) | §8.1.4 | I4 | ⬜ |
 | Export / import sites without secrets | §8.1.8 | I4 | ⬜ |
-| Multi-select (Ctrl/Shift, Ctrl+A, rubber band) and selection summary | §8.2.9 | I2 | ⬜ |
-| Drop onto a specific remote folder row | §8.3.1 | I2 | ⬜ |
-| Transfer journal and resume after crash or restart | §8.3.11 | I2 | ⬜ |
-| Pause on offline / sleep, resume automatically | §8.3.12 | I2 | ⬜ |
-| Adaptive concurrency on 429/503, bandwidth cap | §8.3.6, §8.3.8 | I2 | ⬜ |
-| Taskbar progress and Windows notification when a long batch finishes | §8.3.13 | I2 | ⬜ |
+| Multi-select (Ctrl/Shift, Ctrl+A, rubber band) and selection summary | §8.2.9 | I2 | ✅ |
+| Drop onto a specific remote folder row | §8.3.1 | I2 | ✅ |
+| Transfer journal and resume after crash or restart | §8.3.11 | I2 | ✅ |
+| Pause on offline / sleep, resume automatically | §8.3.12 | I2 | ✅ |
+| Adaptive concurrency on 429/503, bandwidth cap | §8.3.6, §8.3.8 | I2 | ✅ |
+| Taskbar progress and Windows notification when a long batch finishes | §8.3.13 | I2 | ✅ |
 | Rename / move (Bunny: copy-then-delete with warning; S3: server-side copy) | §8.4.3 | I4 | ⬜ |
 | Copy public link / presigned link | §8.4.4 | I4 | ⬜ |
 | Edit with auto re-upload, "Editing" list | §8.5.2 | I4 | ⬜ |
