@@ -1,5 +1,6 @@
 pub mod capabilities;
 pub mod cdn;
+pub mod copy;
 pub mod entry;
 pub mod error;
 pub mod journal;

@@ -430,6 +430,56 @@ enum Due {
     Now(Vec<CheckFolder>),
 }
 
+/// A batch submitted with [`Engine::submit_tracked`]: how each of its jobs ended so far, kept
+/// until [`Engine::wait_batch`] takes it.
+#[derive(Debug)]
+struct Tracked {
+    /// The id [`Engine::submit_tracked`] returned.
+    id: String,
+    lane: usize,
+    jobs: HashMap<JobId, TrackedJob>,
+}
+
+#[derive(Debug)]
+struct TrackedJob {
+    remote: RemotePath,
+    /// `None` while it is queued or running, or once a check sent it again.
+    end: Option<End>,
+}
+
+/// How a job of a tracked batch ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum End {
+    Done { bytes: u64 },
+    Failed(String),
+    Cancelled,
+}
+
+impl Tracked {
+    /// Every job has ended (a failed one too).
+    fn closed(&self) -> bool {
+        self.jobs.values().all(|job| job.end.is_some())
+    }
+
+    /// The outcome; a job not ended yet counts as cancelled (the engine stopped).
+    fn outcome(self) -> BatchOutcome {
+        let mut jobs: Vec<(JobId, TrackedJob)> = self.jobs.into_iter().collect();
+        jobs.sort_unstable_by_key(|(id, _)| *id);
+        let mut outcome = BatchOutcome::default();
+        for (_, job) in jobs {
+            match job.end {
+                Some(End::Done { bytes }) => {
+                    outcome.done.push(job.remote);
+                    outcome.bytes_done += bytes;
+                }
+                Some(End::Failed(reason)) => outcome.failed.push((job.remote, reason)),
+                Some(End::Cancelled) | None => outcome.cancelled.push(job.remote),
+            }
+        }
+        outcome
+    }
+}
+
 /// A submitted batch, until all of its jobs have ended.
 #[derive(Debug)]
 struct BatchInfo {
@@ -473,6 +523,9 @@ struct State {
     run_seq: u64,
     /// What the checks found since the engine started.
     rechecked: Rechecked,
+    /// The batches submitted with [`Engine::submit_tracked`], by their number, until
+    /// [`Engine::wait_batch`] takes them.
+    tracked: HashMap<u64, Tracked>,
 }
 
 impl Engine {
@@ -564,6 +617,11 @@ impl Engine {
     /// Returns the batch id (a UUID). A batch the journal can't record is refused whole, and
     /// nothing of it runs (ruling Q21). A batch without jobs changes nothing.
     pub fn submit(&self, batch: Batch) -> Result<String, JournalError> {
+        self.submit_batch(batch, false)
+    }
+
+    /// As [`Self::submit`]; `tracked` keeps each job's outcome for [`Self::wait_batch`].
+    fn submit_batch(&self, batch: Batch, tracked: bool) -> Result<String, JournalError> {
         let Batch {
             site,
             site_name,
@@ -614,6 +672,11 @@ impl Engine {
                 done_bytes: 0,
                 kinds: Kinds::default(),
             };
+            let mut track = tracked.then(|| Tracked {
+                id: batch_id.clone(),
+                lane,
+                jobs: HashMap::new(),
+            });
             for (id, record) in ids.into_iter().zip(records) {
                 let job = record.job;
                 let size = size_of(&job);
@@ -621,6 +684,10 @@ impl Engine {
                     Job::Download { remote, .. } => checksums.get(remote).cloned(),
                     _ => None,
                 };
+                if let Some(track) = &mut track {
+                    let remote = crate::lane::remote_of(&job).clone();
+                    track.jobs.insert(id, TrackedJob { remote, end: None });
+                }
                 info.open += 1;
                 info.kinds.note(job.kind());
                 st.run.kinds.note(job.kind());
@@ -633,6 +700,9 @@ impl Engine {
             }
             if info.open > 0 {
                 st.batches.insert(seq, info);
+            }
+            if let Some(track) = track {
+                st.tracked.insert(seq, track);
             }
         }
         self.inner.poke();
@@ -867,7 +937,9 @@ impl Engine {
                 .map(|(&id, _)| id)
                 .collect();
             for id in checked {
-                st.checks.remove(&id);
+                if let Some(check) = st.checks.remove(&id) {
+                    st.track(check.batch, id, Some(End::Cancelled));
+                }
                 self.inner.writer.set_state(id, JobState::Cancelled, None);
                 held.insert(id);
             }
@@ -1206,24 +1278,61 @@ impl Engine {
     }
 
     /// Submits `batch` as [`Self::submit`] does, and keeps its per-job outcomes for
-    /// [`Self::wait_batch`].
-    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
+    /// [`Self::wait_batch`], which must be called once for it. A batch without jobs is never
+    /// waited for.
     pub fn submit_tracked(&self, batch: Batch) -> Result<String, JournalError> {
-        todo!("T3")
+        self.submit_batch(batch, true)
     }
 
     /// Resolves when every job of the batch is done, failed or cancelled AND
     /// `pending_checks_for(site) == 0`; a check that sends a file again reopens the batch; a
-    /// stopped engine reports the rest as cancelled.
-    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
+    /// stopped engine reports the rest as cancelled. A batch id the engine doesn't track (one
+    /// without jobs, or taken already) gives an empty outcome at once.
     pub async fn wait_batch(&self, batch_id: &str) -> BatchOutcome {
-        todo!("T3")
+        let mut changes = self.changes();
+        loop {
+            {
+                let mut st = self.inner.lock();
+                let Some((&seq, tracked)) = st
+                    .tracked
+                    .iter()
+                    .find(|(_, tracked)| tracked.id == batch_id)
+                else {
+                    return BatchOutcome::default();
+                };
+                let lane = tracked.lane;
+                let settled =
+                    tracked.closed() && !st.checks.values().any(|check| check.lane == lane);
+                if (settled || st.shut_down)
+                    && let Some(tracked) = st.tracked.remove(&seq)
+                {
+                    return tracked.outcome();
+                }
+            }
+            if changes.changed().await.is_err() {
+                let mut st = self.inner.lock();
+                let seq = st
+                    .tracked
+                    .iter()
+                    .find(|(_, tracked)| tracked.id == batch_id)
+                    .map(|(&seq, _)| seq);
+                return seq
+                    .and_then(|seq| st.tracked.remove(&seq))
+                    .map(Tracked::outcome)
+                    .unwrap_or_default();
+            }
+        }
     }
 
     /// The late checks (Q55) still waiting for `site`.
-    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
     pub fn pending_checks_for(&self, site: &SiteId) -> usize {
-        todo!("T3")
+        let st = self.inner.lock();
+        st.lane_of.get(site).map_or(0, |&lane| {
+            st.checks
+                .values()
+                .filter(|check| check.lane == lane)
+                .count()
+        })
     }
 }
 
@@ -1377,6 +1486,19 @@ impl State {
             checks: HashMap::new(),
             run_seq: 0,
             rechecked: Rechecked::default(),
+            tracked: HashMap::new(),
+        }
+    }
+
+    /// Notes how job `id` of batch `batch` ended (`None`: it is open again), when the batch is
+    /// tracked.
+    fn track(&mut self, batch: u64, id: JobId, end: Option<End>) {
+        if let Some(job) = self
+            .tracked
+            .get_mut(&batch)
+            .and_then(|tracked| tracked.jobs.get_mut(&id))
+        {
+            job.end = end;
         }
     }
 
@@ -1641,6 +1763,7 @@ impl State {
             info.done_files += 1;
             info.done_bytes += size;
         }
+        self.track(batch, id, Some(End::Done { bytes: size }));
         self.batch_changed(batch, true);
         self.done.push_back(id);
         if self.done.len() > WINDOW
@@ -1658,7 +1781,7 @@ impl State {
         writer.set_state(id, JobState::Failed, Some(&reason));
         entry.status = Status::Failed;
         entry.done_bytes = 0;
-        entry.error = Some(reason);
+        entry.error = Some(reason.clone());
         entry.stop = None;
         let (size, batch) = (entry.size, entry.batch);
         self.run.bytes_failed += size;
@@ -1667,6 +1790,7 @@ impl State {
             info.open -= 1;
             info.failed += 1;
         }
+        self.track(batch, id, Some(End::Failed(reason)));
         self.batch_changed(batch, true);
     }
 
@@ -1696,6 +1820,7 @@ impl State {
                 info.open -= 1;
             }
         }
+        self.track(entry.batch, id, Some(End::Cancelled));
         // A failed job's batch had already finished: dropping the job is no news.
         self.batch_changed(entry.batch, !was_failed);
     }
@@ -1736,6 +1861,7 @@ impl State {
             info.failed -= 1;
             info.open += 1;
         }
+        self.track(batch, id, None);
         self.lanes[lane].queue.push_back(id);
     }
 
@@ -1775,6 +1901,7 @@ impl State {
             info.done_files = info.done_files.saturating_sub(1);
             info.done_bytes = info.done_bytes.saturating_sub(check.size);
         }
+        self.track(check.batch, id, None);
     }
 
     /// The checks that may be made now (ruling Q55), grouped by folder: those past their settle

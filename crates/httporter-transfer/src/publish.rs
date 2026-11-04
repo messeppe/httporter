@@ -1,9 +1,7 @@
 //! A publish: the plan made from a compare, and running it as engine batches (uploads, then
 //! deletes, then the CDN purge).
 
-// T1 skeleton: drop this once T2 and T3 fill the bodies.
-#![allow(unused_variables)]
-
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,11 +9,12 @@ use chrono::{DateTime, Utc};
 use httporter_core::{
     CdnPurger, CompareStatus, FileAction, FileOutcome, HistoryFile, HistoryRecord, Job,
     JournalError, ProfileId, PublishResult, PurgeMode, PurgeResult, RemotePath, SiteId,
-    StorageProvider,
+    StorageProvider, run_purge,
 };
 
 use crate::compare::{CompareResult, rel_of};
-use crate::engine::Engine;
+use crate::engine::{Batch, BatchOutcome, Engine};
+use crate::lane::remote_of;
 use crate::messages;
 
 /// One file of a plan.
@@ -296,13 +295,48 @@ pub struct PublishOutcome {
 }
 
 impl PublishOutcome {
+    /// The history record of this publish of `plan`. What the site holds afterwards is the
+    /// plan's count of its files, plus the new files uploaded, less the files deleted; files the
+    /// plan left out count as skipped.
     pub fn into_record(
         self,
         profile: ProfileId,
         plan: &PublishPlan,
         verified: bool,
     ) -> HistoryRecord {
-        todo!("T3")
+        let new: HashSet<RemotePath> = plan
+            .items
+            .iter()
+            .filter(|item| item.status == CompareStatus::New)
+            .filter_map(|item| remote_path(&plan.remote_root, &item.rel))
+            .collect();
+        let added = self
+            .files
+            .iter()
+            .filter(|file| {
+                file.action == FileAction::Upload
+                    && file.outcome == FileOutcome::Done
+                    && new.contains(&file.path)
+            })
+            .count() as u64;
+        HistoryRecord {
+            id: 0,
+            profile,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            result: self.result,
+            uploaded: self.uploaded,
+            deleted: self.deleted,
+            skipped: plan.items.iter().filter(|item| !item.include).count() as u64,
+            failed: self.failed,
+            bytes: self.bytes,
+            purge: self.purge,
+            verified,
+            remote_files: (plan.remote_files + added).saturating_sub(self.deleted),
+            remote_folders: plan.remote_folders,
+            regions: plan.regions,
+            files: self.files,
+        }
     }
 }
 
@@ -310,6 +344,10 @@ impl PublishOutcome {
 /// `NotRun("Not deleted because uploads failed.")`), then `run_purge` on the paths done.
 /// `wait_batch` includes the Q55 late-delete checks, so the purge never starts before them. A
 /// purge failure never fails the publish.
+///
+/// A cancelled upload stops the publish: its deletes are cancelled too. The result is Cancelled
+/// if any job was cancelled; else Ok if nothing failed; else Partial if something was done; else
+/// Failed. Only the uploads' journal entry failing is an error; the deletes' fails each delete.
 pub async fn run_publish(
     engine: &Engine,
     target: BatchTarget,
@@ -318,5 +356,173 @@ pub async fn run_publish(
     purger: Option<Arc<dyn CdnPurger>>,
     on_phase: &(dyn Fn(PublishPhase) + Send + Sync),
 ) -> Result<PublishOutcome, JournalError> {
-    todo!("T3")
+    let started_at = Utc::now();
+    let sizes: HashMap<RemotePath, u64> = plan
+        .items
+        .iter()
+        .filter(|item| item.include)
+        .filter_map(|item| Some((remote_path(&plan.remote_root, &item.rel)?, item.size)))
+        .collect();
+    let mut files = Vec::new();
+
+    on_phase(PublishPhase::Uploading);
+    let uploads = plan.uploads();
+    let up = run_batch(engine, &target, uploads.clone()).await?;
+    let bytes = up.bytes_done;
+    let stopped = !up.cancelled.is_empty();
+    let upload_failed = !up.failed.is_empty();
+    files.extend(history(&uploads, up, FileAction::Upload, &sizes));
+
+    let deletes = plan.deletes();
+    if !deletes.is_empty() {
+        let skipped = if stopped {
+            Some(FileOutcome::Cancelled)
+        } else if upload_failed {
+            Some(FileOutcome::NotRun(
+                messages::NOT_DELETED_UPLOADS_FAILED.to_owned(),
+            ))
+        } else {
+            None
+        };
+        let down = match skipped {
+            Some(outcome) => Err(outcome),
+            None => {
+                on_phase(PublishPhase::Deleting);
+                run_batch(engine, &target, deletes.clone())
+                    .await
+                    .map_err(|error| FileOutcome::Failed(error.to_string()))
+            }
+        };
+        match down {
+            Ok(down) => files.extend(history(&deletes, down, FileAction::Delete, &sizes)),
+            Err(outcome) => files.extend(deletes.iter().map(|job| {
+                let path = remote_of(job).clone();
+                HistoryFile {
+                    size: sizes.get(&path).copied().unwrap_or(0),
+                    path,
+                    action: FileAction::Delete,
+                    outcome: outcome.clone(),
+                }
+            })),
+        }
+    }
+
+    let done = |action: FileAction| {
+        files
+            .iter()
+            .filter(|file| file.action == action && file.outcome == FileOutcome::Done)
+            .count() as u64
+    };
+    let (uploaded, deleted) = (done(FileAction::Upload), done(FileAction::Delete));
+    let failed = files
+        .iter()
+        .filter(|file| matches!(file.outcome, FileOutcome::Failed(_)))
+        .count() as u64;
+    let cancelled = files
+        .iter()
+        .any(|file| file.outcome == FileOutcome::Cancelled);
+
+    let touched: Vec<RemotePath> = files
+        .iter()
+        .filter(|file| file.outcome == FileOutcome::Done)
+        .map(|file| file.path.clone())
+        .collect();
+    let purge = match (purge, purger) {
+        (PurgeMode::Off, _) => PurgeResult::Off,
+        // Nothing changed on the site: nothing to purge.
+        _ if touched.is_empty() => PurgeResult::Urls(0),
+        (_, None) => PurgeResult::Unavailable(messages::NO_PURGER.to_owned()),
+        (mode, Some(purger)) => {
+            let progress = |done: usize, total: usize| {
+                on_phase(PublishPhase::Purging { done, total });
+            };
+            run_purge(&*purger, mode, &touched, &progress).await
+        }
+    };
+
+    let result = if cancelled {
+        PublishResult::Cancelled
+    } else if failed == 0 {
+        PublishResult::Ok
+    } else if uploaded + deleted > 0 {
+        PublishResult::Partial
+    } else {
+        PublishResult::Failed
+    };
+    on_phase(PublishPhase::Finished);
+    Ok(PublishOutcome {
+        result,
+        files,
+        uploaded,
+        deleted,
+        failed,
+        bytes,
+        purge,
+        started_at,
+        finished_at: Utc::now(),
+    })
+}
+
+/// Runs `jobs` as one tracked batch and waits for it, Q55 checks included. No jobs, no batch.
+async fn run_batch(
+    engine: &Engine,
+    target: &BatchTarget,
+    jobs: Vec<Job>,
+) -> Result<BatchOutcome, JournalError> {
+    if jobs.is_empty() {
+        return Ok(BatchOutcome::default());
+    }
+    let batch = Batch {
+        site: target.site.clone(),
+        site_name: target.site_name.clone(),
+        host: target.host.clone(),
+        provider: target.provider.clone(),
+        jobs,
+        checksums: HashMap::new(),
+    };
+    // The journal is written before anything starts: a disk write, so off the runtime.
+    let submitter = engine.clone();
+    let id = tokio::task::spawn_blocking(move || submitter.submit_tracked(batch))
+        .await
+        .map_err(|_| JournalError(messages::STOPPED_UNEXPECTEDLY.to_owned()))??;
+    Ok(engine.wait_batch(&id).await)
+}
+
+/// A history line for each of `jobs`, from how its batch went.
+fn history(
+    jobs: &[Job],
+    outcome: BatchOutcome,
+    action: FileAction,
+    sizes: &HashMap<RemotePath, u64>,
+) -> Vec<HistoryFile> {
+    let mut ends: HashMap<RemotePath, FileOutcome> = HashMap::new();
+    ends.extend(
+        outcome
+            .done
+            .into_iter()
+            .map(|path| (path, FileOutcome::Done)),
+    );
+    ends.extend(
+        outcome
+            .failed
+            .into_iter()
+            .map(|(path, reason)| (path, FileOutcome::Failed(reason))),
+    );
+    ends.extend(
+        outcome
+            .cancelled
+            .into_iter()
+            .map(|path| (path, FileOutcome::Cancelled)),
+    );
+    jobs.iter()
+        .map(|job| {
+            let path = remote_of(job).clone();
+            HistoryFile {
+                outcome: ends.remove(&path).unwrap_or(FileOutcome::Cancelled),
+                size: sizes.get(&path).copied().unwrap_or(0),
+                path,
+                action,
+            }
+        })
+        .collect()
 }

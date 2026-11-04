@@ -60,3 +60,6 @@ pub mod plan_export {
 
 /// Why a publish didn't try to delete a file.
 pub const NOT_DELETED_UPLOADS_FAILED: &str = "Not deleted because uploads failed.";
+
+/// A publish meant to purge the CDN, but the app had no way to (no pull zone, no key).
+pub const NO_PURGER: &str = "The CDN couldn't be purged: no pull zone or account key.";
