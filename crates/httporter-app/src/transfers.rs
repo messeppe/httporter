@@ -43,7 +43,7 @@ use crate::copy::{self, Attempt};
 use crate::drawer_view::{REDRAW_EVERY, Throttle, apply_drawer, drawer_view};
 use crate::session::{RemotePlace, Session, SiteProvider, blocking, hub_error_text};
 use crate::sheets_view;
-use crate::site_hub::Interactive;
+use crate::site_hub::{Counting, Interactive};
 use crate::{AppWindow, SettingsWindow, settings_view};
 
 /// A run of transfers that took longer than this and ends while HTTPorter is in the background
@@ -53,6 +53,9 @@ const NOTIFY_AFTER: Duration = Duration::from_secs(20);
 /// How often the taskbar button's progress may be redrawn while it only moves on: every redraw
 /// is COM work. A change of state (paused, stopped, done) is drawn at once.
 const TASKBAR_EVERY: Duration = Duration::from_millis(250);
+
+/// How often the drawer shows how far the plans being worked out have got (review M4).
+const PLANNING_EVERY: Duration = Duration::from_millis(250);
 
 /// How long closing waits, at most, for the work in flight to stop, the journal to catch up and
 /// the uploads left in parts to be given up (review C1). The journal writes its updates in
@@ -162,23 +165,56 @@ impl Default for Feed {
 /// needs the conflict sheet or the delete alert is never lost, nor shown over the first.
 enum Waiting {
     Conflicts {
+        /// When the user asked for it ([`Transfers::next_asked`]).
+        asked: u64,
         pending: Pending,
         view: Box<sheets_view::ConflictSheetView>,
         note: Option<String>,
     },
     Delete {
+        asked: u64,
         pending: PendingDelete,
         /// Its title, text and button.
         alert: (String, String, String),
     },
 }
 
+impl Waiting {
+    fn asked(&self) -> u64 {
+        match self {
+            Self::Conflicts { asked, .. } | Self::Delete { asked, .. } => *asked,
+        }
+    }
+
+    fn site(&self) -> &SiteId {
+        match self {
+            Self::Conflicts { pending, .. } => &pending.target.site.id,
+            Self::Delete { pending, .. } => &pending.target.site.id,
+        }
+    }
+}
+
+/// What a plan being worked out is for, and how far it has got (review M4).
+struct Planning {
+    /// One of the `copy::PREPARING_*` lines.
+    what: &'static str,
+    /// The entries its listings have found so far.
+    found: Arc<AtomicU64>,
+    /// Stops it; set once its task is spawned.
+    abort: Option<tokio::task::AbortHandle>,
+}
+
 #[derive(Default)]
 struct State {
     conflict: Option<Pending>,
     delete: Option<PendingDelete>,
-    /// Questions to ask after the one on screen, in the order they came.
+    /// Questions to ask after the one on screen, in the order the user asked them in (not the
+    /// order their plans were ready in).
     waiting: VecDeque<Waiting>,
+    /// The plans being worked out, by when they were asked.
+    planning: HashMap<u64, Planning>,
+    /// A task redraws the drawer while plans are worked out.
+    planning_shown: bool,
     new_folder: Option<FolderPlace>,
     affected: Vec<Affected>,
     feed: Feed,
@@ -191,6 +227,28 @@ impl State {
     /// The conflict sheet or the delete alert is up.
     fn asking(&self) -> bool {
         self.conflict.is_some() || self.delete.is_some()
+    }
+
+    /// Puts a question in line by when it was asked, so a quick plan asked later doesn't jump
+    /// ahead of a slow one asked first.
+    fn wait(&mut self, waiting: Waiting) {
+        let at = self
+            .waiting
+            .iter()
+            .position(|other| other.asked() > waiting.asked())
+            .unwrap_or(self.waiting.len());
+        self.waiting.insert(at, waiting);
+    }
+
+    /// The drawer's line for the plans being worked out: the first one asked, and how far it
+    /// has got.
+    fn planning_text(&self) -> Option<String> {
+        let first = self.planning.keys().min()?;
+        let planning = &self.planning[first];
+        Some(copy::preparing(
+            planning.what,
+            planning.found.load(Ordering::Relaxed),
+        ))
     }
 }
 
@@ -211,6 +269,9 @@ pub struct Transfers {
     /// Goes up with every change of settings: the clients built for one are handed to the
     /// engine only while no other change came since (see `apply_settings`).
     settings_generation: AtomicU64,
+    /// Counts what the user asked for (an upload, a download, a delete), to keep the questions
+    /// in that order.
+    asked: AtomicU64,
     /// Publish's purge for the delete alert, once installed.
     delete_purge: std::sync::OnceLock<Arc<dyn DeletePurge>>,
 }
@@ -240,8 +301,94 @@ impl Transfers {
             state: Mutex::new(State::default()),
             applying: Mutex::new(()),
             settings_generation: AtomicU64::new(0),
+            asked: AtomicU64::new(0),
             delete_purge: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The next number for something the user asked for.
+    fn next_asked(&self) -> u64 {
+        self.asked.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Works out a plan (`plan`, given what its listings find) on the runtime, shown in the
+    /// drawer with how far it has got, where Cancel stops it (review M4).
+    fn plan(
+        self: &Arc<Self>,
+        asked: u64,
+        what: &'static str,
+        plan: impl FnOnce(Arc<AtomicU64>) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    ) {
+        let found = Arc::new(AtomicU64::new(0));
+        lock(&self.state).planning.insert(
+            asked,
+            Planning {
+                what,
+                found: found.clone(),
+                abort: None,
+            },
+        );
+        let work = plan(found);
+        let this = self.clone();
+        let task = self.link.rt().spawn(async move {
+            work.await;
+            lock(&this.state).planning.remove(&asked);
+        });
+        if let Some(planning) = lock(&self.state).planning.get_mut(&asked) {
+            planning.abort = Some(task.abort_handle());
+        }
+        self.show_planning();
+    }
+
+    /// Redraws the drawer every [`PLANNING_EVERY`] while plans are worked out, and once more
+    /// when the last one ends.
+    fn show_planning(self: &Arc<Self>) {
+        {
+            let mut state = lock(&self.state);
+            if state.planning_shown {
+                return;
+            }
+            state.planning_shown = true;
+        }
+        let this = self.clone();
+        self.link.rt().spawn(async move {
+            loop {
+                tokio::time::sleep(PLANNING_EVERY).await;
+                let more = {
+                    let mut state = lock(&this.state);
+                    state.planning_shown = !state.planning.is_empty();
+                    state.planning_shown
+                };
+                let tick = this.clone();
+                let shown = this
+                    .link
+                    .ui()
+                    .upgrade_in_event_loop(move |ui| tick.tick(&ui))
+                    .is_ok();
+                if !more || !shown {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// The drawer's Cancel: the plans being worked out stop, before anything of theirs is
+    /// transferred.
+    fn cancel_planning(&self) {
+        let stopped: Vec<Planning> = lock(&self.state)
+            .planning
+            .drain()
+            .map(|(_, planning)| planning)
+            .collect();
+        if stopped.is_empty() {
+            return;
+        }
+        for planning in stopped {
+            if let Some(abort) = planning.abort {
+                abort.abort();
+            }
+        }
+        self.link.status(copy::PREPARING_CANCELLED.to_owned());
     }
 
     /// The site of `place` with the client a batch for it should use: the hub's current one (new
@@ -310,6 +457,13 @@ impl Transfers {
                 .status(note.unwrap_or_else(|| copy::NOTHING_TO_TRANSFER.to_owned()));
             return;
         }
+        // Removed while it was planned or asked about: its batch would run on a site the
+        // sidebar no longer has.
+        if self.session.site(&target.site.id).is_none() {
+            self.link
+                .status(copy::transfer_site_gone(&target.site.name));
+            return;
+        }
         let batch = Batch {
             site: target.site.id.clone(),
             site_name: target.site.name.clone(),
@@ -342,9 +496,12 @@ impl Transfers {
         };
         let dir = folder.unwrap_or_else(|| place.dir.clone());
         self.link.status(copy::PREPARING_UPLOAD.to_owned());
+        let asked = self.next_asked();
         let this = self.clone();
-        self.link.rt().spawn(async move {
-            this.plan_upload(place, sources, dir).await;
+        self.plan(asked, copy::PREPARING_UPLOAD, move |found| {
+            Box::pin(async move {
+                this.plan_upload(place, sources, dir, asked, found).await;
+            })
         });
     }
 
@@ -374,10 +531,20 @@ impl Transfers {
         }
     }
 
-    async fn plan_upload(&self, place: RemotePlace, sources: Vec<PathBuf>, dir: RemotePath) {
+    async fn plan_upload(
+        &self,
+        place: RemotePlace,
+        sources: Vec<PathBuf>,
+        dir: RemotePath,
+        asked: u64,
+        found: Arc<AtomicU64>,
+    ) {
         let target = self.target(place).await;
         let site = target.site.clone();
-        let planner = Interactive(target.provider.clone());
+        let planner = Counting {
+            inner: Interactive(target.provider.clone()),
+            found,
+        };
         let plan = match plan_upload(&planner, &sources, &dir).await {
             Ok(plan) => plan,
             Err(e) => {
@@ -398,7 +565,7 @@ impl Transfers {
             Some(all) => all,
             // Nothing to ask about: the resolution touches no file.
             None if plan.conflicts.is_empty() => Resolution::Replace,
-            None => return self.ask(target, Planned::Upload(plan, dir), note),
+            None => return self.ask(target, Planned::Upload(plan, dir), note, asked),
         };
         let jobs = resolve_uploads(plan, all, &HashMap::new());
         let affected = Affected::Remote(site.id, dir);
@@ -435,17 +602,30 @@ impl Transfers {
 
     fn start_download(self: &Arc<Self>, place: RemotePlace, entries: Vec<Entry>, dir: PathBuf) {
         self.link.status(copy::PREPARING_DOWNLOAD.to_owned());
+        let asked = self.next_asked();
         let this = self.clone();
-        self.link.rt().spawn(async move {
-            this.plan_download(place, entries, dir).await;
+        self.plan(asked, copy::PREPARING_DOWNLOAD, move |found| {
+            Box::pin(async move {
+                this.plan_download(place, entries, dir, asked, found).await;
+            })
         });
     }
 
-    async fn plan_download(&self, place: RemotePlace, entries: Vec<Entry>, dir: PathBuf) {
+    async fn plan_download(
+        &self,
+        place: RemotePlace,
+        entries: Vec<Entry>,
+        dir: PathBuf,
+        asked: u64,
+        found: Arc<AtomicU64>,
+    ) {
         let from = place.dir.clone();
         let target = self.target(place).await;
         let site = target.site.clone();
-        let planner = Interactive(target.provider.clone());
+        let planner = Counting {
+            inner: Interactive(target.provider.clone()),
+            found,
+        };
         let plan = match plan_download(&planner, &entries, &dir).await {
             Ok(plan) => plan,
             Err(e) => {
@@ -467,7 +647,7 @@ impl Transfers {
         let all = match policy_to_resolution(policy) {
             Some(all) => all,
             None if plan.conflicts.is_empty() => Resolution::Replace,
-            None => return self.ask(target, Planned::Download(plan, dir), note),
+            None => return self.ask(target, Planned::Download(plan, dir), note, asked),
         };
         // What arrives is checked against the listing (ruling Q27).
         let checksums = plan.checksums.clone();
@@ -480,7 +660,7 @@ impl Transfers {
 
     /// Shows the conflict sheet for `planned` and keeps it until the sheet is answered. While
     /// another question is up, it waits its turn (review I6).
-    fn ask(&self, target: Target, planned: Planned, note: Option<String>) {
+    fn ask(&self, target: Target, planned: Planned, note: Option<String>, asked: u64) {
         let short = match SiteProvider::of(&target.site) {
             SiteProvider::Bunny => copy::BUNNY,
             SiteProvider::S3(preset) => preset.label(),
@@ -508,7 +688,8 @@ impl Transfers {
         {
             let mut state = lock(&self.state);
             if state.asking() {
-                state.waiting.push_back(Waiting::Conflicts {
+                state.wait(Waiting::Conflicts {
+                    asked,
                     pending,
                     view: Box::new(view),
                     note,
@@ -560,11 +741,12 @@ impl Transfers {
                     pending,
                     view,
                     note,
+                    ..
                 }) => {
                     state.conflict = Some(pending);
                     Ok((view, note))
                 }
-                Some(Waiting::Delete { pending, alert }) => {
+                Some(Waiting::Delete { pending, alert, .. }) => {
                     state.delete = Some(pending);
                     Err(alert)
                 }
@@ -634,44 +816,54 @@ impl Transfers {
             return;
         };
         self.link.status(copy::PREPARING_DELETE.to_owned());
+        let asked = self.next_asked();
         let this = self.clone();
-        self.link.rt().spawn(async move {
-            let dir = place.dir.clone();
-            let target = this.target(place).await;
-            let site = target.site.clone();
-            let planner = Interactive(target.provider.clone());
-            let plan = match plan_delete(&planner, &entries).await {
-                Ok(plan) => plan,
-                Err(e) => {
-                    let text = copy::describe_for(
-                        site.provider,
-                        &e,
-                        &site.container,
-                        &site.host,
-                        Attempt::List(&dir),
-                    );
-                    this.link.status(text);
-                    return;
+        self.plan(asked, copy::PREPARING_DELETE, move |found| {
+            Box::pin(async move {
+                let dir = place.dir.clone();
+                let target = this.target(place).await;
+                let site = target.site.clone();
+                let planner = Counting {
+                    inner: Interactive(target.provider.clone()),
+                    found,
+                };
+                let plan = match plan_delete(&planner, &entries).await {
+                    Ok(plan) => plan,
+                    Err(e) => {
+                        let text = copy::describe_for(
+                            site.provider,
+                            &e,
+                            &site.container,
+                            &site.host,
+                            Attempt::List(&dir),
+                        );
+                        this.link.status(text);
+                        return;
+                    }
+                };
+                let alert = sheets_view::delete_alert(&plan.summary, &site.name, site.provider);
+                let pending = PendingDelete {
+                    target,
+                    dir,
+                    jobs: plan.jobs,
+                };
+                {
+                    // A question already up keeps its place; this one waits (review I6).
+                    let mut state = lock(&this.state);
+                    if state.asking() {
+                        state.wait(Waiting::Delete {
+                            asked,
+                            pending,
+                            alert,
+                        });
+                        drop(state);
+                        this.link.status(copy::ASKED_NEXT.to_owned());
+                        return;
+                    }
+                    state.delete = Some(pending);
                 }
-            };
-            let alert = sheets_view::delete_alert(&plan.summary, &site.name, site.provider);
-            let pending = PendingDelete {
-                target,
-                dir,
-                jobs: plan.jobs,
-            };
-            {
-                // A question already up keeps its place; this one waits (review I6).
-                let mut state = lock(&this.state);
-                if state.asking() {
-                    state.waiting.push_back(Waiting::Delete { pending, alert });
-                    drop(state);
-                    this.link.status(copy::ASKED_NEXT.to_owned());
-                    return;
-                }
-                state.delete = Some(pending);
-            }
-            this.show_delete_alert(alert);
+                this.show_delete_alert(alert);
+            })
         });
     }
 
@@ -844,9 +1036,10 @@ impl Transfers {
         ui.set_resume_banner_text(text.into());
     }
 
-    /// Resume on the resume banner: the unfinished jobs go back to their sites' queues. If a site
-    /// they go to still exists but can't be opened (its password can't be read), nothing is
-    /// resumed and the banner stays: resuming without it would cancel that site's jobs.
+    /// Resume on the resume banner: the unfinished jobs go back to their sites' queues, each
+    /// site on its own (review M14). A site that still exists but can't be opened (its password
+    /// can't be read) keeps its jobs as they are, and the banner offers them again: resuming
+    /// without it would cancel them. The other sites' jobs go on.
     fn resume_journal(self: &Arc<Self>, ui: &AppWindow) {
         ui.set_resume_banner_text(SharedString::new());
         let this = self.clone();
@@ -854,8 +1047,9 @@ impl Transfers {
             // The engine counts a journal it can't read; then there is nothing to resume.
             let records = this.journal.unfinished().unwrap_or_default();
             let mut sites: HashMap<SiteId, Option<SiteInfo>> = HashMap::new();
+            let mut kept: HashSet<SiteId> = HashSet::new();
             for record in &records {
-                if sites.contains_key(&record.site) {
+                if sites.contains_key(&record.site) || kept.contains(&record.site) {
                     continue;
                 }
                 let info = match this.session.site(&record.site) {
@@ -867,19 +1061,22 @@ impl Transfers {
                             let reason = hub_error_text(&e, &site);
                             this.link
                                 .status(copy::resume_needs_site(&site.name, &reason));
-                            let again = this.clone();
-                            let _ = this
-                                .link
-                                .ui()
-                                .upgrade_in_event_loop(move |ui| again.offer_resume(&ui));
-                            return;
+                            kept.insert(record.site.clone());
+                            continue;
                         }
                     },
                 };
                 sites.insert(record.site.clone(), info);
             }
             let lookup = |id: &SiteId| sites.get(id).cloned().flatten();
-            this.engine.resume_from_journal(&lookup);
+            this.engine.resume_from_journal_except(&lookup, &kept);
+            if !kept.is_empty() {
+                let again = this.clone();
+                let _ = this
+                    .link
+                    .ui()
+                    .upgrade_in_event_loop(move |ui| again.offer_resume(&ui));
+            }
         });
     }
 
@@ -924,6 +1121,10 @@ impl Transfers {
     /// transfers have stopped and the journal has their cancels, the cancelled records go and
     /// the resume banner counts what is left.
     pub fn forget_site(self: &Arc<Self>, site: &SiteId) {
+        // Its questions still waiting would ask about a site that is gone.
+        lock(&self.state)
+            .waiting
+            .retain(|waiting| waiting.site() != site);
         let provider = self.engine.site_provider(site).or_else(|| {
             let record = self.session.site(site)?;
             self.session.hub().provider(&record).ok()
@@ -1031,9 +1232,20 @@ impl Transfers {
             state.feed.resent_told = rechecked.resent;
             copy::rechecked(rechecked.checked, rechecked.resent)
         });
+        let planning = state.planning_text();
         drop(state);
 
-        apply_drawer(ui, &drawer_view(&snapshot, Utc::now()));
+        let mut drawer = drawer_view(&snapshot, Utc::now());
+        // A plan being worked out shows in an idle drawer, where Cancel stops it (review M4).
+        if let Some(text) = planning
+            && !drawer.running
+        {
+            drawer.running = true;
+            drawer.title.clone_from(&text);
+            drawer.collapsed_text = text;
+            drawer.line = String::new();
+        }
+        apply_drawer(ui, &drawer);
         show_banners(ui, &snapshot.state);
         let notice =
             (snapshot.journal_errors > 0).then(|| copy::journal_errors(snapshot.journal_errors));
@@ -1271,6 +1483,13 @@ pub fn install(ui: &AppWindow, transfers: &Arc<Transfers>) {
 
 fn install_drawer(ui: &AppWindow, transfers: &Arc<Transfers>) {
     let engine = &transfers.engine;
+    ui.on_transfers_cancel_all({
+        let transfers = transfers.clone();
+        move || {
+            transfers.cancel_planning();
+            transfers.engine.cancel_all();
+        }
+    });
     let id = |id: i32| JobId(u64::try_from(id).unwrap_or(0));
     ui.on_transfers_pause({
         let engine = engine.clone();
@@ -1279,10 +1498,6 @@ fn install_drawer(ui: &AppWindow, transfers: &Arc<Transfers>) {
     ui.on_transfers_resume({
         let engine = engine.clone();
         move || engine.resume_all()
-    });
-    ui.on_transfers_cancel_all({
-        let engine = engine.clone();
-        move || engine.cancel_all()
     });
     ui.on_transfer_cancel({
         let engine = engine.clone();

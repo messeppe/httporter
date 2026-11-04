@@ -132,6 +132,13 @@ pub const WINDOW: usize = 200;
 /// The journal writer takes at most this many updates in one go.
 const JOURNAL_CHUNK: usize = 512;
 
+/// The waits before a chunk the journal failed to write is tried again, once after each.
+const JOURNAL_RETRIES: [Duration; 3] = [
+    Duration::from_millis(100),
+    Duration::from_millis(500),
+    Duration::from_secs(2),
+];
+
 /// Jobs for one site, submitted together.
 pub struct Batch {
     pub site: SiteId,
@@ -203,23 +210,27 @@ struct Aborts {
 }
 
 /// Counts one abort as running until it is dropped: when the task ends, or is dropped unrun.
-struct AbortRunning(Arc<AtomicUsize>, Arc<watch::Sender<u64>>);
+/// Only counts: a task dropped unrun (the runtime shutting down) is dropped where it was
+/// spawned, which may be with the engine's state locked, where watchers must not be told.
+struct AbortRunning(Arc<AtomicUsize>);
 
 impl Drop for AbortRunning {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
-        self.1.send_modify(|n| *n = n.wrapping_add(1));
     }
 }
 
 impl Aborts {
-    /// Gives up the upload `upload_id` of `remote` through `provider`, in a task.
+    /// Gives up the upload `upload_id` of `remote` through `provider`, in a task, which tells
+    /// the watchers once it is no longer counted.
     fn send(&self, provider: Arc<dyn StorageProvider>, remote: RemotePath, upload_id: String) {
         self.running.fetch_add(1, Ordering::SeqCst);
-        let running = AbortRunning(self.running.clone(), self.changes.clone());
+        let running = AbortRunning(self.running.clone());
+        let changes = self.changes.clone();
         self.rt.spawn(async move {
-            let _running = running;
             let _ = provider.abort_multipart(&remote, &upload_id).await;
+            drop(running);
+            changes.send_modify(|n| *n = n.wrapping_add(1));
         });
     }
 
@@ -430,6 +441,56 @@ enum Due {
     Now(Vec<CheckFolder>),
 }
 
+/// A batch submitted with [`Engine::submit_tracked`]: how each of its jobs ended so far, kept
+/// until [`Engine::wait_batch`] takes it.
+#[derive(Debug)]
+struct Tracked {
+    /// The id [`Engine::submit_tracked`] returned.
+    id: String,
+    lane: usize,
+    jobs: HashMap<JobId, TrackedJob>,
+}
+
+#[derive(Debug)]
+struct TrackedJob {
+    remote: RemotePath,
+    /// `None` while it is queued or running, or once a check sent it again.
+    end: Option<End>,
+}
+
+/// How a job of a tracked batch ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum End {
+    Done { bytes: u64 },
+    Failed(String),
+    Cancelled,
+}
+
+impl Tracked {
+    /// Every job has ended (a failed one too).
+    fn closed(&self) -> bool {
+        self.jobs.values().all(|job| job.end.is_some())
+    }
+
+    /// The outcome; a job not ended yet counts as cancelled (the engine stopped).
+    fn outcome(self) -> BatchOutcome {
+        let mut jobs: Vec<(JobId, TrackedJob)> = self.jobs.into_iter().collect();
+        jobs.sort_unstable_by_key(|(id, _)| *id);
+        let mut outcome = BatchOutcome::default();
+        for (_, job) in jobs {
+            match job.end {
+                Some(End::Done { bytes }) => {
+                    outcome.done.push(job.remote);
+                    outcome.bytes_done += bytes;
+                }
+                Some(End::Failed(reason)) => outcome.failed.push((job.remote, reason)),
+                Some(End::Cancelled) | None => outcome.cancelled.push(job.remote),
+            }
+        }
+        outcome
+    }
+}
+
 /// A submitted batch, until all of its jobs have ended.
 #[derive(Debug)]
 struct BatchInfo {
@@ -473,6 +534,9 @@ struct State {
     run_seq: u64,
     /// What the checks found since the engine started.
     rechecked: Rechecked,
+    /// The batches submitted with [`Engine::submit_tracked`], by their number, until
+    /// [`Engine::wait_batch`] takes them.
+    tracked: HashMap<u64, Tracked>,
 }
 
 impl Engine {
@@ -564,6 +628,11 @@ impl Engine {
     /// Returns the batch id (a UUID). A batch the journal can't record is refused whole, and
     /// nothing of it runs (ruling Q21). A batch without jobs changes nothing.
     pub fn submit(&self, batch: Batch) -> Result<String, JournalError> {
+        self.submit_batch(batch, false)
+    }
+
+    /// As [`Self::submit`]; `tracked` keeps each job's outcome for [`Self::wait_batch`].
+    fn submit_batch(&self, batch: Batch, tracked: bool) -> Result<String, JournalError> {
         let Batch {
             site,
             site_name,
@@ -614,6 +683,11 @@ impl Engine {
                 done_bytes: 0,
                 kinds: Kinds::default(),
             };
+            let mut track = tracked.then(|| Tracked {
+                id: batch_id.clone(),
+                lane,
+                jobs: HashMap::new(),
+            });
             for (id, record) in ids.into_iter().zip(records) {
                 let job = record.job;
                 let size = size_of(&job);
@@ -621,6 +695,10 @@ impl Engine {
                     Job::Download { remote, .. } => checksums.get(remote).cloned(),
                     _ => None,
                 };
+                if let Some(track) = &mut track {
+                    let remote = crate::lane::remote_of(&job).clone();
+                    track.jobs.insert(id, TrackedJob { remote, end: None });
+                }
                 info.open += 1;
                 info.kinds.note(job.kind());
                 st.run.kinds.note(job.kind());
@@ -633,6 +711,9 @@ impl Engine {
             }
             if info.open > 0 {
                 st.batches.insert(seq, info);
+            }
+            if let Some(track) = track {
+                st.tracked.insert(seq, track);
             }
         }
         self.inner.poke();
@@ -867,7 +948,9 @@ impl Engine {
                 .map(|(&id, _)| id)
                 .collect();
             for id in checked {
-                st.checks.remove(&id);
+                if let Some(check) = st.checks.remove(&id) {
+                    st.track(check.batch, id, Some(End::Cancelled));
+                }
                 self.inner.writer.set_state(id, JobState::Cancelled, None);
                 held.insert(id);
             }
@@ -1036,6 +1119,17 @@ impl Engine {
     /// offered again; records this engine already holds (or is about to check) are left alone.
     /// Downloads resume unverified (their listed checksums aren't journalled).
     pub fn resume_from_journal(&self, lookup: SiteLookup<'_>) -> usize {
+        self.resume_from_journal_except(lookup, &HashSet::new())
+    }
+
+    /// As [`Self::resume_from_journal`], leaving the records of the sites in `keep` as they are:
+    /// neither resumed nor cancelled, so they are offered again (review M14: a site whose
+    /// password can't be read now doesn't hold the other sites back).
+    pub fn resume_from_journal_except(
+        &self,
+        lookup: SiteLookup<'_>,
+        keep: &HashSet<SiteId>,
+    ) -> usize {
         let records = match self.inner.journal.unfinished() {
             Ok(records) => records,
             Err(_) => {
@@ -1043,6 +1137,10 @@ impl Engine {
                 return 0;
             }
         };
+        let records: Vec<JobRecord> = records
+            .into_iter()
+            .filter(|record| !keep.contains(&record.site))
+            .collect();
         // Each site is looked up once, before the lock is taken: `lookup` is the app's code.
         let mut sites: HashMap<SiteId, Option<SiteInfo>> = HashMap::new();
         for record in &records {
@@ -1206,24 +1304,61 @@ impl Engine {
     }
 
     /// Submits `batch` as [`Self::submit`] does, and keeps its per-job outcomes for
-    /// [`Self::wait_batch`].
-    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
+    /// [`Self::wait_batch`], which must be called once for it. A batch without jobs is never
+    /// waited for.
     pub fn submit_tracked(&self, batch: Batch) -> Result<String, JournalError> {
-        todo!("T3")
+        self.submit_batch(batch, true)
     }
 
     /// Resolves when every job of the batch is done, failed or cancelled AND
     /// `pending_checks_for(site) == 0`; a check that sends a file again reopens the batch; a
-    /// stopped engine reports the rest as cancelled.
-    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
+    /// stopped engine reports the rest as cancelled. A batch id the engine doesn't track (one
+    /// without jobs, or taken already) gives an empty outcome at once.
     pub async fn wait_batch(&self, batch_id: &str) -> BatchOutcome {
-        todo!("T3")
+        let mut changes = self.changes();
+        loop {
+            {
+                let mut st = self.inner.lock();
+                let Some((&seq, tracked)) = st
+                    .tracked
+                    .iter()
+                    .find(|(_, tracked)| tracked.id == batch_id)
+                else {
+                    return BatchOutcome::default();
+                };
+                let lane = tracked.lane;
+                let settled =
+                    tracked.closed() && !st.checks.values().any(|check| check.lane == lane);
+                if (settled || st.shut_down)
+                    && let Some(tracked) = st.tracked.remove(&seq)
+                {
+                    return tracked.outcome();
+                }
+            }
+            if changes.changed().await.is_err() {
+                let mut st = self.inner.lock();
+                let seq = st
+                    .tracked
+                    .iter()
+                    .find(|(_, tracked)| tracked.id == batch_id)
+                    .map(|(&seq, _)| seq);
+                return seq
+                    .and_then(|seq| st.tracked.remove(&seq))
+                    .map(Tracked::outcome)
+                    .unwrap_or_default();
+            }
+        }
     }
 
     /// The late checks (Q55) still waiting for `site`.
-    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
     pub fn pending_checks_for(&self, site: &SiteId) -> usize {
-        todo!("T3")
+        let st = self.inner.lock();
+        st.lane_of.get(site).map_or(0, |&lane| {
+            st.checks
+                .values()
+                .filter(|check| check.lane == lane)
+                .count()
+        })
     }
 }
 
@@ -1377,6 +1512,19 @@ impl State {
             checks: HashMap::new(),
             run_seq: 0,
             rechecked: Rechecked::default(),
+            tracked: HashMap::new(),
+        }
+    }
+
+    /// Notes how job `id` of batch `batch` ended (`None`: it is open again), when the batch is
+    /// tracked.
+    fn track(&mut self, batch: u64, id: JobId, end: Option<End>) {
+        if let Some(job) = self
+            .tracked
+            .get_mut(&batch)
+            .and_then(|tracked| tracked.jobs.get_mut(&id))
+        {
+            job.end = end;
         }
     }
 
@@ -1641,6 +1789,7 @@ impl State {
             info.done_files += 1;
             info.done_bytes += size;
         }
+        self.track(batch, id, Some(End::Done { bytes: size }));
         self.batch_changed(batch, true);
         self.done.push_back(id);
         if self.done.len() > WINDOW
@@ -1658,7 +1807,7 @@ impl State {
         writer.set_state(id, JobState::Failed, Some(&reason));
         entry.status = Status::Failed;
         entry.done_bytes = 0;
-        entry.error = Some(reason);
+        entry.error = Some(reason.clone());
         entry.stop = None;
         let (size, batch) = (entry.size, entry.batch);
         self.run.bytes_failed += size;
@@ -1667,6 +1816,7 @@ impl State {
             info.open -= 1;
             info.failed += 1;
         }
+        self.track(batch, id, Some(End::Failed(reason)));
         self.batch_changed(batch, true);
     }
 
@@ -1696,6 +1846,7 @@ impl State {
                 info.open -= 1;
             }
         }
+        self.track(entry.batch, id, Some(End::Cancelled));
         // A failed job's batch had already finished: dropping the job is no news.
         self.batch_changed(entry.batch, !was_failed);
     }
@@ -1736,6 +1887,7 @@ impl State {
             info.failed -= 1;
             info.open += 1;
         }
+        self.track(batch, id, None);
         self.lanes[lane].queue.push_back(id);
     }
 
@@ -1775,6 +1927,7 @@ impl State {
             info.done_files = info.done_files.saturating_sub(1);
             info.done_bytes = info.done_bytes.saturating_sub(check.size);
         }
+        self.track(check.batch, id, None);
     }
 
     /// The checks that may be made now (ruling Q55), grouped by folder: those past their settle
@@ -1879,6 +2032,11 @@ impl State {
                 site: lane.name.clone(),
             };
         }
+        // The user's pause outranks an offline site (review M13): nothing would be sent anyway,
+        // and the drawer then offers Resume.
+        if self.paused && self.has_work() {
+            return EngineState::Paused;
+        }
         if let Some(lane) = self
             .lanes
             .iter()
@@ -1888,9 +2046,7 @@ impl State {
                 site: lane.name.clone(),
             };
         }
-        if self.paused && self.has_work() {
-            EngineState::Paused
-        } else if self.lanes.iter().any(Lane::is_moving) {
+        if self.lanes.iter().any(Lane::is_moving) {
             EngineState::Running
         } else {
             EngineState::Idle
@@ -2107,6 +2263,26 @@ impl Inner {
             entry.done_bytes += counted;
             st.run.bytes_in_flight += counted;
             st.rates.record(now, 0, bytes);
+        }
+        self.bump();
+    }
+
+    /// `bytes` of an upload in flight were stored by an earlier attempt (the parts a resumed
+    /// multipart upload skips): counted done, but not as sent now, so they make no speed (and
+    /// aren't counted at once when the job is done either).
+    pub(crate) fn already_stored(&self, unit: UnitId, id: JobId, bytes: u64) {
+        {
+            let mut guard = self.lock();
+            let st = &mut *guard;
+            let Some(entry) = st.jobs.get_mut(id) else {
+                return;
+            };
+            if entry.status != Status::Active(unit) {
+                return;
+            }
+            let counted = bytes.min(entry.size.saturating_sub(entry.done_bytes));
+            entry.done_bytes += counted;
+            st.run.bytes_in_flight += counted;
         }
         self.bump();
     }
@@ -2347,7 +2523,7 @@ impl Inner {
     /// touched (review N1): sending them back to the queue would restart each from byte 0, twice
     /// for every such job.
     fn go_offline(self: &Arc<Self>, lane: usize) {
-        let cycle = {
+        let start_probe = {
             let mut guard = self.lock();
             let st = &mut *guard;
             if st.shut_down {
@@ -2360,9 +2536,13 @@ impl Inner {
             lane_ref.state = LaneState::Offline;
             lane_ref.network.clear();
             lane_ref.cycle += 1;
-            lane_ref.cycle
+            // One probe per lane: one still waiting from a cycle that ended within its last
+            // sleep takes this cycle on.
+            !std::mem::replace(&mut lane_ref.probing, true)
         };
-        self.rt.spawn(offline::probe(self.clone(), lane, cycle));
+        if start_probe {
+            self.rt.spawn(offline::probe(self.clone(), lane));
+        }
         self.bump();
     }
 
@@ -2415,17 +2595,26 @@ impl Inner {
 
     /// The client to probe an offline lane's site with; `None` once the lane isn't offline or
     /// the engine has stopped.
-    pub(crate) fn offline_provider(&self, lane: usize) -> Option<Arc<dyn StorageProvider>> {
-        let st = self.lock();
-        let lane = &st.lanes[lane];
-        (!st.shut_down && lane.state == LaneState::Offline).then(|| lane.provider.clone())
+    /// With its offline cycle. `None` also ends the lane's probing: the next time it goes offline
+    /// starts a new probe.
+    pub(crate) fn offline_provider(&self, lane: usize) -> Option<(Arc<dyn StorageProvider>, u64)> {
+        let mut guard = self.lock();
+        let st = &mut *guard;
+        let shut_down = st.shut_down;
+        let lane = &mut st.lanes[lane];
+        if shut_down || lane.state != LaneState::Offline {
+            lane.probing = false;
+            return None;
+        }
+        Some((lane.provider.clone(), lane.cycle))
     }
 
-    /// An offline lane's site answered: back to work.
+    /// An offline lane's site answered: back to work. Its probe ends.
     pub(crate) fn back_online(&self, lane: usize) {
         {
             let mut st = self.lock();
             let lane = &mut st.lanes[lane];
+            lane.probing = false;
             if lane.state != LaneState::Offline {
                 return;
             }
@@ -2667,10 +2856,13 @@ impl JournalWriter {
 /// [`Journal::apply`]: one transaction, one disk sync, however many there are (review C1:
 /// cancelling 13,793 jobs one commit at a time took about 9 s, longer than closing waited).
 ///
-/// A write that fails leaves the job's older record: after a crash a finished job may be
-/// offered again, or a failed one forgotten. The job's state in memory is unaffected; the
-/// failure is counted (every update of the chunk, since the journal can't say which were
-/// written), and the snapshot's `journal_errors` lets the app warn.
+/// A chunk that fails to be written stays at the head and is tried again after each of the
+/// [`JOURNAL_RETRIES`] waits (a busy disk, a locked file); the updates queued meanwhile wait
+/// behind it, so the order holds. Only once every try failed is it given up: the job's older
+/// record stays, so after a crash a finished job may be offered again, or a failed one
+/// forgotten. The job's state in memory is unaffected; the failure is counted (every update of
+/// the chunk, since the journal can't say which were written), and the snapshot's
+/// `journal_errors` lets the app warn.
 async fn write_journal(
     mut rx: mpsc::UnboundedReceiver<JournalUpdate>,
     journal: Arc<dyn Journal>,
@@ -2688,10 +2880,18 @@ async fn write_journal(
             }
         }
         let n = updates.len();
-        let journal = journal.clone();
-        let written = tokio::task::spawn_blocking(move || journal.apply(&updates).is_ok())
-            .await
-            .unwrap_or(false);
+        let updates = Arc::new(updates);
+        let mut waits = JOURNAL_RETRIES.iter();
+        let written = loop {
+            let (journal, chunk) = (journal.clone(), updates.clone());
+            let written = tokio::task::spawn_blocking(move || journal.apply(&chunk).is_ok())
+                .await
+                .unwrap_or(false);
+            match waits.next() {
+                Some(&wait) if !written => tokio::time::sleep(wait).await,
+                _ => break written,
+            }
+        };
         if !written {
             errors.fetch_add(n as u64, Ordering::SeqCst);
         }

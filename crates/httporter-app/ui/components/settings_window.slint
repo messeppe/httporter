@@ -1,6 +1,6 @@
 // The Settings window (mockup `Settings.dc.html`): a window of its own with a row of tabs. Only
-// Transfers has controls in this version; the other tabs show a note, and their buttons stay
-// turned on so that the note can be seen.
+// Transfers and Publish have controls in this version; the other tabs show a note, and their
+// buttons stay turned on so that the note can be seen.
 //
 // Every edit applies at once (the window has no OK button): the window tells its owner through
 // `changed()`, and the owner reads the properties back, checks them and shows a message under the
@@ -14,6 +14,7 @@ import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { ErrorLine, Field, RegionPicker } from "form_controls.slint";
 import { Segmented } from "sheets.slint";
 import { VCenter } from "layout.slint";
+import { ProfileItem } from "../types.slint";
 
 // One tab of the row under the title (mockup: a 82 px button with the icon over its name).
 // Reachable with Tab, activated with Space or Return.
@@ -533,8 +534,59 @@ component TransfersTab inherits Rectangle {
     }
 }
 
+// The Publish tab: the Bunny account keys kept for purging the CDN, each with Forget Key. A key
+// is `name` (the account) over `meta` (a line about it); `id` is what `forget-key` hands back.
+component PublishTab inherits Rectangle {
+    in property <[ProfileItem]> keys;
+    // What went wrong forgetting a key, empty for nothing.
+    in property <string> error;
+    callback forget-key(string);
+
+    ScrollView {
+        VerticalLayout {
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 20px;
+            padding-bottom: 22px;
+            spacing: 18px;
+            alignment: start;
+
+            Section {
+                title: @tr("Bunny account keys");
+
+                Group {
+                    for key[index] in root.keys: GroupRow {
+                        title: key.name;
+                        help: key.meta;
+                        last: index == root.keys.length - 1;
+
+                        CapsuleButton {
+                            text: @tr("Forget Key");
+                            clicked => { root.forget-key(key.id); }
+                        }
+                    }
+                    if root.keys.length == 0: GroupRow {
+                        title: @tr("No account keys kept");
+                        help: @tr("Publish asks for your Bunny account key the first time it purges the CDN.");
+                        last: true;
+                    }
+                }
+            }
+            if root.error != "": ErrorLine {
+                text: root.error;
+            }
+            Text {
+                text: @tr("An account key lets HTTPorter clear the CDN's copies of what a publish changed. It is kept in Windows Credential Manager. Forget Key deletes it there, and turns purging off until the key is added again.");
+                color: Theme.label2;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
 export component SettingsWindow inherits Window {
-    // The tabs, in order. Only Transfers (2) has controls.
+    // The tabs, in order. Only Transfers (2) and Publish (4) have controls.
     property <[string]> tab-names: [@tr("General"), @tr("Sites"), @tr("Transfers"), @tr("Security"), @tr("Publish"), @tr("Advanced")];
     property <[image]> tab-icons: [Icons.gear, Icons.globe, Icons.updown, Icons.lock, Icons.send, Icons.chip];
 
@@ -568,6 +620,19 @@ export component SettingsWindow inherits Window {
     // when it is finished (Return, or leaving the field): a half-typed address must not be applied.
     callback changed();
     callback restore-defaults();
+
+    // The Publish tab: the Bunny account keys kept for purging (see `PublishTab`), and what went
+    // wrong forgetting one. `publish-shown` asks the app for the keys whenever the tab is opened.
+    in property <[ProfileItem]> bunny-keys;
+    in property <string> bunny-keys-error;
+    callback forget-key(string);
+    callback publish-shown();
+
+    changed current-tab => {
+        if (root.current-tab == 4) {
+            root.publish-shown();
+        }
+    }
 
     title: root.tab-names[root.current-tab];
     default-font-family: Theme.font-family;
@@ -609,7 +674,7 @@ export component SettingsWindow inherits Window {
             }
         }
 
-        if root.current-tab != 2: Rectangle {
+        if root.current-tab != 2 && root.current-tab != 4: Rectangle {
             vertical-stretch: 1;
             accessible-role: tab-panel;
             accessible-label: root.tab-names[root.current-tab];
@@ -644,6 +709,15 @@ export component SettingsWindow inherits Window {
             proxy-error: root.proxy-error;
             edited => { root.changed(); }
             restore-defaults => { root.restore-defaults(); }
+        }
+
+        if root.current-tab == 4: PublishTab {
+            vertical-stretch: 1;
+            accessible-role: tab-panel;
+            accessible-label: root.tab-names[4];
+            keys: root.bunny-keys;
+            error: root.bunny-keys-error;
+            forget-key(id) => { root.forget-key(id); }
         }
     }
 }

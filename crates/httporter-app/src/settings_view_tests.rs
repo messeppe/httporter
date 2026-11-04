@@ -347,7 +347,13 @@ fn only_transfers_tab_has_controls() {
     for control in TRANSFERS_CONTROLS {
         assert!(count(&w, control) > 0, "{control}");
     }
-    for tab in ["General", "Sites", "Security", "Publish", "Advanced"] {
+    // Publish has its own controls (the account keys, I3): no note there.
+    press(&w, AccessibleRole::Tab, "Publish");
+    assert_eq!(count(&w, NOTE), 0);
+    for control in TRANSFERS_CONTROLS {
+        assert_eq!(count(&w, control), 0, "Publish: {control}");
+    }
+    for tab in ["General", "Sites", "Security", "Advanced"] {
         let button = find(&w, AccessibleRole::Tab, tab);
         // Every tab can be chosen, so the note can be read.
         assert_ne!(button.accessible_enabled(), Some(false), "{tab}");

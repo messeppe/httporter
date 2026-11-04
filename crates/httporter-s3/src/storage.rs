@@ -632,6 +632,32 @@ impl StorageProvider for S3Storage {
         self.list_dir(dir).await.map(|(listing, _)| listing)
     }
 
+    /// One `ListObjectsV2` request: the children of `dir` whose names start with `prefix`, at
+    /// most `limit` of them. No key under the prefix is an empty listing, not
+    /// [`ProviderError::NotFound`].
+    async fn list_prefix(
+        &self,
+        dir: &RemotePath,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Listing, ProviderError> {
+        let bucket = self.bucket()?;
+        let dir_prefix = if dir.is_root() {
+            String::new()
+        } else {
+            format!("{}/", dir.as_str())
+        };
+        let key_prefix = format!("{dir_prefix}{prefix}");
+        let (page, info) = self
+            .list_page(bucket, &key_prefix, None, Some(limit.max(1)))
+            .await?;
+        let mut entries = Vec::new();
+        let mut skips = Skips::default();
+        collect(dir, &dir_prefix, page, &mut entries, &mut skips);
+        self.skipped.fetch_add(skips.count, Ordering::Relaxed);
+        Ok(Listing { entries, info })
+    }
+
     /// `PutObject` with the content type, `Content-MD5` when `opts.md5` is set (the service
     /// rejects the upload with `BadDigest`, [`ProviderError::ChecksumMismatch`], if the bytes
     /// differ) and `opts.sha256` recorded as `x-amz-meta-httporter-sha256` for later

@@ -1,7 +1,8 @@
 //! The Bunny account API: with the account API key, list the storage zones with their region,
 //! storage hostname and passwords, and the hostnames of the pull zones in front of each. This is
 //! what "Sign in with Bunny account key" uses to offer the zones to add as sites; the zone
-//! passwords it returns are then what [`crate::BunnyConfig`] takes.
+//! passwords it returns are then what [`crate::BunnyConfig`] takes. The CDN purge (`cdn.rs`)
+//! goes through it too.
 //!
 //! The account key has full access to the Bunny account (Bunny has no scoped keys), so it is
 //! handled like a password. It travels only in the `AccessKey` header, marked sensitive, to the
@@ -15,13 +16,14 @@ use std::fmt;
 use std::time::Duration;
 
 use httporter_core::{HttpProtocol, ProviderError, ProxyMode, TransferSettings};
-use reqwest::header::{ACCEPT, HeaderValue};
+use reqwest::StatusCode;
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::client::{
-    ACCESS_KEY, Connections, Op, build_client, effective_proxy, map_status, network_error,
-    parse_retry_after, snippet,
+    ACCESS_KEY, Connections, ERROR_BODY_MAX, Op, build_client, effective_proxy, map_400,
+    map_status, network_error, parse_retry_after, read_capped, snippet,
 };
 use crate::regions::storage_host;
 
@@ -174,6 +176,42 @@ impl BunnyAccount {
         }
         let body = response.bytes().await.map_err(network_error)?;
         serde_json::from_slice(&body).map_err(|error| unreadable(what, &error))
+    }
+
+    /// One attempt at a `POST` whose answer is not needed, with `json` as its body if given. A
+    /// 400 says what the server said (never anything we sent but the request itself).
+    pub(crate) async fn post(
+        &self,
+        path_and_query: &str,
+        json: Option<&'static str>,
+    ) -> Result<(), ProviderError> {
+        let mut request = self
+            .client
+            .post(format!("{}{path_and_query}", self.base))
+            .header(ACCESS_KEY, self.api_key.clone())
+            .header(ACCEPT, "application/json");
+        if let Some(json) = json {
+            request = request.header(CONTENT_TYPE, "application/json").body(json);
+        }
+        let mut response = request.send().await.map_err(network_error)?;
+        let status = response.status();
+        if status == StatusCode::BAD_REQUEST {
+            let body = read_capped(&mut response, ERROR_BODY_MAX)
+                .await
+                .unwrap_or_default();
+            return Err(map_400(&body, Op::Account));
+        }
+        if !status.is_success() {
+            return Err(map_status(
+                status,
+                parse_retry_after(response.headers()),
+                Op::Account,
+            ));
+        }
+        // Read to the end, so the connection can carry the next request. The work is done
+        // whatever happens to the rest of the answer.
+        let _ = read_capped(&mut response, ERROR_BODY_MAX).await;
+        Ok(())
     }
 }
 

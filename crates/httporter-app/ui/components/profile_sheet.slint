@@ -1,7 +1,25 @@
-// The profile sheet: a new profile, or Edit Profile. T1 shell: its properties and callbacks; T8
-// builds it.
+// The profile sheet: a new publish profile, or Edit Profile. It hangs from the toolbar like the
+// New Folder sheet and is modal in the same way (Escape cancels, Return in a one-line field saves,
+// Tab and Shift+Tab stay inside).
+//
+// The fields start from `draft`. When the app hands a newer draft (the folder Change Folder…
+// picked, the note about the CDN once it is known, a message after Save), only the fields it
+// changed are taken over, so what was typed meanwhile stays. Save hands every field back as typed;
+// the app checks them, then shows a message in `draft.error` or closes the sheet. Delete Profile
+// asks first.
+//
+// `draft.cdn-note` is the line under the purge choice: the pull zone and that the key is kept, or
+// why purging can't happen. Empty means the account key is missing, and the line offers Add
+// Account Key… instead.
 
+import { TextEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
 import { ProfileDraft } from "../types.slint";
+import { CapsuleButton } from "buttons.slint";
+import { CheckLine, ErrorLine, Field, FormRow } from "form_controls.slint";
+import { AlertCard, AttachedSheet, Modal, Segmented } from "sheets.slint";
+import { VCenter } from "layout.slint";
 
 export component ProfileSheet inherits Rectangle {
     in property <ProfileDraft> draft;
@@ -13,5 +31,344 @@ export component ProfileSheet inherits Rectangle {
     callback add-key();
     callback cancelled();
 
-    Rectangle {}
+    // An existing profile (a new one has no id yet).
+    property <bool> editing: root.draft.id != "";
+    // The draft the fields last took over (see the top of the file).
+    property <ProfileDraft> seen;
+    property <bool> remove-extras;
+    property <int> purge;
+    // Delete Profile was pressed: the confirmation is shown over the sheet.
+    property <bool> confirming: false;
+    // The rules Restore Defaults puts back: DEFAULT_SKIP_RULES of httporter-core's `skip.rs`, one
+    // per line. Keep the two in step.
+    property <string> default-rules: ".env\n.env.*\n*.key\n*.pem\n.git/\n.svn/\nnode_modules/\nThumbs.db\ndesktop.ini\n.DS_Store\n*.tmp\n~$*";
+
+    // Takes over the fields of `draft` that changed since the last one.
+    function take-changes() {
+        if (root.draft.name != root.seen.name) {
+            name-field.text = root.draft.name;
+        }
+        if (root.draft.folder != root.seen.folder) {
+            folder-field.text = root.draft.folder;
+        }
+        if (root.draft.remote-dir != root.seen.remote-dir) {
+            remote-field.text = root.draft.remote-dir;
+        }
+        if (root.draft.skip-rules != root.seen.skip-rules) {
+            rules-edit.text = root.draft.skip-rules;
+        }
+        if (root.draft.remove-extras != root.seen.remove-extras) {
+            root.remove-extras = root.draft.remove-extras;
+        }
+        if (root.draft.purge != root.seen.purge) {
+            root.purge = root.draft.purge;
+        }
+        if (root.draft.guard-files != root.seen.guard-files) {
+            files-field.text = root.draft.guard-files;
+        }
+        if (root.draft.guard-percent != root.seen.guard-percent) {
+            percent-field.text = root.draft.guard-percent;
+        }
+        root.seen = root.draft;
+    }
+
+    // The fields as they are now.
+    function edited() -> ProfileDraft {
+        return {
+            id: root.draft.id,
+            name: name-field.text,
+            site-name: root.draft.site-name,
+            folder: folder-field.text,
+            remote-dir: remote-field.text,
+            skip-rules: rules-edit.text,
+            remove-extras: root.remove-extras,
+            purge: root.purge,
+            guard-files: files-field.text,
+            guard-percent: percent-field.text,
+            cdn-note: root.draft.cdn-note,
+            error: "",
+        };
+    }
+
+    function submit() {
+        root.save(root.edited());
+    }
+
+    changed draft => { root.take-changes(); }
+
+    init => {
+        root.take-changes();
+        name-field.focus();
+    }
+
+    Modal {
+        at-first-stop: name-field.has-focus;
+        at-last-stop: save-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.submit(); }
+        focus-first => { name-field.focus(); }
+        focus-last => { save-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 580px;
+            label: root.editing ? @tr("Edit Profile") : @tr("New Publish Profile");
+
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 20px;
+                spacing: 4px;
+
+                Text {
+                    text: root.editing ? @tr("Edit Profile") : @tr("New Publish Profile");
+                    color: Theme.label;
+                    font-size: 17px;
+                    font-weight: Theme.weight-semibold;
+                    accessible-role: none;
+                }
+                Text {
+                    text: @tr("A profile publishes one folder to one place, uploading only what changed.");
+                    color: Theme.label2;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+            }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 16px;
+                padding-bottom: 14px;
+                spacing: 10px;
+
+                FormRow {
+                    label: @tr("Name");
+
+                    name-field := Field {
+                        label: @tr("Name");
+                        accepted => { root.submit(); }
+                    }
+                }
+                FormRow {
+                    label: @tr("Site");
+
+                    Text {
+                        height: 28px;
+                        text: root.draft.site-name;
+                        color: Theme.label;
+                        font-size: Theme.font-body;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                FormRow {
+                    label: @tr("Folder");
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        folder-field := Field {
+                            horizontal-stretch: 1;
+                            label: @tr("Folder to publish");
+                            accepted => { root.submit(); }
+                        }
+                        CapsuleButton {
+                            text: @tr("Change Folder…");
+                            clicked => { root.pick-folder(); }
+                        }
+                    }
+                }
+                FormRow {
+                    label: @tr("Publish to");
+
+                    remote-field := Field {
+                        placeholder: @tr("Empty for the root of the site");
+                        label: @tr("Folder on the site");
+                        accepted => { root.submit(); }
+                    }
+                }
+                FormRow {
+                    label: @tr("Skip rules");
+
+                    rules-edit := TextEdit {
+                        height: 110px;
+                        font-size: 12px;
+                        wrap: no-wrap;
+                        accessible-label: @tr("Skip rules, one per line");
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: @tr("One per line: a name (Thumbs.db), a pattern (*.tmp) or a folder (node_modules/).");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                        VCenter {
+                            CapsuleButton {
+                                text: @tr("Restore Defaults");
+                                clicked => { rules-edit.text = root.default-rules; }
+                            }
+                        }
+                    }
+                }
+                FormRow {
+                    label: "";
+
+                    CheckLine {
+                        text: @tr("Remove files from {} that aren't in the folder", root.draft.site-name);
+                        checked: root.remove-extras;
+                        toggled(on) => { root.remove-extras = on; }
+                    }
+                }
+                FormRow {
+                    label: @tr("Purge CDN");
+
+                    HorizontalLayout {
+                        alignment: start;
+
+                        Segmented {
+                            options: [@tr("Off"), @tr("Changed files"), @tr("Whole zone")];
+                            label: @tr("Purge CDN");
+                            current <=> root.purge;
+                        }
+                    }
+                    if root.draft.cdn-note != "": Text {
+                        text: root.draft.cdn-note;
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                    if root.draft.cdn-note == "": HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: @tr("Purging needs your Bunny account key.");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                        CapsuleButton {
+                            text: @tr("Add Account Key…");
+                            icon: Icons.key;
+                            clicked => { root.add-key(); }
+                        }
+                    }
+                }
+                FormRow {
+                    label: @tr("Delete guard");
+
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 6px;
+
+                        files-field := Field {
+                            width: 70px;
+                            label: @tr("Files");
+                            accepted => { root.submit(); }
+                        }
+                        Text {
+                            text: @tr("files or");
+                            color: Theme.label;
+                            font-size: Theme.font-body;
+                            vertical-alignment: center;
+                        }
+                        percent-field := Field {
+                            width: 50px;
+                            label: @tr("Percent of the files on the site");
+                            accepted => { root.submit(); }
+                        }
+                        Text {
+                            text: @tr("% of the site");
+                            color: Theme.label;
+                            font-size: Theme.font-body;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: @tr("A publish that would delete more than this asks you to confirm first.");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+                if root.draft.error != "": ErrorLine {
+                    text: root.draft.error;
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.sep;
+            }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+
+                if root.editing: CapsuleButton {
+                    text: @tr("Delete Profile…");
+                    destructive: true;
+                    clicked => { root.confirming = true; }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                save-button := CapsuleButton {
+                    text: root.editing ? @tr("Save") : @tr("Create Profile");
+                    primary: true;
+                    clicked => { root.submit(); }
+                }
+            }
+        }
+    }
+
+    // Delete Profile asks first; Cancel is the default.
+    if root.confirming: Modal {
+        at-first-stop: delete-button.has-focus;
+        at-last-stop: keep-button.has-focus;
+        cancel => { root.confirming = false; }
+        confirm => { root.confirming = false; }
+        focus-first => { delete-button.focus(); }
+        focus-last => { keep-button.focus(); }
+        init => { keep-button.focus(); }
+
+        AlertCard {
+            icon: Icons.trash;
+            tint: Theme.red;
+            tint-soft: Theme.red-soft;
+            title: @tr("Delete the profile “{}”?", root.draft.name);
+            body: @tr("Its publish history goes too. The folder and the files on the site stay as they are.");
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                delete-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: @tr("Delete");
+                    destructive: true;
+                    clicked => {
+                        root.confirming = false;
+                        root.delete-profile(root.draft.id);
+                    }
+                }
+                keep-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: @tr("Cancel");
+                    primary: true;
+                    clicked => { root.confirming = false; }
+                }
+            }
+        }
+    }
 }

@@ -64,24 +64,26 @@ impl NetworkErrors {
 }
 
 /// Asks an offline lane's site every [`PROBE_EVERY`] whether it answers, until it does, the lane
-/// is no longer offline (an edited site, say), or the engine stops. `cycle` is the lane's
-/// offline cycle this probing is for.
+/// is no longer offline (an edited site, say), or the engine stops. A lane has one probe at a
+/// time: one that goes offline again while its probe sleeps keeps that probe, which then probes
+/// for the new offline cycle.
 ///
-/// When the first probe gets no answer either, the site is out of reach, and the work in flight
-/// on the lane goes back to the queue ([`Inner::outage`], review N1).
-pub(crate) async fn probe(inner: Arc<Inner>, lane: usize, cycle: u64) {
-    let mut first = true;
+/// When the first probe of a cycle gets no answer either, the site is out of reach, and the work
+/// in flight on the lane goes back to the queue ([`Inner::outage`], review N1).
+pub(crate) async fn probe(inner: Arc<Inner>, lane: usize) {
+    // The cycle whose first probe went unanswered.
+    let mut told = None;
     loop {
         tokio::time::sleep(PROBE_EVERY).await;
-        let Some(provider) = inner.offline_provider(lane) else {
+        let Some((provider, cycle)) = inner.offline_provider(lane) else {
             return;
         };
         if provider.reachable().await.is_ok() {
             inner.back_online(lane);
             return;
         }
-        if first {
-            first = false;
+        if told != Some(cycle) {
+            told = Some(cycle);
             inner.outage(lane, cycle);
         }
     }

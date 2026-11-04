@@ -2,6 +2,7 @@
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
+import { CompareStatus } from "../types.slint";
 import { VCenter } from "layout.slint";
 
 // Tinted label capsule (mockup `.chip`). Defaults to the neutral grey chip.
@@ -35,6 +36,42 @@ export component Chip inherits Rectangle {
             font-size: Theme.font-small;
             font-weight: Theme.weight-semibold;
             vertical-alignment: center;
+        }
+    }
+}
+
+// How a row compares with the other side while Compare is on (mockup `.chip.changed`, `.chip.new`,
+// `.chip.remote`, `.chip.same`): Changed in orange, New in green, "Only on Bunny" in purple, Same as
+// plain grey text. On a selected row (`lit`) the words turn white over a light wash (mockup
+// `.row.sel .chip`). Nothing shows for `none`. The row gives the words (`text`), which it also reads
+// out.
+export component StatusChip inherits Rectangle {
+    in property <CompareStatus> status;
+    in property <string> text;
+    in property <bool> lit: false;
+
+    property <bool> plain: root.status == CompareStatus.same;
+    property <color> tint: root.status == CompareStatus.changed ? Theme.orange : root.status == CompareStatus.new ? Theme.green : root.status == CompareStatus.remote-only ? Theme.purple : Theme.label2;
+    property <color> wash: root.status == CompareStatus.changed ? Theme.orange-soft : root.status == CompareStatus.new ? Theme.green-soft : Theme.purple-soft;
+
+    height: 20px;
+    visible: root.status != CompareStatus.none;
+    background: root.plain ? transparent : (root.lit ? #ffffff38 : root.wash);
+    border-radius: self.height / 2;
+    accessible-role: none;
+
+    HorizontalLayout {
+        padding-left: root.plain ? 0px : 8px;
+        padding-right: root.plain ? 0px : 8px;
+
+        Text {
+            text: root.text;
+            color: root.lit ? Theme.sel-text : root.tint;
+            font-size: Theme.font-small;
+            font-weight: root.plain ? Theme.weight-medium : Theme.weight-semibold;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
         }
     }
 }
