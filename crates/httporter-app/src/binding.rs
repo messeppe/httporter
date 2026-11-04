@@ -1982,6 +1982,14 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     );
     let rows = to_slint_rows(&view.rows);
     mark_selected(&rows, &picked);
+    // While Compare is on, each row gets how it compares.
+    Publisher::rows_built(
+        ui,
+        ActivePane::Cloud,
+        view.site.as_ref(),
+        &view.crumbs,
+        &rows,
+    );
     ui.set_remote_rows(rows);
     ui.set_remote_crumbs(strings(&view.crumbs));
     ui.set_remote_selected(focus);
@@ -2020,6 +2028,7 @@ fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
     );
     let rows = to_slint_rows(&view.rows);
     mark_selected(&rows, &picked);
+    Publisher::rows_built(ui, ActivePane::ThisPc, None, &view.crumbs, &rows);
     ui.set_local_rows(rows);
     ui.set_local_crumbs(strings(&view.crumbs));
     ui.set_local_selected(focus);

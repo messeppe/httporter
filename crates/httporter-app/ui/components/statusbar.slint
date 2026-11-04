@@ -1,13 +1,20 @@
-// Bottom status bar (mockup `.statusbar`): a message on the left, connection details on the right.
+// Bottom status bar (mockup `.statusbar`): a message on the left, then what Compare found, and
+// connection details on the right.
 
 import { Theme } from "../theme.slint";
 import { CompareSummary } from "../types.slint";
+import { Chip } from "chips.slint";
+import { VCenter } from "layout.slint";
 
 export component StatusBar inherits Rectangle {
     in property <string> left-text;
     in property <string> right-text;
-    // What Compare found (T6 shows it).
+    // What Compare found, while it is on: the summary chips ("34 changed · 2 new · 1 only on
+    // Bunny"), how far it is while it runs, or why it failed.
     in property <CompareSummary> compare;
+
+    property <bool> found: root.compare.active && !root.compare.busy && root.compare.error == "";
+    property <bool> differs: root.compare.changed > 0 || root.compare.new > 0 || root.compare.remote-only > 0;
 
     height: Theme.statusbar-height;
     background: Theme.chrome;
@@ -31,6 +38,50 @@ export component StatusBar inherits Rectangle {
             font-size: Theme.font-small;
             vertical-alignment: center;
             overflow: elide;
+        }
+        if root.compare.active && root.compare.busy: Text {
+            text: root.compare.progress;
+            color: Theme.label2;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.compare.active && !root.compare.busy && root.compare.error != "": Text {
+            text: root.compare.error;
+            color: Theme.red;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.found: HorizontalLayout {
+            spacing: 4px;
+
+            if root.compare.changed > 0: VCenter {
+                Chip {
+                    text: @tr("{} changed", root.compare.changed);
+                    fg: Theme.orange;
+                    bg: Theme.orange-soft;
+                }
+            }
+            if root.compare.new > 0: VCenter {
+                Chip {
+                    text: @tr("{} new", root.compare.new);
+                    fg: Theme.green;
+                    bg: Theme.green-soft;
+                }
+            }
+            if root.compare.remote-only > 0: VCenter {
+                Chip {
+                    text: @tr("{} only on {}", root.compare.remote-only, root.compare.remote-label);
+                    fg: Theme.purple;
+                    bg: Theme.purple-soft;
+                }
+            }
+            if !root.differs: VCenter {
+                Chip {
+                    text: @tr("No differences");
+                }
+            }
         }
         Rectangle { horizontal-stretch: 1; }
         Text {

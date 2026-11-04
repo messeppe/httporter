@@ -1,6 +1,8 @@
 // File pane (mockup `.pane`): a header with icon, title, breadcrumbs and a chip, the Name / Size /
-// Modified column headers, and a virtualized list of rows. The Status column and the compare chips
-// arrive with the compare milestone.
+// Modified column headers, and a virtualized list of rows. While Compare is on (`comparing`), a
+// Status column between Name and Size shows how each row compares with the other side (Changed,
+// New, "Only on Bunny", Same: the app sets each row's `status`), and This PC's header carries the
+// accent "Comparing" chip.
 //
 // Keyboard: Tab reaches the list, then the breadcrumbs, then the three column headers. In the list,
 // Up and Down move the selection (Home, End, PageUp and PageDown too; with Shift they extend it),
@@ -23,14 +25,17 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { CompareSummary, FileKind, FileRow, PaneBounds } from "../types.slint";
+import { CompareStatus, CompareSummary, FileKind, FileRow, PaneBounds } from "../types.slint";
 import { Activation, ToolButton } from "buttons.slint";
+import { Chip, StatusChip } from "chips.slint";
 import { VCenter } from "layout.slint";
 
 // Sizes shared by the column headers and the rows (mockup `.cols, .row`: padding 0 12px, gap 8px).
 global Cols {
     out property <length> pad: 12px;
     out property <length> gap: 8px;
+    // The Status column, while comparing (mockup: 96px).
+    out property <length> status: 96px;
     out property <length> size: 76px;
     out property <length> modified: 128px;
 }
@@ -240,6 +245,10 @@ component PaneRow inherits Rectangle {
     in property <bool> drop-target: false;
     // A drag may start from the row (the pane has somewhere to send what it holds).
     in property <bool> drag-ok: false;
+    // Compare is on: the Status column shows, and `remote-label` names the site's side in "Only on
+    // Bunny" / "Only on {site}".
+    in property <bool> comparing: false;
+    in property <string> remote-label;
     // The left button went down on the row, with the Ctrl and Shift keys as they were.
     callback pressed(bool /* ctrl */, bool /* shift */);
     // The left button went down on a selected row, with neither Ctrl nor Shift: `pressed` waits
@@ -261,6 +270,7 @@ component PaneRow inherits Rectangle {
     property <image> kind-icon: root.item.kind == FileKind.folder ? Icons.folder : root.item.kind == FileKind.code ? Icons.code : root.item.kind == FileKind.image ? Icons.image : Icons.doc;
     property <color> kind-color: root.lit ? Theme.sel-text : root.item.kind == FileKind.folder ? Theme.folder : root.item.kind == FileKind.image ? Theme.green : Theme.label2;
     property <color> detail-color: root.lit ? Theme.sel-text : Theme.label2;
+    property <string> status-text: root.item.status == CompareStatus.changed ? @tr("Changed") : root.item.status == CompareStatus.new ? @tr("New") : root.item.status == CompareStatus.remote-only ? @tr("Only on {}", root.remote-label) : root.item.status == CompareStatus.same ? @tr("Same") : "";
 
     height: Theme.row-height;
     background: root.drop-target ? Theme.accent-soft : root.selected ? Theme.sel : (Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent);
@@ -268,6 +278,7 @@ component PaneRow inherits Rectangle {
     border-color: Theme.accent;
     accessible-role: list-item;
     accessible-label: root.item.folder ? @tr("{}, folder, modified {}", root.item.name, root.item.modified) : @tr("{}, {}, {}, modified {}", root.item.name, root.kind-label, root.item.size, root.item.modified);
+    accessible-description: root.comparing ? root.status-text : "";
     accessible-item-selectable: true;
     accessible-item-selected: root.selected;
     accessible-item-index: root.index;
@@ -312,6 +323,19 @@ component PaneRow inherits Rectangle {
                     overflow: elide;
                     accessible-role: none;
                 }
+            }
+        }
+        // Status (mockup: a chip at the start of the column).
+        if root.comparing: Rectangle {
+            width: Cols.status;
+
+            StatusChip {
+                x: 0px;
+                y: (parent.height - self.height) / 2;
+                width: Math.min(self.preferred-width, parent.width);
+                status: root.item.status;
+                text: root.status-text;
+                lit: root.lit;
             }
         }
         Text {
@@ -876,6 +900,15 @@ export component Pane inherits Rectangle {
                         if root.show-loading: VCenter {
                             LoadingMark { }
                         }
+                        // Compare is on (mockup: This PC's header, in the accent colour).
+                        if root.comparing && !root.cloud: VCenter {
+                            Chip {
+                                text: @tr("Comparing");
+                                icon: Icons.compare;
+                                fg: Theme.accent-text;
+                                bg: Theme.accent-soft;
+                            }
+                        }
                         if root.header-chip != "": VCenter {
                             Rectangle {
                                 height: 20px;
@@ -932,6 +965,15 @@ export component Pane inherits Rectangle {
                             ascending: root.sort-ascending;
                             clicked => { root.sort-by(0); }
                         }
+                        // Not a sort key: the rows keep the order of the column sorted.
+                        if root.comparing: Text {
+                            width: Cols.status;
+                            text: @tr("Status");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            font-weight: Theme.weight-semibold;
+                            vertical-alignment: center;
+                        }
                         ColumnHeader {
                             width: Cols.size;
                             text: @tr("Size");
@@ -977,6 +1019,8 @@ export component Pane inherits Rectangle {
                             selected: item.selected;
                             drop-target: root.drop-hover && i == root.drop-row;
                             drag-ok: root.can-drag;
+                            comparing: root.comparing;
+                            remote-label: root.compare.remote-label;
                             pressed(ctrl, shift) => { root.pick(i, ctrl, shift); }
                             held => {
                                 // The selection stays until the button comes up (it may be a drag),
