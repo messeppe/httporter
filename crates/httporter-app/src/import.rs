@@ -18,7 +18,7 @@ use crate::add_site::{bunny_region_index, tile_for};
 use crate::copy;
 use httporter_core::S3Preset;
 
-/// The Bunny storage zone a `.env` file describes.
+/// The Bunny storage zone a `.env` file describes, and what it publishes there.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EnvImport {
     /// `BUNNY_ZONE`.
@@ -27,6 +27,12 @@ pub struct EnvImport {
     pub password: String,
     /// `BUNNY_REGION`, as written (a code such as `sg` or a city); empty when the file has none.
     pub region: String,
+    /// `BUNNY_LOCAL_DIR`: the folder the site is published from, when the file names one. The
+    /// imported site then gets a publish profile for it.
+    pub local_dir: Option<PathBuf>,
+    /// `BUNNY_PREFIX`: the folder of the zone it is published to, without `/` at either end;
+    /// empty for the zone's root.
+    pub prefix: String,
 }
 
 // Not derived: a derived `Debug` would print the password in a failed assertion or a log line.
@@ -36,16 +42,19 @@ impl fmt::Debug for EnvImport {
             .field("zone", &self.zone)
             .field("password", &"<hidden>")
             .field("region", &self.region)
+            .field("local_dir", &self.local_dir)
+            .field("prefix", &self.prefix)
             .finish()
     }
 }
 
-/// Reads `BUNNY_ZONE`, `BUNNY_KEY` and `BUNNY_REGION` from the text of a `.env` file.
+/// Reads `BUNNY_ZONE`, `BUNNY_KEY`, `BUNNY_REGION`, `BUNNY_LOCAL_DIR` and `BUNNY_PREFIX` from the
+/// text of a `.env` file.
 ///
 /// Tolerated: a byte order mark, Windows line endings, `export ` in front, spaces around the
 /// `=`, single or double quotes around the value, and a ` # comment` after an unquoted or quoted
 /// value. A name that appears twice takes its last value. `BUNNY_LOCAL_DIR` and `BUNNY_PREFIX`
-/// are ignored until publishing profiles exist (I3).
+/// are optional: they describe the publish profile the imported site gets.
 ///
 /// `BUNNY_KEY` is looked for first, so a file with neither line says the key is missing. The
 /// error is a sentence for the user and never contains a value from the file.
@@ -69,6 +78,14 @@ pub fn parse_env(text: &str) -> Result<EnvImport, String> {
         zone,
         password,
         region: find("BUNNY_REGION").unwrap_or_default().to_owned(),
+        local_dir: find("BUNNY_LOCAL_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from),
+        prefix: find("BUNNY_PREFIX")
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('/')
+            .to_owned(),
     })
 }
 

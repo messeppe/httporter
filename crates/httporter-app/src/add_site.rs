@@ -12,14 +12,18 @@
 //! Secrets pass through here but are never logged, printed or stored: the `Debug` output of the
 //! form types leaves them out.
 
+use std::cell::RefCell;
 use std::fmt;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 use httporter_bunny::{REGIONS, ZoneList};
-use httporter_core::{S3Preset, SiteRecord};
+use httporter_core::{ProviderKind, S3Preset, SiteRecord};
 use httporter_s3::Url;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::copy;
+use crate::import::EnvImport;
 use crate::{AppWindow, S3Errors, SiteDraft, ZoneChoice};
 
 /// What the user typed, exactly as the sheet reports it.
@@ -609,6 +613,65 @@ pub fn show_field_error(ui: &AppWindow, error: Option<&FieldError>) {
     if error.is_some() {
         // Every error moves the keyboard focus to its field, also a repeat of the same one.
         ui.set_add_site_error_serial(ui.get_add_site_error_serial().wrapping_add(1));
+    }
+}
+
+// ---- The publish profile a `.env` import asks for (I3) ----
+
+/// What an imported `.env` file says to publish (`BUNNY_LOCAL_DIR`, `BUNNY_PREFIX`), kept from
+/// the import until the site it describes is saved.
+pub struct ImportedPublish {
+    /// `BUNNY_ZONE`: only a Bunny site of this zone gets the profile.
+    pub zone: String,
+    pub local_dir: PathBuf,
+    /// The folder of the zone, without `/` at either end; empty for its root.
+    pub prefix: String,
+}
+
+/// What is done with a saved site that a `.env` import asked a profile for (Publish makes it).
+type AfterImport = Rc<dyn Fn(&SiteRecord, ImportedPublish)>;
+
+/// The import waiting for its site, and what to do then. The UI thread's own: the import and the
+/// save both end there.
+#[derive(Default)]
+struct ImportHook {
+    pending: Option<ImportedPublish>,
+    then: Option<AfterImport>,
+}
+
+thread_local! {
+    static IMPORT_HOOK: RefCell<ImportHook> = RefCell::default();
+}
+
+/// Sets what is done with a saved site that a `.env` import asked a profile for. Publish calls it
+/// once, when the window is wired.
+pub fn on_imported_site_saved(then: impl Fn(&SiteRecord, ImportedPublish) + 'static) {
+    IMPORT_HOOK.with(|hook| hook.borrow_mut().then = Some(Rc::new(then)));
+}
+
+/// A `.env` file was imported into the Add Site sheet: when it names a folder, the site gets a
+/// publish profile once it is saved. A later import replaces an earlier one.
+pub fn expect_imported_site(import: &EnvImport) {
+    let pending = import.local_dir.clone().map(|local_dir| ImportedPublish {
+        zone: import.zone.clone(),
+        local_dir,
+        prefix: import.prefix.clone(),
+    });
+    IMPORT_HOOK.with(|hook| hook.borrow_mut().pending = pending);
+}
+
+/// A site was saved from the Add Site sheet. When it is the Bunny zone a waiting `.env` import
+/// describes, that import's profile is made. Any waiting import is let go: it was for this save.
+pub fn site_saved(site: &SiteRecord) {
+    let (pending, then) = IMPORT_HOOK.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        (hook.pending.take(), hook.then.clone())
+    });
+    let (Some(pending), Some(then)) = (pending, then) else {
+        return;
+    };
+    if site.provider == ProviderKind::Bunny && site.container == pending.zone {
+        then(site, pending);
     }
 }
 

@@ -32,7 +32,7 @@ global Cols {
 // control took it (`confirm`, the default button) and Tab and Shift+Tab at the ends of the Tab
 // order (`focus-first`, `focus-last`). The dialog says where the focus is with `at-first-stop` and
 // `at-last-stop`.
-component Modal inherits Rectangle {
+export component Modal inherits Rectangle {
     // The focus is on the first control of the dialog.
     in property <bool> at-first-stop;
     // The focus is on the last control of the dialog.
@@ -85,7 +85,7 @@ component Modal inherits Rectangle {
 // A sheet that hangs from the toolbar (the way a macOS sheet hangs from the title bar): flat at
 // the top, rounded below. It fills its parent and draws the sheet centred under the toolbar, as
 // high as its content and as wide as `sheet-width` allows.
-component AttachedSheet inherits Rectangle {
+export component AttachedSheet inherits Rectangle {
     in property <length> sheet-width: 460px;
     // What assistive technology calls the sheet.
     in property <string> label;
@@ -121,7 +121,7 @@ component AttachedSheet inherits Rectangle {
 // An alert (mockup `.alert`): a compact card in the middle of the window with a tinted tile, a
 // bold title, a line of text and then whatever the alert puts under them (the children). It fills
 // its parent and draws the card centred.
-component AlertCard inherits Rectangle {
+export component AlertCard inherits Rectangle {
     in property <image> icon;
     in property <color> tint;
     in property <color> tint-soft;
