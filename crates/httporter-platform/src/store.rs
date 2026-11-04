@@ -7,6 +7,9 @@
 //! The `sites.container` column holds [`SiteRecord::container`]. It was called `zone` in
 //! schema v1.
 //!
+//! Schema v3 adds the publish profiles, their history (the files of each publish too) and each
+//! site's CDN link. Lists, the purge choice and the pull zones are stored as JSON.
+//!
 //! The file is opened in WAL mode with a 5 s busy timeout, so the store and the transfer
 //! journal ([`crate::journal`]) can each hold their own connection to it.
 
@@ -17,8 +20,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use httporter_core::{
-    AccountId, CdnLink, HistoryFile, HistoryRecord, ProfileId, ProfileRecord, ProviderKind,
-    PurgeResult, S3Preset, S3Site, SiteId, SiteRecord,
+    AccountId, CdnLink, CdnZone, DeleteGuard, FileAction, FileOutcome, HISTORY_KEEP, HistoryFile,
+    HistoryRecord, ProfileId, ProfileRecord, ProviderKind, PublishResult, PurgeMode, PurgeResult,
+    RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
@@ -72,6 +76,54 @@ const MIGRATIONS: &[&str] = &[
         updated_at TEXT NOT NULL
     );
     CREATE INDEX journal_state ON journal (state);",
+    // v3: publish profiles, their history and the CDN links.
+    "CREATE TABLE profiles (
+        id                TEXT PRIMARY KEY,
+        site              TEXT NOT NULL,
+        name              TEXT NOT NULL,
+        local_dir         TEXT NOT NULL,
+        remote_dir        TEXT NOT NULL,
+        skip_rules        TEXT NOT NULL,
+        remove_extras     INTEGER NOT NULL,
+        purge             TEXT NOT NULL,
+        guard_files       INTEGER NOT NULL,
+        guard_percent     INTEGER NOT NULL,
+        created_at        TEXT NOT NULL,
+        last_published_at TEXT
+    );
+    CREATE TABLE publish_history (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile        TEXT NOT NULL,
+        started_at     TEXT NOT NULL,
+        finished_at    TEXT NOT NULL,
+        result         TEXT NOT NULL,
+        uploaded       INTEGER NOT NULL,
+        deleted        INTEGER NOT NULL,
+        skipped        INTEGER NOT NULL,
+        failed         INTEGER NOT NULL,
+        bytes          INTEGER NOT NULL,
+        purge          TEXT NOT NULL,
+        verified       INTEGER NOT NULL,
+        remote_files   INTEGER NOT NULL,
+        remote_folders INTEGER NOT NULL,
+        regions        INTEGER NOT NULL
+    );
+    CREATE INDEX publish_history_profile ON publish_history (profile, id);
+    CREATE TABLE publish_files (
+        history INTEGER NOT NULL,
+        path    TEXT NOT NULL,
+        action  TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        error   TEXT,
+        size    INTEGER NOT NULL
+    );
+    CREATE INDEX publish_files_history ON publish_files (history);
+    CREATE TABLE cdn_links (
+        site       TEXT PRIMARY KEY,
+        account    TEXT NOT NULL,
+        zones      TEXT NOT NULL,
+        checked_at TEXT NOT NULL
+    );",
 ];
 
 /// The Transfers settings (Settings window, Transfers tab) are stored under this key.
@@ -102,6 +154,9 @@ pub enum StoreError {
     /// The site to update is not in the database.
     #[error("that site is not in the database")]
     NotFound,
+    /// The publish profile to update is not in the database.
+    #[error("that publish profile is not in the database")]
+    ProfileNotFound,
     /// A site record whose provider and S3 details disagree: refused rather than saved wrong.
     #[error("the site's details are inconsistent: {0}")]
     InvalidSite(&'static str),
@@ -240,10 +295,25 @@ impl Store {
         Ok(list)
     }
 
-    /// Deletes a site. Removing an id that is not stored is not an error.
+    /// Deletes a site, with its publish profiles, their history and its CDN link, in one
+    /// transaction. Removing an id that is not stored is not an error.
     pub fn remove_site(&self, id: &SiteId) -> Result<(), StoreError> {
-        self.conn
-            .execute("DELETE FROM sites WHERE id = ?1", params![id.0])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM publish_files WHERE history IN
+                 (SELECT h.id FROM publish_history h JOIN profiles p ON p.id = h.profile
+                  WHERE p.site = ?1)",
+            params![id.0],
+        )?;
+        tx.execute(
+            "DELETE FROM publish_history WHERE profile IN
+                 (SELECT id FROM profiles WHERE site = ?1)",
+            params![id.0],
+        )?;
+        tx.execute("DELETE FROM profiles WHERE site = ?1", params![id.0])?;
+        tx.execute("DELETE FROM cdn_links WHERE site = ?1", params![id.0])?;
+        tx.execute("DELETE FROM sites WHERE id = ?1", params![id.0])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -337,60 +407,546 @@ impl Store {
 
 /// Publish profiles, their history and the CDN links (schema v3). `remove_site` also deletes the
 /// site's profiles, their history and its CDN link, in one transaction.
-#[allow(unused_variables)] // T1 skeleton: T4 fills the bodies.
 impl Store {
+    /// Inserts a profile. Fails if a profile with the same id already exists.
     pub fn add_profile(&self, p: &ProfileRecord) -> Result<(), StoreError> {
-        todo!("T4")
+        let cols = ProfileColumns::of(p)?;
+        self.conn.execute(
+            "INSERT INTO profiles (id, site, name, local_dir, remote_dir, skip_rules,
+                                   remove_extras, purge, guard_files, guard_percent,
+                                   created_at, last_published_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                p.id.0,
+                p.site.0,
+                p.name,
+                cols.local_dir,
+                p.remote_dir.as_str(),
+                cols.skip_rules,
+                p.remove_extras,
+                cols.purge,
+                int(p.guard.files)?,
+                p.guard.percent,
+                stamp(p.created_at),
+                p.last_published_at.map(stamp),
+            ],
+        )?;
+        Ok(())
     }
 
+    /// Replaces every stored field of the profile with the same id but the id and
+    /// `last_published_at`, which only [`Self::add_history`] moves: an Edit Profile opened before
+    /// a publish and saved after it must not put the old time back.
+    /// [`StoreError::ProfileNotFound`] if there is no such profile.
     pub fn update_profile(&self, p: &ProfileRecord) -> Result<(), StoreError> {
-        todo!("T4")
+        let cols = ProfileColumns::of(p)?;
+        let changed = self.conn.execute(
+            "UPDATE profiles
+             SET site = ?2, name = ?3, local_dir = ?4, remote_dir = ?5, skip_rules = ?6,
+                 remove_extras = ?7, purge = ?8, guard_files = ?9, guard_percent = ?10,
+                 created_at = ?11
+             WHERE id = ?1",
+            params![
+                p.id.0,
+                p.site.0,
+                p.name,
+                cols.local_dir,
+                p.remote_dir.as_str(),
+                cols.skip_rules,
+                p.remove_extras,
+                cols.purge,
+                int(p.guard.files)?,
+                p.guard.percent,
+                stamp(p.created_at),
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::ProfileNotFound);
+        }
+        Ok(())
     }
 
-    /// Deletes the profile and its history.
+    /// Deletes the profile and its history. Removing an id that is not stored is not an error.
     pub fn remove_profile(&self, id: &ProfileId) -> Result<(), StoreError> {
-        todo!("T4")
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM publish_files WHERE history IN
+                 (SELECT id FROM publish_history WHERE profile = ?1)",
+            params![id.0],
+        )?;
+        tx.execute(
+            "DELETE FROM publish_history WHERE profile = ?1",
+            params![id.0],
+        )?;
+        tx.execute("DELETE FROM profiles WHERE id = ?1", params![id.0])?;
+        tx.commit()?;
+        Ok(())
     }
 
+    /// The profiles, ordered by name ignoring ASCII case. A row this build cannot read is left
+    /// out.
     pub fn list_profiles(&self) -> Result<Vec<ProfileRecord>, StoreError> {
-        todo!("T4")
+        let mut stmt = self.conn.prepare(
+            "SELECT id, site, name, local_dir, remote_dir, skip_rules, remove_extras, purge,
+                    guard_files, guard_percent, created_at, last_published_at
+             FROM profiles ORDER BY name COLLATE NOCASE, id",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut profiles = Vec::new();
+        while let Some(row) = rows.next()? {
+            match RawProfile::read(row) {
+                Ok(raw) => profiles.extend(raw.into_record()),
+                Err(e) if is_row_decode_error(&e) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(profiles)
     }
 
-    /// Stores a publish and its files, sets the profile's `last_published_at` and trims the
-    /// profile's history to [`httporter_core::HISTORY_KEEP`]. Returns the new id.
+    /// Stores a publish and its files, sets the profile's `last_published_at` (to when the
+    /// publish finished) and trims the profile's history to [`HISTORY_KEEP`], all in one
+    /// transaction. `h.id` is ignored. Returns the new id.
     pub fn add_history(&self, h: &HistoryRecord) -> Result<i64, StoreError> {
-        todo!("T4")
+        let purge = to_json(&h.purge)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO publish_history (profile, started_at, finished_at, result, uploaded,
+                                          deleted, skipped, failed, bytes, purge, verified,
+                                          remote_files, remote_folders, regions)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                h.profile.0,
+                stamp(h.started_at),
+                stamp(h.finished_at),
+                result_to_text(h.result),
+                int(h.uploaded)?,
+                int(h.deleted)?,
+                int(h.skipped)?,
+                int(h.failed)?,
+                int(h.bytes)?,
+                purge,
+                h.verified,
+                int(h.remote_files)?,
+                int(h.remote_folders)?,
+                h.regions,
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO publish_files (history, path, action, outcome, error, size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for file in &h.files {
+                let (outcome, error) = outcome_to_columns(&file.outcome);
+                insert.execute(params![
+                    id,
+                    file.path.as_str(),
+                    action_to_text(file.action),
+                    outcome,
+                    error,
+                    int(file.size)?,
+                ])?;
+            }
+        }
+        tx.execute(
+            "UPDATE profiles SET last_published_at = ?2 WHERE id = ?1",
+            params![h.profile.0, stamp(h.finished_at)],
+        )?;
+        // Everything older than the newest HISTORY_KEEP publishes of this profile.
+        let keep = HISTORY_KEEP as i64;
+        tx.execute(
+            "DELETE FROM publish_files WHERE history IN
+                 (SELECT id FROM publish_history WHERE profile = ?1
+                  ORDER BY id DESC LIMIT -1 OFFSET ?2)",
+            params![h.profile.0, keep],
+        )?;
+        tx.execute(
+            "DELETE FROM publish_history WHERE id IN
+                 (SELECT id FROM publish_history WHERE profile = ?1
+                  ORDER BY id DESC LIMIT -1 OFFSET ?2)",
+            params![h.profile.0, keep],
+        )?;
+        tx.commit()?;
+        Ok(id)
     }
 
+    /// Replaces what a publish's purge did (Retry Purge). A publish no longer stored (trimmed,
+    /// or its profile deleted) is not an error: there is nothing left to update.
     pub fn update_history_purge(&self, id: i64, purge: &PurgeResult) -> Result<(), StoreError> {
-        todo!("T4")
+        self.conn.execute(
+            "UPDATE publish_history SET purge = ?2 WHERE id = ?1",
+            params![id, to_json(purge)?],
+        )?;
+        Ok(())
     }
 
-    /// Newest first, without files. `search` is a LIKE on the result, the date text and any
-    /// file path.
+    /// Newest first, without files. `search` (trimmed; empty matches all) is a case-insensitive
+    /// LIKE on the result, the stored date text and any file path. A row this build cannot read
+    /// is left out.
     pub fn list_history(
         &self,
         profile: &ProfileId,
         search: &str,
     ) -> Result<Vec<HistoryRecord>, StoreError> {
-        todo!("T4")
+        let search = search.trim();
+        let pattern = format!("%{}%", escape_like(search));
+        let mut stmt = self.conn.prepare(
+            "SELECT h.id, h.profile, h.started_at, h.finished_at, h.result, h.uploaded,
+                    h.deleted, h.skipped, h.failed, h.bytes, h.purge, h.verified,
+                    h.remote_files, h.remote_folders, h.regions
+             FROM publish_history h
+             WHERE h.profile = ?1
+               AND (?2 = ''
+                    OR h.result LIKE ?3 ESCAPE '\\'
+                    OR h.started_at LIKE ?3 ESCAPE '\\'
+                    OR h.finished_at LIKE ?3 ESCAPE '\\'
+                    OR EXISTS (SELECT 1 FROM publish_files f
+                               WHERE f.history = h.id AND f.path LIKE ?3 ESCAPE '\\'))
+             ORDER BY h.id DESC",
+        )?;
+        let mut rows = stmt.query(params![profile.0, search, pattern])?;
+        let mut history = Vec::new();
+        while let Some(row) = rows.next()? {
+            match RawHistory::read(row) {
+                Ok(raw) => history.extend(raw.into_record()),
+                Err(e) if is_row_decode_error(&e) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(history)
     }
 
+    /// The files of a publish, in the order they were stored. A row this build cannot read is
+    /// left out.
     pub fn history_files(&self, id: i64) -> Result<Vec<HistoryFile>, StoreError> {
-        todo!("T4")
+        let mut stmt = self.conn.prepare(
+            "SELECT path, action, outcome, error, size FROM publish_files
+             WHERE history = ?1 ORDER BY rowid",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        let mut files = Vec::new();
+        while let Some(row) = rows.next()? {
+            match RawHistoryFile::read(row) {
+                Ok(raw) => files.extend(raw.into_file()),
+                Err(e) if is_row_decode_error(&e) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(files)
     }
 
+    /// The site's CDN link. `None` when there is none, or when the stored one cannot be read
+    /// (the app then looks the pull zones up again).
     pub fn cdn_link(&self, site: &SiteId) -> Result<Option<CdnLink>, StoreError> {
-        todo!("T4")
+        let raw = self
+            .conn
+            .query_row(
+                "SELECT account, zones, checked_at FROM cdn_links WHERE site = ?1",
+                params![site.0],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0),
+                        row.get::<_, String>(1),
+                        row.get::<_, String>(2),
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((Ok(account), Ok(zones), Ok(checked_at))) = raw else {
+            return Ok(None);
+        };
+        let link = serde_json::from_str::<Vec<CdnZone>>(&zones)
+            .ok()
+            .zip(parse_stamp(&checked_at).ok())
+            .map(|(zones, checked_at)| CdnLink {
+                account: AccountId(account),
+                zones,
+                checked_at,
+            });
+        Ok(link)
     }
 
+    /// Stores the site's CDN link, replacing the one it had.
     pub fn put_cdn_link(&self, site: &SiteId, link: &CdnLink) -> Result<(), StoreError> {
-        todo!("T4")
+        self.conn.execute(
+            "INSERT INTO cdn_links (site, account, zones, checked_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (site) DO UPDATE SET account = excluded.account,
+                 zones = excluded.zones, checked_at = excluded.checked_at",
+            params![
+                site.0,
+                link.account.0,
+                to_json(&link.zones)?,
+                stamp(link.checked_at)
+            ],
+        )?;
+        Ok(())
     }
 
+    /// Forgets every CDN link that purges with `account`'s key.
     pub fn remove_cdn_links_for(&self, account: &AccountId) -> Result<(), StoreError> {
-        todo!("T4")
+        self.conn.execute(
+            "DELETE FROM cdn_links WHERE account = ?1",
+            params![account.0],
+        )?;
+        Ok(())
     }
+}
+
+/// The profile columns that are not stored as they are.
+struct ProfileColumns<'a> {
+    local_dir: &'a str,
+    skip_rules: String,
+    purge: String,
+}
+
+impl<'a> ProfileColumns<'a> {
+    fn of(p: &'a ProfileRecord) -> Result<Self, StoreError> {
+        Ok(Self {
+            // A Windows path can hold text that is not Unicode; such a folder is refused rather
+            // than saved as some other folder.
+            local_dir: p.local_dir.to_str().ok_or_else(|| {
+                StoreError::Encode("the folder's name is not valid Unicode".into())
+            })?,
+            skip_rules: to_json(&p.skip_rules)?,
+            purge: to_json(&p.purge)?,
+        })
+    }
+}
+
+/// A `profiles` row as stored.
+struct RawProfile {
+    id: String,
+    site: String,
+    name: String,
+    local_dir: String,
+    remote_dir: String,
+    skip_rules: String,
+    remove_extras: bool,
+    purge: String,
+    guard_files: i64,
+    guard_percent: u8,
+    created_at: String,
+    last_published_at: Option<String>,
+}
+
+impl RawProfile {
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            site: row.get(1)?,
+            name: row.get(2)?,
+            local_dir: row.get(3)?,
+            remote_dir: row.get(4)?,
+            skip_rules: row.get(5)?,
+            remove_extras: row.get(6)?,
+            purge: row.get(7)?,
+            guard_files: row.get(8)?,
+            guard_percent: row.get(9)?,
+            created_at: row.get(10)?,
+            last_published_at: row.get(11)?,
+        })
+    }
+
+    /// `None` when a column holds something this build does not understand.
+    fn into_record(self) -> Option<ProfileRecord> {
+        Some(ProfileRecord {
+            id: ProfileId(self.id),
+            site: SiteId(self.site),
+            name: self.name,
+            local_dir: PathBuf::from(self.local_dir),
+            remote_dir: RemotePath::parse(&self.remote_dir).ok()?,
+            skip_rules: serde_json::from_str(&self.skip_rules).ok()?,
+            remove_extras: self.remove_extras,
+            purge: serde_json::from_str::<PurgeMode>(&self.purge).ok()?,
+            guard: DeleteGuard {
+                files: count(self.guard_files)?,
+                percent: self.guard_percent,
+            },
+            created_at: parse_stamp(&self.created_at).ok()?,
+            last_published_at: match self.last_published_at {
+                Some(text) => Some(parse_stamp(&text).ok()?),
+                None => None,
+            },
+        })
+    }
+}
+
+/// A `publish_history` row as stored.
+struct RawHistory {
+    id: i64,
+    profile: String,
+    started_at: String,
+    finished_at: String,
+    result: String,
+    uploaded: i64,
+    deleted: i64,
+    skipped: i64,
+    failed: i64,
+    bytes: i64,
+    purge: String,
+    verified: bool,
+    remote_files: i64,
+    remote_folders: i64,
+    regions: u32,
+}
+
+impl RawHistory {
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            profile: row.get(1)?,
+            started_at: row.get(2)?,
+            finished_at: row.get(3)?,
+            result: row.get(4)?,
+            uploaded: row.get(5)?,
+            deleted: row.get(6)?,
+            skipped: row.get(7)?,
+            failed: row.get(8)?,
+            bytes: row.get(9)?,
+            purge: row.get(10)?,
+            verified: row.get(11)?,
+            remote_files: row.get(12)?,
+            remote_folders: row.get(13)?,
+            regions: row.get(14)?,
+        })
+    }
+
+    /// Without its files. `None` when a column holds something this build does not understand.
+    fn into_record(self) -> Option<HistoryRecord> {
+        Some(HistoryRecord {
+            id: self.id,
+            profile: ProfileId(self.profile),
+            started_at: parse_stamp(&self.started_at).ok()?,
+            finished_at: parse_stamp(&self.finished_at).ok()?,
+            result: result_from_text(&self.result)?,
+            uploaded: count(self.uploaded)?,
+            deleted: count(self.deleted)?,
+            skipped: count(self.skipped)?,
+            failed: count(self.failed)?,
+            bytes: count(self.bytes)?,
+            purge: serde_json::from_str(&self.purge).ok()?,
+            verified: self.verified,
+            remote_files: count(self.remote_files)?,
+            remote_folders: count(self.remote_folders)?,
+            regions: self.regions,
+            files: Vec::new(),
+        })
+    }
+}
+
+/// A `publish_files` row as stored.
+struct RawHistoryFile {
+    path: String,
+    action: String,
+    outcome: String,
+    error: Option<String>,
+    size: i64,
+}
+
+impl RawHistoryFile {
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            path: row.get(0)?,
+            action: row.get(1)?,
+            outcome: row.get(2)?,
+            error: row.get(3)?,
+            size: row.get(4)?,
+        })
+    }
+
+    /// `None` when a column holds something this build does not understand.
+    fn into_file(self) -> Option<HistoryFile> {
+        Some(HistoryFile {
+            path: RemotePath::parse(&self.path).ok()?,
+            action: action_from_text(&self.action)?,
+            outcome: outcome_from_columns(&self.outcome, self.error)?,
+            size: count(self.size)?,
+        })
+    }
+}
+
+/// The stored names of a publish's result, which `list_history` searches. They are part of the
+/// file format: never rename one.
+fn result_to_text(result: PublishResult) -> &'static str {
+    match result {
+        PublishResult::Ok => "ok",
+        PublishResult::Partial => "partial",
+        PublishResult::Failed => "failed",
+        PublishResult::Cancelled => "cancelled",
+    }
+}
+
+fn result_from_text(text: &str) -> Option<PublishResult> {
+    match text {
+        "ok" => Some(PublishResult::Ok),
+        "partial" => Some(PublishResult::Partial),
+        "failed" => Some(PublishResult::Failed),
+        "cancelled" => Some(PublishResult::Cancelled),
+        _ => None,
+    }
+}
+
+fn action_to_text(action: FileAction) -> &'static str {
+    match action {
+        FileAction::Upload => "upload",
+        FileAction::Delete => "delete",
+    }
+}
+
+fn action_from_text(text: &str) -> Option<FileAction> {
+    match text {
+        "upload" => Some(FileAction::Upload),
+        "delete" => Some(FileAction::Delete),
+        _ => None,
+    }
+}
+
+/// A file's `outcome` and `error` columns: the error is why the file failed or was not tried.
+fn outcome_to_columns(outcome: &FileOutcome) -> (&'static str, Option<&str>) {
+    match outcome {
+        FileOutcome::Done => ("done", None),
+        FileOutcome::Failed(error) => ("failed", Some(error)),
+        FileOutcome::Cancelled => ("cancelled", None),
+        FileOutcome::NotRun(why) => ("not_run", Some(why)),
+    }
+}
+
+fn outcome_from_columns(outcome: &str, error: Option<String>) -> Option<FileOutcome> {
+    match outcome {
+        "done" => Some(FileOutcome::Done),
+        "failed" => Some(FileOutcome::Failed(error.unwrap_or_default())),
+        "cancelled" => Some(FileOutcome::Cancelled),
+        "not_run" => Some(FileOutcome::NotRun(error.unwrap_or_default())),
+        _ => None,
+    }
+}
+
+/// A count as stored: SQLite's integers are signed.
+fn int(n: u64) -> Result<i64, StoreError> {
+    i64::try_from(n).map_err(|_| StoreError::Encode(format!("{n} is too large to save")))
+}
+
+/// A stored count, `None` if it is negative.
+fn count(n: i64) -> Option<u64> {
+    u64::try_from(n).ok()
+}
+
+fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<String, StoreError> {
+    serde_json::to_string(value).map_err(|e| StoreError::Encode(e.to_string()))
+}
+
+/// `text` with LIKE's wildcards and its escape character (`\`) escaped, so that it matches only
+/// itself.
+fn escape_like(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
 }
 
 /// The columns a site's provider and S3 details are stored in.
@@ -807,7 +1363,7 @@ mod tests {
 
         let st = Store::open(&path).unwrap();
         assert_eq!(st.list_sites().unwrap().sites, [record]);
-        assert_eq!(user_version(&st.conn).unwrap(), 2);
+        assert_eq!(user_version(&st.conn).unwrap(), MIGRATIONS.len() as u32);
     }
 
     #[test]
@@ -835,7 +1391,7 @@ mod tests {
         );
         assert_eq!(backups.container, "backup-zone");
         assert_eq!(backups.s3, None);
-        assert_eq!(user_version(&st.conn).unwrap(), 2);
+        assert_eq!(user_version(&st.conn).unwrap(), MIGRATIONS.len() as u32);
 
         // The new tables exist and the migrated database takes new data.
         st.add_site(&s3_site("R2", S3Preset::CloudflareR2, true))
@@ -893,7 +1449,11 @@ mod tests {
             })
             .unwrap();
             assert!(raced);
-            assert_eq!(user_version(&conn).unwrap(), 2, "old_file: {old_file}");
+            assert_eq!(
+                user_version(&conn).unwrap(),
+                MIGRATIONS.len() as u32,
+                "old_file: {old_file}"
+            );
         }
     }
 
@@ -916,7 +1476,7 @@ mod tests {
         })
         .unwrap();
         assert!(checked > 0);
-        assert_eq!(user_version(&conn).unwrap(), 2);
+        assert_eq!(user_version(&conn).unwrap(), MIGRATIONS.len() as u32);
     }
 
     /// Ledger 109, end to end: several opens at once (a fresh file, then an old one) all
@@ -945,7 +1505,11 @@ mod tests {
             });
             for store in opened {
                 let store = store.unwrap_or_else(|e| panic!("round {round}: {e}"));
-                assert_eq!(user_version(&store.conn).unwrap(), 2, "round {round}");
+                assert_eq!(
+                    user_version(&store.conn).unwrap(),
+                    MIGRATIONS.len() as u32,
+                    "round {round}"
+                );
             }
         }
     }
@@ -976,6 +1540,51 @@ mod tests {
         );
         assert_eq!(st.column_names("settings").unwrap(), ["key", "value"]);
         assert_eq!(
+            st.column_names("profiles").unwrap(),
+            [
+                "id",
+                "site",
+                "name",
+                "local_dir",
+                "remote_dir",
+                "skip_rules",
+                "remove_extras",
+                "purge",
+                "guard_files",
+                "guard_percent",
+                "created_at",
+                "last_published_at"
+            ]
+        );
+        assert_eq!(
+            st.column_names("publish_history").unwrap(),
+            [
+                "id",
+                "profile",
+                "started_at",
+                "finished_at",
+                "result",
+                "uploaded",
+                "deleted",
+                "skipped",
+                "failed",
+                "bytes",
+                "purge",
+                "verified",
+                "remote_files",
+                "remote_folders",
+                "regions"
+            ]
+        );
+        assert_eq!(
+            st.column_names("publish_files").unwrap(),
+            ["history", "path", "action", "outcome", "error", "size"]
+        );
+        assert_eq!(
+            st.column_names("cdn_links").unwrap(),
+            ["site", "account", "zones", "checked_at"]
+        );
+        assert_eq!(
             st.column_names("journal").unwrap(),
             [
                 "id",
@@ -1005,7 +1614,11 @@ mod tests {
             tables,
             [
                 "accounts",
+                "cdn_links",
                 "journal",
+                "profiles",
+                "publish_files",
+                "publish_history",
                 "settings",
                 "sites",
                 "sqlite_sequence"
