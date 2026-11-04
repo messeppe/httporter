@@ -20,11 +20,16 @@ import { ConflictContents, ConflictRow } from "types.slint";
 import { Banner, ConflictSheet, DeleteAlert, ImportSheet, NewFolderSheet, QuitAlert, RemoveSiteAlert } from "components/sheets.slint";
 import { CapsuleButton } from "components/buttons.slint";
 import { SettingsWindow } from "components/settings_window.slint";
+import { CompareStatus, CompareSummary, HistoryDetail, HistoryRow, PlanGroup, PlanRow, ProfileDraft, ProfileItem, ProfileView, PublishSheetData } from "types.slint";
+import { CdnKeySheet, PublishSheet, ReviewDeletionsSheet } from "components/publish_sheet.slint";
+import { ProfilePage } from "components/profile_page.slint";
+import { ProfileSheet } from "components/profile_sheet.slint";
 
 export { FileKind, FileRow, PaneBounds, ProviderTile, S3Errors, SiteDraft, SiteItem, Theme, ZoneChoice }
 export { TransferRow }
 export { ConflictContents, ConflictRow }
 export { SettingsWindow }
+export { CompareStatus, CompareSummary, HistoryDetail, HistoryRow, PlanGroup, PlanRow, ProfileDraft, ProfileItem, ProfileView, PublishSheetData }
 
 // Error message shown above the panes. When the open site's error is one editing the site fixes
 // (no password saved, a sign-in that failed), it offers Edit Site… and Remove Site….
@@ -388,6 +393,81 @@ export component AppWindow inherits Window {
     callback quit-cancel-all();
     callback quit-keep-running();
 
+    // ---- Publish (I3) ----
+
+    // Compare: the toolbar toggle may be pressed (`can-compare`), it is on (`comparing`), and what
+    // it found (`compare`, for the status bar and the panes). The toggle only calls
+    // `toggle-compare`; the app sets `comparing`.
+    in-out property <bool> comparing: false;
+    in property <bool> can-compare: false;
+    in property <CompareSummary> compare;
+    callback toggle-compare();
+
+    // The toolbar's Publish button and Ctrl+P.
+    in property <bool> can-publish: false;
+    callback publish();
+
+    // The sidebar's publish profiles. A profile row selects itself (`selected-profile`, -1 for
+    // none) before `profile-selected` is called; choosing a site sets it back to -1. While it is
+    // 0 or more, the profile page is shown in place of the panes.
+    in property <[ProfileItem]> profiles;
+    in-out property <int> selected-profile: -1;
+    callback profile-selected(int);
+
+    // The Publish sheet. Cancel closes it before `publish-cancel`; the publish button closes it
+    // before `publish-confirm`, or, when `publish-sheet.needs-review`, opens Review Deletions
+    // (`review-open`) instead, whose button closes both before `publish-review-confirm` (with the
+    // name as typed).
+    in-out property <bool> publish-open: false;
+    in property <PublishSheetData> publish-sheet;
+    in property <[PlanRow]> plan-rows;
+    callback plan-toggle(int);
+    callback publish-remove-extras(bool);
+    callback publish-purge(int);
+    callback publish-change-folder();
+    callback publish-export();
+    callback publish-cancel();
+    callback publish-confirm();
+    in-out property <bool> review-open: false;
+    callback publish-review-confirm(string);
+
+    // The profile page, and the toolbar's Edit Profile on it.
+    in property <ProfileView> profile;
+    in property <[HistoryRow]> history-rows;
+    in property <HistoryDetail> history-detail;
+    in-out property <string> history-search;
+    callback history-search-changed(string);
+    callback history-selected(int);
+    callback history-retry(int);
+    callback history-show-all(int);
+    callback history-retry-purge(int);
+    callback profile-change-folder();
+    callback edit-profile();
+    callback profile-publish();
+
+    // The profile sheet (new profile and Edit Profile). Cancel closes it; Save and Delete leave
+    // closing it to the app.
+    in-out property <bool> profile-sheet-open: false;
+    in property <ProfileDraft> profile-draft;
+    callback profile-save(ProfileDraft);
+    callback profile-delete(string);
+    callback profile-pick-folder();
+    callback profile-add-key();
+
+    // The CDN key sheet. Cancel closes it before `cdn-key-cancel`; Save leaves closing it to the
+    // app (once the key is checked).
+    in-out property <bool> cdn-key-open: false;
+    in property <string> cdn-key-zone;
+    in-out property <string> cdn-key-error;
+    in property <bool> cdn-key-busy;
+    callback cdn-key-save(string);
+    callback cdn-key-cancel();
+
+    // The delete alert's CDN purge checkbox.
+    in-out property <bool> delete-purge: false;
+    in property <bool> delete-purge-available: false;
+    in property <string> delete-purge-note;
+
     // The banners above the panes: each shows while its text is not empty.
     in property <string> resume-banner-text;
     in property <string> offline-banner-text;
@@ -426,6 +506,8 @@ export component AppWindow inherits Window {
     property <int> drag-row-remote: root.drag-over-remote ? remote-pane.folder-at(root.drag-y) : -1;
     property <int> drag-row-local: root.drag-over-local ? local-pane.folder-at(root.drag-y) : -1;
     property <bool> has-selection: root.selected-site >= 0 && root.selected-site < root.sites.length;
+    // A publish profile's page is shown in place of the panes.
+    property <bool> on-profile: root.selected-profile >= 0 && root.selected-profile < root.profiles.length;
     property <bool> can-go-back: root.local-pane-active ? root.local-can-go-back : root.remote-can-go-back;
     property <bool> can-go-forward: root.local-pane-active ? root.local-can-go-forward : root.remote-can-go-forward;
 
@@ -495,6 +577,13 @@ export component AppWindow inherits Window {
                 }
                 return accept;
             }
+            // Ctrl+P publishes, while the toolbar's Publish would.
+            if (event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift && (event.text == "p" || event.text == "P")) {
+                if (!event.repeat && root.can-publish) {
+                    root.publish();
+                }
+                return accept;
+            }
             if (event.modifiers.control && event.modifiers.shift && !event.modifiers.alt && !event.modifiers.meta && (event.text == "n" || event.text == "N")) {
                 if (!event.repeat && root.can-new-folder) {
                     root.new-folder();
@@ -526,8 +615,8 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             Toolbar {
-                title: root.sites.length == 0 ? @tr("Welcome") : (root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter"));
-                subtitle: root.sites.length == 0 ? @tr("No site connected") : root.endpoint-text;
+                title: root.on-profile ? root.profiles[root.selected-profile].name : (root.sites.length == 0 ? @tr("Welcome") : (root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter")));
+                subtitle: root.on-profile ? @tr("Publish profile") : (root.sites.length == 0 ? @tr("No site connected") : root.endpoint-text);
                 connection-text: root.connection-text;
                 connection-ok: root.connection-ok;
                 can-go-back: root.can-go-back;
@@ -538,6 +627,13 @@ export component AppWindow inherits Window {
                 can-delete: root.can-delete;
                 delete-note: root.delete-note;
                 actions-note: root.actions-note;
+                can-publish: root.can-publish;
+                can-compare: root.can-compare;
+                comparing: root.comparing;
+                profile-page: root.on-profile;
+                publish => { root.publish(); }
+                toggle-compare => { root.toggle-compare(); }
+                edit-profile => { root.edit-profile(); }
                 toggle-sidebar => { root.sidebar-visible = !root.sidebar-visible; }
                 go-back => { root.go-back(); }
                 go-forward => { root.go-forward(); }
@@ -561,9 +657,16 @@ export component AppWindow inherits Window {
                     sheet-open: root.add-site-open;
                     settings-available: root.settings-available;
                     site-menu-available: root.sites-v2-ready;
+                    profiles: root.profiles;
+                    selected-profile: root.selected-profile;
                     site-selected(index) => {
+                        root.selected-profile = -1;
                         root.selected-site = index;
                         root.site-selected(index);
+                    }
+                    profile-selected(index) => {
+                        root.selected-profile = index;
+                        root.profile-selected(index);
                     }
                     edit-site(index) => { root.site-edit(index); }
                     duplicate-site(index) => { root.site-duplicate(index); }
@@ -662,6 +765,9 @@ export component AppWindow inherits Window {
                                 local-pane := Pane {
                                     x: 0px;
                                     y: 0px;
+                                    visible: !root.on-profile;
+                                    comparing: root.comparing;
+                                    compare: root.compare;
                                     width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
                                     height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
                                     title: @tr("This PC");
@@ -707,6 +813,9 @@ export component AppWindow inherits Window {
                                     drag-cancelled => { root.pane-drag-cancelled(); }
                                 }
                                 remote-pane := Pane {
+                                    visible: !root.on-profile;
+                                    comparing: root.comparing;
+                                    compare: root.compare;
                                     x: panes.side-by-side ? (panes.width + 8px) / 2 : 0px;
                                     y: panes.side-by-side ? 0px : (panes.height + 8px) / 2;
                                     width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
@@ -756,6 +865,26 @@ export component AppWindow inherits Window {
                                     drag-ended(point) => { root.pane-drag-ended(1, point); }
                                     drag-cancelled => { root.pane-drag-cancelled(); }
                                 }
+
+                                // A publish profile's page, in place of the two panes (which keep their state).
+                                if root.on-profile: ProfilePage {
+                                    x: 0px;
+                                    y: 0px;
+                                    width: panes.width;
+                                    height: panes.height;
+                                    profile: root.profile;
+                                    history-rows: root.history-rows;
+                                    history-detail: root.history-detail;
+                                    search <=> root.history-search;
+                                    search-changed(text) => { root.history-search-changed(text); }
+                                    history-selected(id) => { root.history-selected(id); }
+                                    retry(id) => { root.history-retry(id); }
+                                    show-all(id) => { root.history-show-all(id); }
+                                    retry-purge(id) => { root.history-retry-purge(id); }
+                                    change-folder => { root.profile-change-folder(); }
+                                    edit-profile => { root.edit-profile(); }
+                                    publish => { root.profile-publish(); }
+                                }
                             }
 
                             TransferDrawer {
@@ -804,6 +933,7 @@ export component AppWindow inherits Window {
             StatusBar {
                 left-text: root.status-left;
                 right-text: root.status-right;
+                compare: root.compare;
             }
         }
     }
@@ -910,6 +1040,9 @@ export component AppWindow inherits Window {
         title: root.delete-title;
         body: root.delete-body;
         delete-label: root.delete-label;
+        purge <=> root.delete-purge;
+        purge-available: root.delete-purge-available;
+        purge-note: root.delete-purge-note;
         confirmed => {
             root.delete-open = false;
             root.delete-confirm();
@@ -983,6 +1116,74 @@ export component AppWindow inherits Window {
         keep-running => {
             root.quit-open = false;
             root.quit-keep-running();
+        }
+    }
+
+    // The Publish sheets, over the other sheets: the CDN key sheet can open over the Publish sheet
+    // or the profile sheet, so it comes last.
+    if root.publish-open: PublishSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        data: root.publish-sheet;
+        rows: root.plan-rows;
+        toggle(index) => { root.plan-toggle(index); }
+        remove-extras(on) => { root.publish-remove-extras(on); }
+        purge(mode) => { root.publish-purge(mode); }
+        change-folder => { root.publish-change-folder(); }
+        export-plan => { root.publish-export(); }
+        cancelled => {
+            root.publish-open = false;
+            root.publish-cancel();
+        }
+        confirmed => {
+            if (root.publish-sheet.needs-review) {
+                root.review-open = true;
+            } else {
+                root.publish-open = false;
+                root.publish-confirm();
+            }
+        }
+    }
+    if root.review-open: ReviewDeletionsSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        data: root.publish-sheet;
+        rows: root.plan-rows;
+        confirmed(name) => {
+            root.review-open = false;
+            root.publish-open = false;
+            root.publish-review-confirm(name);
+        }
+        cancelled => { root.review-open = false; }
+    }
+    if root.profile-sheet-open: ProfileSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        draft: root.profile-draft;
+        save(draft) => { root.profile-save(draft); }
+        delete-profile(id) => { root.profile-delete(id); }
+        pick-folder => { root.profile-pick-folder(); }
+        add-key => { root.profile-add-key(); }
+        cancelled => { root.profile-sheet-open = false; }
+    }
+    if root.cdn-key-open: CdnKeySheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        zone: root.cdn-key-zone;
+        error <=> root.cdn-key-error;
+        busy: root.cdn-key-busy;
+        save(key) => { root.cdn-key-save(key); }
+        cancelled => {
+            root.cdn-key-open = false;
+            root.cdn-key-cancel();
         }
     }
 }

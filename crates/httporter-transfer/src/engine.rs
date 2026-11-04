@@ -146,6 +146,15 @@ pub struct Batch {
     pub checksums: HashMap<RemotePath, Checksum>,
 }
 
+/// What became of each job of a batch submitted with [`Engine::submit_tracked`], by remote path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchOutcome {
+    pub done: Vec<RemotePath>,
+    pub failed: Vec<(RemotePath, String)>,
+    pub cancelled: Vec<RemotePath>,
+    pub bytes_done: u64,
+}
+
 /// Runs transfer jobs: journalled before they start, per-site lanes with adaptive limits,
 /// retries, a global bandwidth limit, and a cheap snapshot for the UI.
 ///
@@ -1194,6 +1203,27 @@ impl Engine {
     /// made until then (review N2: what the resume banner counts after a site is removed).
     pub fn journal_reached(&self, mark: u64) -> bool {
         self.inner.writer.dealt_with() >= mark
+    }
+
+    /// Submits `batch` as [`Self::submit`] does, and keeps its per-job outcomes for
+    /// [`Self::wait_batch`].
+    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
+    pub fn submit_tracked(&self, batch: Batch) -> Result<String, JournalError> {
+        todo!("T3")
+    }
+
+    /// Resolves when every job of the batch is done, failed or cancelled AND
+    /// `pending_checks_for(site) == 0`; a check that sends a file again reopens the batch; a
+    /// stopped engine reports the rest as cancelled.
+    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
+    pub async fn wait_batch(&self, batch_id: &str) -> BatchOutcome {
+        todo!("T3")
+    }
+
+    /// The late checks (Q55) still waiting for `site`.
+    #[allow(unused_variables)] // T1 skeleton: T3 fills it.
+    pub fn pending_checks_for(&self, site: &SiteId) -> usize {
+        todo!("T3")
     }
 }
 

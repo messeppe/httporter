@@ -43,6 +43,7 @@ T1 commits all of this as `todo!()` stubs; everyone codes against it.
 ```rust
 // publish.rs
 pub struct ProfileId(pub String);                       // uuid v4, new()/Display/Hash/serde like SiteId
+                                                        // T1: new() is real (uuid v4); serde transparent
 #[derive(Default)] pub enum PurgeMode { Off, #[default] Changed, Zone }
 pub struct DeleteGuard { pub files: u64, pub percent: u8 }  // Default 100 / 10
 impl DeleteGuard { pub fn trips(&self, deletes: u64, remote_files: u64) -> bool }  // deletes > min(files, remote*pct/100)
@@ -66,7 +67,7 @@ pub const HISTORY_KEEP: usize = 200;
 // inner '/' = whole relative path; '*' = run without '/'; '?' = one char.
 pub const DEFAULT_SKIP_RULES: &[&str] = &[".env", ".env.*", "*.key", "*.pem", ".git/", ".svn/", "node_modules/",
     "Thumbs.db", "desktop.ini", ".DS_Store", "*.tmp", "~$*"];         // spec 8.6.11 (12 rules)
-#[derive(Default)] pub struct SkipRules { /* compiled */ }
+#[derive(Default)] pub struct SkipRules { /* compiled */ }   // T1: `SkipRules {}`, T2 adds private fields
 impl SkipRules { pub fn new(patterns: &[String]) -> Self; pub fn defaults() -> Vec<String>;
                  pub fn is_skipped(&self, rel: &str, is_folder: bool) -> bool; }
 pub fn looks_secret(rel: &str) -> bool;   // .env*, *.pem, *.key, id_rsa*, *.p12, wp-config.php (8.6.12)
@@ -74,6 +75,7 @@ pub fn looks_secret(rel: &str) -> bool;   // .env*, *.pem, *.key, id_rsa*, *.p12
 // cdn.rs
 pub struct CdnZone { pub id: u64, pub name: String, pub hostnames: Vec<String> }        // no scheme; serde
 pub struct CdnLink { pub account: AccountId, pub zones: Vec<CdnZone>, pub checked_at: DateTime<Utc> }  // serde
+// T1: for that, AccountId gained Serialize/Deserialize (transparent) and core's chrono the `serde` feature.
 #[async_trait] pub trait CdnPurger: Send + Sync {
     fn zones(&self) -> &[CdnZone];
     async fn purge_url(&self, url: &str) -> Result<(), ProviderError>;   // rate-limited inside
@@ -96,6 +98,7 @@ pub async fn run_purge(p: &dyn CdnPurger, mode: PurgeMode, paths: &[RemotePath],
 impl CompareMode { /// Bunny {verify,false,false} (size only when verify off); S3 {false,true,true}.
     pub fn for_site(kind: ProviderKind, verify_checksums: bool) -> Self; }
 #[derive(Default)] pub struct HashCache { /* Mutex<HashMap<(PathBuf,u64,SystemTime), FileHashes>>, memory only */ }
+// T1: HashCache derives Debug + Default only (Mutex); its field is `hashes`.
 impl HashCache { pub fn get_or_hash(&self, path: &Path) -> io::Result<FileHashes> }
 #[derive(Copy, Default)] pub struct ScanProgress { pub local_files: u64, pub remote_files: u64, pub hashed: u64, pub to_hash: u64 }
 pub struct CompareItem { pub rel: String, pub status: CompareStatus, pub local_size: Option<u64>,
@@ -109,7 +112,7 @@ impl CompareResult {
     /// RemoteOnly if only remote, else Same.
     pub fn child_statuses(&self, rel_dir: &str) -> HashMap<String, CompareStatus>;
     pub fn weakest_method(&self) -> CompareBy; }                       // "Compared N files by SHA-256 checksum"
-pub enum CompareError { Local { path: PathBuf, message: String }, Remote(ProviderError) }
+pub enum CompareError { Local { path: PathBuf, message: String }, Remote(ProviderError) }  // T1: Debug, Clone, PartialEq (no Eq)
 /// Local walk ‖ remote walk(); skip rules both sides; hashes only equal-size pairs the mode can check.
 /// Missing remote root = empty. Cancel = drop.
 pub async fn compare_trees(provider: &dyn StorageProvider, local_root: &Path, remote_root: &RemotePath, skip: &SkipRules,
@@ -128,6 +131,7 @@ impl PublishPlan {
     pub fn export_text(&self, title: &str, destination: &str) -> String;
     pub fn retry_of(local_root: PathBuf, remote_root: RemotePath, failed: &[HistoryFile]) -> Self; }
 pub struct BatchTarget { pub site: SiteId, pub site_name: String, pub host: String, pub provider: Arc<dyn StorageProvider> }
+// T1: BatchTarget derives Clone only (dyn provider).
 pub enum PublishPhase { Uploading, Deleting, Purging { done: usize, total: usize }, Finished }
 pub struct PublishOutcome { pub result: PublishResult, pub files: Vec<HistoryFile>, pub uploaded: u64, pub deleted: u64,
     pub failed: u64, pub bytes: u64, pub purge: PurgeResult, pub started_at: DateTime<Utc>, pub finished_at: DateTime<Utc> }
@@ -158,14 +162,14 @@ impl BunnyAccount {
     pub async fn purge_url(&self, url: &str) -> Result<(), ProviderError>;      // POST /purge?url=<enc>&async=false
     pub async fn purge_pull_zone(&self, id: u64) -> Result<(), ProviderError>; } // POST /pullzone/{id}/purgeCache
 pub struct BunnyCdn { /* account, zones, token buckets: URLs 120 burst + 5/s, zones 20 burst + 0.5/s */ }
-impl BunnyCdn { pub fn new(account: BunnyAccount, zones: Vec<CdnZone>) -> Self }
+impl BunnyCdn { pub fn new(account: BunnyAccount, zones: Vec<CdnZone>) -> Self }  // T1: real (stores both); T5 adds buckets
 impl CdnPurger for BunnyCdn {}   // 429: wait Retry-After (clamped), at most 3 tries
 ```
 
 ### 0.4 Storage, `httporter-platform/src/store.rs` (schema v3) and `httporter-app/src/session/profiles.rs`
 
 ```rust
-impl Store {   // all return Result<_, StoreError>
+impl Store {   // all return Result<_, StoreError> (T1: so list_profiles → Result<Vec<_>>, cdn_link → Result<Option<_>>)
     pub fn add_profile(&self, p: &ProfileRecord);   pub fn update_profile(&self, p: &ProfileRecord);
     pub fn remove_profile(&self, id: &ProfileId) /*+ its history*/;   pub fn list_profiles(&self) -> Vec<ProfileRecord>;
     pub fn add_history(&self, h: &HistoryRecord) -> i64;   // + files, sets last_published_at, trims to HISTORY_KEEP
@@ -214,6 +218,10 @@ CREATE TABLE cdn_links (site TEXT PRIMARY KEY, account TEXT NOT NULL, zones TEXT
 // mod.rs (T1 stub, T7 fills)
 pub enum PurgerAnswer { Ready(Arc<dyn CdnPurger>), NeedKey, Unavailable(String) }   // S3 → Unavailable
 pub struct Publisher { /* session, transfers, link, HashCache, state */ }
+// T1 fields (private; child modules can read them): session: Arc<Session>, transfers: Arc<Transfers>, link: Link,
+//   hashes: HashCache, state: Mutex<State> (mod.rs, T7), compare: Mutex<compare_view::CompareState> (T6),
+//   sheet: Mutex<sheet_view::SheetState> (T7), profile: Mutex<profile_view::ProfileState> (T8): each view's state
+//   struct is in its own file, so add fields there.
 impl Publisher {
     pub fn new(session: Arc<Session>, transfers: Arc<Transfers>, link: Link) -> Arc<Self>;
     pub fn open_sheet(self: &Arc<Self>, profile: ProfileId);   // compare, then show the sheet
@@ -222,12 +230,17 @@ impl Publisher {
     pub async fn purger_for(&self, site: &SiteRecord) -> PurgerAnswer;
     pub fn ask_cdn_key(self: &Arc<Self>, site: SiteRecord); }  // CdnKeySheet; Edit Profile uses it too
 pub fn install(ui: &AppWindow, p: &Arc<Publisher>);          // calls the three installs below
+// T1: the installs (compare_view, sheet_view, profile_view) run at startup from install_app: never todo!() there.
+//   cdn.rs has no install; sheet_view::install wires the CDN key sheet and the delete-alert purge too.
 // compare_view.rs (T6): install(ui, p).  sheet_view.rs + cdn.rs (T7): install(ui, p).
 // profile_view.rs (T8): install(ui, p); pub fn open_new(ui, site: &SiteRecord, local: PathBuf, remote: RemotePath).
 // copy.rs: sections "// ---- compare (T6) ----", "// ---- sheet (T7) ----", "// ---- profile (T8) ----",
 //   each followed by 5 blank lines so parallel inserts merge.
+//   T1: rustfmt collapses blank lines, so each header is followed by 5 `//` lines instead. Add right under yours.
 // transfers.rs (real bodies in T1): pub fn engine(&self) -> &Engine;
 //   pub async fn batch_target(&self, site: &SiteRecord) -> Option<BatchTarget>
+//   T1: batch_target uses target() when the cloud pane has that site open, else session.connect(site); None if no
+//   client. binding.rs: install_with also returns the Link, which install_app hands to Publisher::new.
 ```
 
 ### 0.6 Slint, `ui/types.slint` additions and `app.slint` hooks (T1)
@@ -268,11 +281,45 @@ export struct ProfileDraft { id: string, name: string, site-name: string, folder
 - **CDN key sheet:** `cdn-key-open` (in-out), `cdn-key-zone`, `cdn-key-error` (in-out), `cdn-key-busy`,
   `cdn-key-save(string)`, `cdn-key-cancel()`.
 - **Delete alert:** `delete-purge` (in-out), `delete-purge-available`, `delete-purge-note`.
+- **T1 additions:** `can-publish` + `publish()` (the toolbar's Publish and Ctrl+P → `publish_current`; §0.6 had no
+  hook for them). Ctrl+P is already in `app.slint`'s key handler. `comparing` is in-out.
 
 T1 also creates empty shells, already placed in `app.slint`, so later tasks edit only their own file:
 - `components/publish_sheet.slint`: `PublishSheet`, `ReviewDeletionsSheet`, `CdnKeySheet`.
 - `components/profile_page.slint`: `ProfilePage`, shown in place of the panes while `selected-profile >= 0`.
 - `components/profile_sheet.slint`: `ProfileSheet`.
+
+**T1 as built** (nobody edits `app.slint` after T1, so every hook is wired there already):
+- **Hooks declared on existing components** (declarations only; the owner builds them):
+  - Toolbar (T6): `can-compare`, `comparing`, `profile-page`, `toggle-compare()`, `edit-profile()`. On the profile
+    page `app.slint` already sets the title to the profile name and the subtitle to "Publish profile".
+  - Pane (T6): `comparing`, `compare: CompareSummary`. StatusBar (T6): `compare`.
+  - Sidebar (T7): `profiles`, `selected-profile`, `profile-selected(int)`.
+  - DeleteAlert (T7): `purge` (in-out, `<=> delete-purge`), `purge-available`, `purge-note`.
+- **Shells:**
+  - `PublishSheet`: `data`, `rows`, `toggle(int)`, `remove-extras(bool)`, `purge(int)`, `change-folder()`,
+    `export-plan()` (not `export`, a Slint keyword), `cancelled()`, `confirmed()`.
+  - `ReviewDeletionsSheet`: `data`, `rows`, `confirmed(string)`, `cancelled()`.
+  - `CdnKeySheet`: `zone`, `error` (in-out), `busy`, `save(string)`, `cancelled()`.
+  - `ProfilePage`: `profile`, `history-rows`, `history-detail`, `search` (in-out), `search-changed(string)`,
+    `history-selected(int)`, `retry(int)`, `show-all(int)`, `retry-purge(int)`, `change-folder()`, `edit-profile()`,
+    `publish()`.
+  - `ProfileSheet`: `draft`, `save(ProfileDraft)`, `delete-profile(string)`, `pick-folder()`, `add-key()`,
+    `cancelled()`.
+- **Who closes what** (`app.slint`):
+  - Publish sheet: Cancel closes it, then `publish-cancel`. Its button opens Review Deletions when
+    `publish-sheet.needs-review`; otherwise it closes the sheet, then `publish-confirm`.
+  - Review Deletions: confirm closes both sheets, then `publish-review-confirm(name)`. Cancel closes only the review.
+  - Profile sheet: Cancel closes it. Save and Delete leave closing to Rust.
+  - CDN key sheet: Cancel closes it, then `cdn-key-cancel`. Save leaves closing to Rust.
+- **Profile page:** shown inside `panes` while `selected-profile` is a valid row; the two panes get `visible: false`
+  and keep their state; the banners and the drawer stay. Clicking a site sets `selected-profile = -1` first.
+- **Name clash:** Slint generates `crate::CompareStatus` (`None`, `Changed`, `New`, `RemoteOnly`, `Same`); alias it or
+  `httporter_core::CompareStatus` in app code. `FileRow.status` defaults to `None`.
+- **Lint allows:** stub files carry `#![allow(unused_variables)]` (app `publish/` and `session/profiles.rs` also
+  `dead_code`); the `engine.rs`, `store.rs` and `transfers.rs` stubs carry item-level allows. Drop them as you fill.
+- **Line endings:** app `transfers.rs` is stored with CRLF; `cargo fmt` rewrites it to LF. Put CRLF back before
+  committing (T7, T9), or the diff becomes the whole file.
 
 ---
 

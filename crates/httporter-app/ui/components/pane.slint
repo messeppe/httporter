@@ -23,7 +23,7 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { FileKind, FileRow, PaneBounds } from "../types.slint";
+import { CompareSummary, FileKind, FileRow, PaneBounds } from "../types.slint";
 import { Activation, ToolButton } from "buttons.slint";
 import { VCenter } from "layout.slint";
 
@@ -413,6 +413,10 @@ component PaneRow inherits Rectangle {
 // A pane of files: "This PC" on the left, the cloud site on the right.
 export component Pane inherits Rectangle {
     in property <string> title;
+    // Compare is on (T6 builds the Status column, the chips and This PC's "Comparing" chip), and
+    // what it found.
+    in property <bool> comparing: false;
+    in property <CompareSummary> compare;
     in property <image> icon;
     in property <[string]> crumbs;
     in property <[FileRow]> rows;

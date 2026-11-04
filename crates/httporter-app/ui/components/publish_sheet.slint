@@ -1,0 +1,45 @@
+// The Publish sheet (mockup `Main.dc.html` l.277–333), Review Deletions and the CDN key sheet.
+// T1 shells: their properties and callbacks; T7 builds them. Each is placed in app.slint, which
+// shows it while its open flag is set.
+
+import { PlanRow, PublishSheetData } from "../types.slint";
+
+export component PublishSheet inherits Rectangle {
+    in property <PublishSheetData> data;
+    in property <[PlanRow]> rows;
+    // A plan row's checkbox (a group header's toggles its group).
+    callback toggle(int);
+    callback remove-extras(bool);
+    // 0 off, 1 changed files, 2 whole zone.
+    callback purge(int);
+    callback change-folder();
+    callback export-plan();
+    callback cancelled();
+    // "Publish N Files", or "Review Deletions…" when `data.needs-review`.
+    callback confirmed();
+
+    Rectangle {}
+}
+
+// Asks for the zone or bucket name (`data.review-name`) before a publish deletes many files.
+export component ReviewDeletionsSheet inherits Rectangle {
+    in property <PublishSheetData> data;
+    in property <[PlanRow]> rows;
+    // The name as typed.
+    callback confirmed(string);
+    callback cancelled();
+
+    Rectangle {}
+}
+
+// Asks for the Bunny account API key that purges `zone`.
+export component CdnKeySheet inherits Rectangle {
+    in property <string> zone;
+    in-out property <string> error;
+    in property <bool> busy;
+    // The key as typed.
+    callback save(string);
+    callback cancelled();
+
+    Rectangle {}
+}

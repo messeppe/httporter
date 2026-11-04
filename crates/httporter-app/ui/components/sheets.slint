@@ -853,6 +853,10 @@ export component DeleteAlert inherits Rectangle {
     in property <string> body;
     // "Delete 48 Files".
     in property <string> delete-label;
+    // The CDN purge checkbox (T7 wires it): ticked, can be ticked, and the note under it.
+    in-out property <bool> purge: false;
+    in property <bool> purge-available: false;
+    in property <string> purge-note;
     callback confirmed();
     callback cancelled();
 

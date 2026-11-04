@@ -16,7 +16,10 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use httporter_core::{AccountId, ProviderKind, S3Preset, S3Site, SiteId, SiteRecord};
+use httporter_core::{
+    AccountId, CdnLink, HistoryFile, HistoryRecord, ProfileId, ProfileRecord, ProviderKind,
+    PurgeResult, S3Preset, S3Site, SiteId, SiteRecord,
+};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -329,6 +332,64 @@ impl Store {
             .query_map(params![table], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?;
         Ok(names)
+    }
+}
+
+/// Publish profiles, their history and the CDN links (schema v3). `remove_site` also deletes the
+/// site's profiles, their history and its CDN link, in one transaction.
+#[allow(unused_variables)] // T1 skeleton: T4 fills the bodies.
+impl Store {
+    pub fn add_profile(&self, p: &ProfileRecord) -> Result<(), StoreError> {
+        todo!("T4")
+    }
+
+    pub fn update_profile(&self, p: &ProfileRecord) -> Result<(), StoreError> {
+        todo!("T4")
+    }
+
+    /// Deletes the profile and its history.
+    pub fn remove_profile(&self, id: &ProfileId) -> Result<(), StoreError> {
+        todo!("T4")
+    }
+
+    pub fn list_profiles(&self) -> Result<Vec<ProfileRecord>, StoreError> {
+        todo!("T4")
+    }
+
+    /// Stores a publish and its files, sets the profile's `last_published_at` and trims the
+    /// profile's history to [`httporter_core::HISTORY_KEEP`]. Returns the new id.
+    pub fn add_history(&self, h: &HistoryRecord) -> Result<i64, StoreError> {
+        todo!("T4")
+    }
+
+    pub fn update_history_purge(&self, id: i64, purge: &PurgeResult) -> Result<(), StoreError> {
+        todo!("T4")
+    }
+
+    /// Newest first, without files. `search` is a LIKE on the result, the date text and any
+    /// file path.
+    pub fn list_history(
+        &self,
+        profile: &ProfileId,
+        search: &str,
+    ) -> Result<Vec<HistoryRecord>, StoreError> {
+        todo!("T4")
+    }
+
+    pub fn history_files(&self, id: i64) -> Result<Vec<HistoryFile>, StoreError> {
+        todo!("T4")
+    }
+
+    pub fn cdn_link(&self, site: &SiteId) -> Result<Option<CdnLink>, StoreError> {
+        todo!("T4")
+    }
+
+    pub fn put_cdn_link(&self, site: &SiteId, link: &CdnLink) -> Result<(), StoreError> {
+        todo!("T4")
+    }
+
+    pub fn remove_cdn_links_for(&self, account: &AccountId) -> Result<(), StoreError> {
+        todo!("T4")
     }
 }
 

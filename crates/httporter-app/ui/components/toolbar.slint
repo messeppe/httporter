@@ -14,6 +14,11 @@ export component Toolbar inherits Rectangle {
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
     in property <bool> can-publish: false;
+    // Compare (T6 builds the toggle): it may be turned on, and it is on.
+    in property <bool> can-compare: false;
+    in property <bool> comparing: false;
+    // A publish profile's page is shown: the toolbar offers Edit Profile (T6 builds the button).
+    in property <bool> profile-page: false;
     // File actions (the mockup's second capsule group): each is turned off unless the app says it
     // may be pressed.
     in property <bool> can-upload: false;
@@ -28,6 +33,8 @@ export component Toolbar inherits Rectangle {
     callback go-back();
     callback go-forward();
     callback publish();
+    callback toggle-compare();
+    callback edit-profile();
     callback upload();
     callback download();
     callback new-folder();

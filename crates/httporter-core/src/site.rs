@@ -26,7 +26,8 @@ impl fmt::Display for SiteId {
 
 /// Stable identifier of a saved provider account, such as a kept Bunny account key (a random
 /// UUID, as text).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct AccountId(pub String);
 
 impl AccountId {

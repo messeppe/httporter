@@ -1,0 +1,23 @@
+// A publish profile's page (mockup `History.dc.html`), shown in place of the panes while a profile
+// is selected in the sidebar. T1 shell: its properties and callbacks; T8 builds it.
+
+import { HistoryDetail, HistoryRow, ProfileView } from "../types.slint";
+
+export component ProfilePage inherits Rectangle {
+    in property <ProfileView> profile;
+    in property <[HistoryRow]> history-rows;
+    in property <HistoryDetail> history-detail;
+    in-out property <string> search;
+    callback search-changed(string);
+    // A history row was chosen (its id).
+    callback history-selected(int);
+    // The failed detail's buttons, for publish `id`.
+    callback retry(int);
+    callback show-all(int);
+    callback retry-purge(int);
+    callback change-folder();
+    callback edit-profile();
+    callback publish();
+
+    Rectangle {}
+}

@@ -3,7 +3,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { SiteItem } from "../types.slint";
+import { ProfileItem, SiteItem } from "../types.slint";
 import { MonoTile, StatusDot } from "chips.slint";
 import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { VCenter } from "layout.slint";
@@ -124,6 +124,10 @@ export component Sidebar inherits Rectangle {
     // The site menu's commands can be used (Ruling Q10: off, with a note, until they are wired).
     in property <bool> site-menu-available: false;
     callback site-selected(int);
+    // The Publish section (T7 builds it): one row per profile, and the one selected (-1 for none).
+    in property <[ProfileItem]> profiles;
+    in property <int> selected-profile: -1;
+    callback profile-selected(int);
     callback add-site();
     callback open-settings();
     // The site menu of row `int`: Edit…, Duplicate, Remove….

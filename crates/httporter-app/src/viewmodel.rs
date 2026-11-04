@@ -3,7 +3,7 @@
 use crate::format::{format_date, format_size};
 use crate::local_fs::LocalEntry;
 use crate::sort::{SortKey, Sortable, sort_rows};
-use crate::{FileKind, FileRow};
+use crate::{CompareStatus, FileKind, FileRow};
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use httporter_core::{Entry, RemotePath};
 use slint::{ModelRc, VecModel};
@@ -262,6 +262,7 @@ pub fn to_slint_rows(rows: &[RowData]) -> ModelRc<FileRow> {
             modified: r.modified.as_str().into(),
             folder: r.folder,
             selected: false,
+            status: CompareStatus::None,
         })
         .collect();
     ModelRc::new(VecModel::from(rows))

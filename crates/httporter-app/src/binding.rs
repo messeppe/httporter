@@ -35,6 +35,7 @@ use crate::add_site::{
 };
 use crate::copy;
 use crate::import::{AwsProfile, aws_draft, env_draft, read_aws_profiles, read_env_file};
+use crate::publish::{self, Publisher};
 use crate::selection::{ActivePane, Selection, ToolbarInputs, ToolbarState, toolbar_state};
 use crate::session::{
     LocalView, RemoteView, Session, SiteItemData, SiteProvider, TestResult, Ticket,
@@ -1185,16 +1186,19 @@ pub struct Engines {
 }
 
 /// Wires the window as `install` does, with the transfer engine acting on the toolbar's commands,
-/// the menus, drags, drops and pastes, and feeding the drawer, the sheets and the banners. Returns
-/// the transfers.
+/// the menus, drags, drops and pastes, and feeding the drawer, the sheets and the banners; and
+/// with Publish (compare, the Publish sheet, the profile pages). Returns the transfers.
 pub fn install_app(
     ui: &AppWindow,
     rt: Handle,
     session: Session,
     engines: Engines,
 ) -> Arc<Transfers> {
-    let (_, transfers) = install_with(ui, rt, session, Some(engines));
-    transfers.expect("installed with an engine")
+    let (session, transfers, link) = install_with(ui, rt, session, Some(engines));
+    let transfers = transfers.expect("installed with an engine");
+    let publisher = Publisher::new(session, transfers.clone(), link);
+    publish::install(ui, &publisher);
+    transfers
 }
 
 /// Wires the window, with the transfer engine (the toolbar's commands switched on) or without.
@@ -1203,7 +1207,7 @@ fn install_with(
     rt: Handle,
     session: Session,
     engines: Option<Engines>,
-) -> (Arc<Session>, Option<Arc<Transfers>>) {
+) -> (Arc<Session>, Option<Arc<Transfers>>, Link) {
     let regions: Vec<SharedString> = REGIONS.iter().map(|(_, city)| (*city).into()).collect();
     ui.set_region_names(ModelRc::new(VecModel::from(regions)));
     let session = Arc::new(session);
@@ -1228,8 +1232,9 @@ fn install_with(
         session: session.clone(),
         shown: shown.clone(),
     };
-    let transfers = engines
-        .map(|Engines { engine, journal }| Transfers::new(engine, journal, session.clone(), link));
+    let transfers = engines.map(|Engines { engine, journal }| {
+        Transfers::new(engine, journal, session.clone(), link.clone())
+    });
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         rt,
@@ -1551,7 +1556,7 @@ fn install_with(
         ui.set_selected_site(0);
         ctx.remote(RemoteOp::Select(0));
     }
-    (session, transfers)
+    (session, transfers, link)
 }
 
 /// Hands a cloud view to the window (from a task).

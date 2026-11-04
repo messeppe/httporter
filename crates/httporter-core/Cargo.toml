@@ -7,7 +7,7 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-chrono.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 futures-util.workspace = true
 hex = "0.4.3"
 md-5.workspace = true

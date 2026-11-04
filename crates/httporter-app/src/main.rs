@@ -24,6 +24,7 @@ mod drop_hook;
 mod format;
 mod import;
 mod local_fs;
+mod publish;
 mod selection;
 mod session;
 mod settings_view;
@@ -389,6 +390,7 @@ mod tests {
             modified: "".into(),
             folder: true,
             selected: false,
+            status: CompareStatus::None,
         };
         assert!(site.healthy && row.folder);
         for provider in [

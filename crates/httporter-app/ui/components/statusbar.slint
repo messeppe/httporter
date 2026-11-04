@@ -1,10 +1,13 @@
 // Bottom status bar (mockup `.statusbar`): a message on the left, connection details on the right.
 
 import { Theme } from "../theme.slint";
+import { CompareSummary } from "../types.slint";
 
 export component StatusBar inherits Rectangle {
     in property <string> left-text;
     in property <string> right-text;
+    // What Compare found (T6 shows it).
+    in property <CompareSummary> compare;
 
     height: Theme.statusbar-height;
     background: Theme.chrome;

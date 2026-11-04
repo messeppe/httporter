@@ -32,8 +32,8 @@ use httporter_core::{
 };
 use httporter_platform::win::{self, TaskbarProgress, TaskbarState};
 use httporter_transfer::{
-    Batch, DownloadPlan, Engine, SiteInfo, UploadPlan, plan_delete, plan_download, plan_upload,
-    policy_to_resolution, resolve_downloads, resolve_uploads,
+    Batch, BatchTarget, DownloadPlan, Engine, SiteInfo, UploadPlan, plan_delete, plan_download,
+    plan_upload, policy_to_resolution, resolve_downloads, resolve_uploads,
 };
 use slint::{CloseRequestResponse, ComponentHandle, Model, SharedString};
 use tokio::sync::watch;
@@ -242,6 +242,28 @@ impl Transfers {
             self.session.connect(&site).await.unwrap_or(provider)
         };
         Target { site, provider }
+    }
+
+    /// The transfer engine, for Publish's batches.
+    #[allow(dead_code)] // T1 skeleton: T7 uses it.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    /// Where a publish's batches for `site` go: the site with the client a batch for it should
+    /// use (as [`Self::target`] picks it), or `None` when no client can be made.
+    #[allow(dead_code)] // T1 skeleton: T7 uses it.
+    pub async fn batch_target(&self, site: &SiteRecord) -> Option<BatchTarget> {
+        let provider = match self.session.remote_place() {
+            Some(place) if place.site.id == site.id => self.target(place).await.provider,
+            _ => self.session.connect(site).await.ok()?,
+        };
+        Some(BatchTarget {
+            site: site.id.clone(),
+            site_name: site.name.clone(),
+            host: site.host.clone(),
+            provider,
+        })
     }
 
     /// Opens a picker on a blocking thread (it blocks until it is closed) and hands its answer to

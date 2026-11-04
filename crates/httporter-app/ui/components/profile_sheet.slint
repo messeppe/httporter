@@ -1,0 +1,17 @@
+// The profile sheet: a new profile, or Edit Profile. T1 shell: its properties and callbacks; T8
+// builds it.
+
+import { ProfileDraft } from "../types.slint";
+
+export component ProfileSheet inherits Rectangle {
+    in property <ProfileDraft> draft;
+    // The fields as edited.
+    callback save(ProfileDraft);
+    // Delete Profile, confirmed (the profile's id).
+    callback delete-profile(string);
+    callback pick-folder();
+    callback add-key();
+    callback cancelled();
+
+    Rectangle {}
+}

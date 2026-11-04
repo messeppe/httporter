@@ -2,6 +2,10 @@
 
 export enum FileKind { folder, code, image, doc }
 
+// How a row compares with the other pane's folder while Compare is on; `none` while it is off or
+// the row is outside the compared folders.
+export enum CompareStatus { none, changed, new, remote-only, same }
+
 export struct FileRow {
     name: string,
     kind: FileKind,
@@ -10,6 +14,7 @@ export struct FileRow {
     folder: bool,
     // In the pane's selection: the row is drawn highlighted. The app keeps it up to date.
     selected: bool,
+    status: CompareStatus,
 }
 
 // The provider tile a site shows (mockup `providers`): Bunny, or an S3 service by preset. The
@@ -111,4 +116,128 @@ export struct S3Errors {
     bucket: string,
     key-id: string,
     secret: string,
+}
+
+// ---- Publish (I3) ----
+
+// What Compare found, for the status bar and the panes. `remote-label` names the site's side in
+// "Only on Bunny" / "Only on {site}"; `progress` is shown while `busy`; `error` when it failed.
+export struct CompareSummary {
+    active: bool,
+    busy: bool,
+    progress: string,
+    changed: int,
+    new: int,
+    remote-only: int,
+    remote-label: string,
+    error: string,
+}
+
+// A publish profile in the sidebar: its name and `meta` ("2h ago", "Never").
+export struct ProfileItem {
+    id: string,
+    name: string,
+    meta: string,
+}
+
+// The groups of the Publish sheet's plan list.
+export enum PlanGroup { changed, new, kept, deleted }
+
+// One row of the plan list: a group header (`header`) or a file. `label` is what happens to it
+// ("Will be kept", "Will be deleted").
+export struct PlanRow {
+    path: string,
+    kind: FileKind,
+    group: PlanGroup,
+    label: string,
+    size: string,
+    checked: bool,
+    header: bool,
+}
+
+// Everything the Publish sheet shows apart from the plan list. `purge`: 0 off, 1 changed files,
+// 2 whole zone. `needs-review`: the delete guard tripped, so the button opens Review Deletions,
+// where typing `review-name` (the zone or bucket) lets the publish go ahead.
+export struct PublishSheetData {
+    title: string,
+    subtitle: string,
+    folder: string,
+    destination: string,
+    destination-note: string,
+    busy: bool,
+    progress: string,
+    error: string,
+    changed: int,
+    new: int,
+    remote-only: int,
+    same: int,
+    upload-text: string,
+    remove-extras: bool,
+    remove-label: string,
+    purge: int,
+    purge-enabled: bool,
+    purge-note: string,
+    warning: string,
+    button-label: string,
+    can-publish: bool,
+    needs-review: bool,
+    review-name: string,
+}
+
+// One publish in the profile page's history table.
+export struct HistoryRow {
+    id: int,
+    when: string,
+    result: string,
+    failed: bool,
+    uploaded: string,
+    deleted: string,
+    size: string,
+    time: string,
+    purge: string,
+}
+
+// The failed detail under the history table, for publish `id`.
+export struct HistoryDetail {
+    id: int,
+    summary: string,
+    paths: [string],
+    total: int,
+    failed: int,
+    purge-failed: bool,
+    all-shown: bool,
+}
+
+// The profile page's header, chips and cards.
+export struct ProfileView {
+    id: string,
+    name: string,
+    folder: string,
+    destination: string,
+    chips: [string],
+    last-title: string,
+    last-detail: string,
+    remote-title: string,
+    remote-label: string,
+    remote-detail: string,
+    schedule: string,
+    footer: string,
+    status: string,
+}
+
+// The fields of the profile sheet (new and edit; `id` empty for a new profile). `purge` as in
+// PublishSheetData; the numbers as typed.
+export struct ProfileDraft {
+    id: string,
+    name: string,
+    site-name: string,
+    folder: string,
+    remote-dir: string,
+    skip-rules: string,
+    remove-extras: bool,
+    purge: int,
+    guard-files: string,
+    guard-percent: string,
+    cdn-note: string,
+    error: string,
 }

@@ -37,6 +37,7 @@
 //! - [`remote`]: the cloud pane;
 //! - [`local`]: the This PC pane;
 //! - [`store`]: the settings kept in the site database;
+//! - [`profiles`]: the publish profiles, their history and the CDN links;
 //! - `fakes` (tests only): a storage factory and storages that can be held back.
 
 use std::future::Future;
@@ -56,6 +57,7 @@ use crate::site_hub::SiteHub;
 use crate::sort::SortKey;
 
 mod local;
+mod profiles;
 mod remote;
 mod sites;
 mod store;
