@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# Patched third-party sources (see [patch.crates-io]): not ours to lint, test or format.
+exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -54,6 +56,15 @@ uuid = "1.29.0"
 windows = "0.62.2"
 windows-sys = "0.61.2"
 wiremock = "0.6.5"
+
+# parley 0.11.1 (Slint's text layout) with its dictionary word and line segmenters off,
+# because Slint always turns on parley's `complex-scripts` (S8: ~3 MB of ICU4X data).
+# Every script still breaks by the Unicode rules; only Chinese, Japanese, Thai, Lao, Khmer
+# and Burmese lose dictionary word boundaries. On a Slint upgrade that moves parley: copy
+# the new parley from the cargo registry to vendor/parley and redo the change marked
+# "HTTPorter patch" in src/analysis/mod.rs and Cargo.toml.
+[patch.crates-io]
+parley = { path = "vendor/parley" }
 
 # Never set `panic = "abort"`: the app relies on unwinding.
 # Built for size (S8: ≤ 25 MB), except the code that is busy while transferring
