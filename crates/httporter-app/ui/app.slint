@@ -642,6 +642,32 @@ export component AppWindow inherits Window {
     callback reopen-tab();
     callback switch-pane();
     callback go-up();
+    // What `switch-pane` does (F6, T3): the focus to the other pane; in the single-pane view, between
+    // the pane and the inspector. From elsewhere (the toolbar, a toast) it goes to the pane in use.
+    public function focus-other-pane() {
+        if (root.on-profile) {
+            return;
+        }
+        if (root.view-mode == 1) {
+            if (local-pane.has-focus || remote-pane.has-focus) {
+                root.inspector-focus-asked += 1;
+            } else if (root.single-side == 0) {
+                local-pane.focus();
+            } else {
+                remote-pane.focus();
+            }
+        } else if (local-pane.has-focus) {
+            remote-pane.focus();
+        } else if (remote-pane.has-focus) {
+            local-pane.focus();
+        } else if (root.local-pane-active) {
+            local-pane.focus();
+        } else {
+            remote-pane.focus();
+        }
+    }
+    // Goes up by one each time F6 moves the focus into the inspector (it lives in an `if`).
+    property <int> inspector-focus-asked: 0;
     // The list columns' widths (T5; Name takes the rest): the app restores them at start and saves
     // them on `columns-resized`.
     in-out property <length> col-size-width: 76px;
@@ -1220,18 +1246,37 @@ export component AppWindow inherits Window {
                                     drag-cancelled => { root.pane-drag-cancelled(); }
                                 }
 
-                                if root.view-mode == 1 && !root.on-profile: Inspector {
+                                // F6 lands on this scope (I5, T3), and Tab goes on into the inspector's
+                                // buttons; it is not a Tab stop itself.
+                                if root.view-mode == 1 && !root.on-profile: inspector-keys := FocusScope {
+                                    property <int> asked: root.inspector-focus-asked;
+                                    changed asked => { self.focus(); }
                                     x: panes.width - 300px;
                                     y: 0px;
                                     width: 300px;
                                     height: panes.height;
-                                    data: root.inspector;
-                                    image: root.inspector-image;
-                                    quick-look => { root.inspector-quick-look(); }
-                                    download => { root.inspector-download(); }
-                                    delete => { root.inspector-delete(); }
-                                    copy(which) => { root.inspector-copy(which); }
-                                    purge => { root.inspector-purge(); }
+                                    focus-on-click: false;
+                                    focus-on-tab-navigation: false;
+                                    accessible-role: groupbox;
+                                    accessible-label: @tr("Inspector");
+
+                                    Inspector {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        data: root.inspector;
+                                        image: root.inspector-image;
+                                        quick-look => { root.inspector-quick-look(); }
+                                        download => { root.inspector-download(); }
+                                        delete => { root.inspector-delete(); }
+                                        copy(which) => { root.inspector-copy(which); }
+                                        purge => { root.inspector-purge(); }
+                                    }
+                                    Rectangle {
+                                        border-radius: Theme.radius-md;
+                                        border-width: 2px;
+                                        border-color: Theme.accent;
+                                        visible: inspector-keys.has-focus;
+                                    }
                                 }
 
                                 // A publish profile's page, in place of the two panes (which keep their state).
@@ -1339,6 +1384,15 @@ export component AppWindow inherits Window {
         toasts: root.toasts;
         action(id) => { root.toast-action(id); }
         dismissed(id) => { root.toast-dismissed(id); }
+        // A toast that had the keyboard focus went: the pane in use takes it, so that the window's
+        // keys keep working.
+        focus-back => {
+            if (root.local-pane-active) {
+                local-pane.focus();
+            } else {
+                remote-pane.focus();
+            }
+        }
     }
 
     // On top of everything else, so that it also dims the toolbar and swallows the pointer.

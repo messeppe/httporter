@@ -6,6 +6,9 @@
 //! rest); the best 50 are shown. A query that starts with `?` lists the shortcuts instead. An
 //! action that can't run now is shown off, with why in place of its subtitle. Enter (or a click)
 //! runs the chosen row through the window's own callbacks, as its button, menu or key would.
+//!
+//! I5 (T3) adds Undo and Reopen Closed Tab to the actions, and its five keys (Ctrl+Z,
+//! Ctrl+Shift+T, Ctrl+comma, Alt+Up, F6) to the end of the shortcuts.
 
 use std::cmp::Reverse;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -14,6 +17,7 @@ use httporter_core::{ProfileRecord, SiteId};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{Manager, copy};
+use crate::comfort::copy as comfort_copy;
 use crate::{AppWindow, PaletteIcon, PaletteItem};
 
 /// The most rows (sections not counted) the palette shows.
@@ -53,6 +57,10 @@ enum Command {
     CloseTab,
     NextTab,
     PreviousTab,
+    // I5 (T3).
+    Undo,
+    ReopenTab,
+    SwitchPane,
 }
 
 /// What each of [`copy::SHORTCUTS`] runs, in the same order (`None`: only shown).
@@ -80,6 +88,15 @@ const SHORTCUT_COMMANDS: [Option<Command>; 23] = [
     Some(Command::PreviousTab),
     None,
     None,
+];
+
+/// What each of `comfort::copy::SHORTCUTS` (I5) runs, in the same order.
+const COMFORT_SHORTCUT_COMMANDS: [Option<Command>; 5] = [
+    Some(Command::Undo),
+    Some(Command::ReopenTab),
+    Some(Command::Settings),
+    Some(Command::Up),
+    Some(Command::SwitchPane),
 ];
 
 /// What this view remembers between callbacks (T7).
@@ -492,6 +509,26 @@ fn actions(ui: &AppWindow, m: &Manager) -> Vec<Candidate> {
         Command::NewTab,
         None,
     ));
+    let undo_next = crate::comfort::undo::next_undo();
+    list.push(action(
+        comfort_copy::PALETTE_UNDO,
+        undo_next.clone().unwrap_or_default(),
+        PaletteIcon::Action,
+        comfort_copy::KEYS_UNDO,
+        Command::Undo,
+        unless(undo_next.is_some(), comfort_copy::PALETTE_NOTHING_TO_UNDO),
+    ));
+    list.push(action(
+        comfort_copy::PALETTE_REOPEN_TAB,
+        "",
+        PaletteIcon::Action,
+        comfort_copy::KEYS_REOPEN_TAB,
+        Command::ReopenTab,
+        unless(
+            crate::comfort::undo::has_closed_tab(),
+            comfort_copy::PALETTE_NO_CLOSED_TAB,
+        ),
+    ));
     list.push(action(
         copy::PALETTE_ACTIVITY,
         copy::PALETTE_ACTIVITY_NOTE,
@@ -654,6 +691,11 @@ fn shortcut_candidates() -> Vec<Candidate> {
     copy::SHORTCUTS
         .iter()
         .zip(SHORTCUT_COMMANDS)
+        .chain(
+            comfort_copy::SHORTCUTS
+                .iter()
+                .zip(COMFORT_SHORTCUT_COMMANDS),
+        )
         .map(|(&(title, keys), command)| Candidate {
             section: Section::Shortcuts,
             title: title.to_owned(),
@@ -721,6 +763,9 @@ fn run(ui: &AppWindow, command: Command) {
         Command::PreviousTab if tabs > 1 => {
             ui.invoke_tab_selected((current_tab + tabs - 1) % tabs);
         }
+        Command::Undo => ui.invoke_undo(),
+        Command::ReopenTab => ui.invoke_reopen_tab(),
+        Command::SwitchPane => ui.invoke_switch_pane(),
         _ => {}
     }
 }

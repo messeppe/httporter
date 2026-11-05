@@ -5,6 +5,8 @@
 //! Copy Public Link copies one URL per selected item, on the first hostname (custom domains come
 //! before the zone's own `*.b-cdn.net`); the inspector names the others. On This PC, Copy Public
 //! Link (Ctrl+Shift+C) and Copy Path copy the files' paths, as Explorer's Copy as Path does.
+//!
+//! A copied link is told in a toast (I5); a copied path, in the status line.
 
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use slint::ComponentHandle;
 use super::inspector_view::{open_site, selected_names};
 use super::{Manager, Side, copy};
 use crate::AppWindow;
+use crate::comfort::toast::{self, ToastKind};
 use crate::publish::PurgerAnswer;
 use crate::site_hub::s3_endpoint;
 
@@ -128,12 +131,21 @@ pub(super) fn storage_note(site: &SiteRecord) -> &'static str {
     }
 }
 
-/// Puts `text` on the clipboard (on a blocking thread), then says `done` in the status line.
-fn to_clipboard(m: &Manager, text: String, done: String) {
+/// How a copy says it is done: a link in a toast (I5), a path in the status line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Told {
+    Status,
+    Toast,
+}
+
+/// Puts `text` on the clipboard (on a blocking thread), then says `done` as `told` says. A
+/// failure goes to the status line.
+fn to_clipboard(m: &Manager, text: String, done: String, told: Told) {
     let link = m.link.clone();
     m.link
         .rt()
         .spawn_blocking(move || match set_clipboard_text(&text) {
+            Ok(()) if told == Told::Toast => toast::post(link.ui(), ToastKind::Done, done),
             Ok(()) => link.status(done),
             Err(why) => link.status(copy::not_copied(&why)),
         });
@@ -147,7 +159,12 @@ fn copy_local_paths(m: &Manager, ui: &AppWindow) {
         return;
     }
     let text: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-    to_clipboard(m, text.join("\r\n"), copy::copied_paths(paths.len()));
+    to_clipboard(
+        m,
+        text.join("\r\n"),
+        copy::copied_paths(paths.len()),
+        Told::Status,
+    );
 }
 
 /// Copy Public Link (the menu, Ctrl+Shift+C) for `pane` (0 This PC, 1 the cloud pane).
@@ -173,7 +190,7 @@ fn copy_link(m: &Arc<Manager>, ui: &AppWindow, pane: i32) {
             return;
         }
         let done = copy::copied_links(urls.len());
-        to_clipboard(&this, urls.join("\r\n"), done);
+        to_clipboard(&this, urls.join("\r\n"), done, Told::Toast);
     });
 }
 
@@ -199,7 +216,12 @@ fn copy_path(m: &Manager, ui: &AppWindow, pane: i32) {
             path
         })
         .collect();
-    to_clipboard(m, paths.join("\r\n"), copy::copied_paths(paths.len()));
+    to_clipboard(
+        m,
+        paths.join("\r\n"),
+        copy::copied_paths(paths.len()),
+        Told::Status,
+    );
 }
 
 /// The inspector's copy buttons: 0 the public link, 1 the storage link, as the inspector shows
@@ -212,7 +234,7 @@ fn copy_shown(m: &Manager, ui: &AppWindow, which: i32) {
         data.storage_url
     };
     if !url.is_empty() {
-        to_clipboard(m, url.to_string(), copy::copied_links(1));
+        to_clipboard(m, url.to_string(), copy::copied_links(1), Told::Toast);
     }
 }
 

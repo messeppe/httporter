@@ -17,13 +17,14 @@ use httporter_core::{
 use httporter_transfer::{FileHashes, PublishPhase};
 
 use super::{Publisher, cdn, copy};
+use crate::comfort::toast;
 use crate::manage::activity_view;
 
 impl Publisher {
     /// Waits until `pending_checks_for(site) == 0` (Q55), then purges `purge_urls(files)` and
     /// `https://{host}/{folder}/*` for each folder; a missing key opens the CDN key sheet; logs a
     /// Purge event. More URLs than [`PURGE_URL_LIMIT`] purge the whole zone instead, as a publish
-    /// does. The status line says how far it is ("Purging CDN… n of m"), then how it went.
+    /// does. The status line says how far it is ("Purging CDN… n of m"), then a toast how it went.
     pub fn purge_now(
         self: &Arc<Self>,
         site: SiteRecord,
@@ -58,7 +59,7 @@ impl Publisher {
                 detail: copy::purged_what(files.len(), folders.len(), &message),
                 bytes: 0,
             });
-            this.link.status(message);
+            toast::post_after_progress(&this.link, toast::purge_kind(&result), message);
         });
     }
 

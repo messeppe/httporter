@@ -21,6 +21,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::{Manager, Side, copy, search_view};
 use crate::binding::{Change, show_status};
+use crate::comfort::undo::UndoAction;
 use crate::selection::ActivePane;
 use crate::session::blocking;
 use crate::{AppWindow, TabItem};
@@ -367,13 +368,14 @@ fn select_tab(ui: &AppWindow, m: &Arc<Manager>, index: usize) {
     open_tab(ui, m, &tab);
 }
 
-/// A tab's close button, a middle click, or Ctrl+W. The last tab stays.
+/// A tab's close button, a middle click, or Ctrl+W. The last tab stays. A toast offers to undo it
+/// (I5), as do Ctrl+Z and Ctrl+Shift+T.
 fn close_tab(ui: &AppWindow, m: &Arc<Manager>, index: usize) {
     let mut st = lock(&m.tabs);
     if st.tabs.len() < 2 || index >= st.tabs.len() {
         return;
     }
-    st.tabs.remove(index);
+    let closed = st.tabs.remove(index);
     let reopen = index == st.current;
     if index < st.current || st.current >= st.tabs.len() {
         st.current = st.current.saturating_sub(1).min(st.tabs.len() - 1);
@@ -388,6 +390,26 @@ fn close_tab(ui: &AppWindow, m: &Arc<Manager>, index: usize) {
     if reopen {
         open_tab(ui, m, &tab);
     }
+    crate::comfort::undo::push(ui, UndoAction::ReopenTab { tab: closed, index });
+}
+
+/// Undoes a closed tab (I5: Ctrl+Z, its toast's Undo, Ctrl+Shift+T): `tab` is back where it was
+/// in the strip (or last, if the strip is shorter now), and current.
+pub(crate) fn reopen(ui: &AppWindow, m: &Arc<Manager>, tab: TabState, index: usize) {
+    let mut st = lock(&m.tabs);
+    let at = index.min(st.tabs.len());
+    st.tabs.insert(at, tab.clone());
+    st.current = at;
+    st.opening = None;
+    show_tabs(ui, m, &st);
+    save(m, &st);
+    drop(st);
+    open_tab(ui, m, &tab);
+}
+
+/// A tab's title, as the strip shows it.
+pub(crate) fn title(m: &Manager, tab: &TabState) -> String {
+    tab_item(m, tab).title.to_string()
 }
 
 /// Puts the tabs in the window (the strip shows with two or more).

@@ -1,6 +1,13 @@
-// Toasts (I5; T3 finishes them, §8.7.5): short notes at the bottom centre of the window, over the
-// transfer drawer, newest at the bottom. At most three; each goes after 4 s, or 8 s when it has
-// an action ("Undo", "View Release"). The app keeps the list and its timers (`src/comfort/`).
+// Toasts (I5, T3; §8.7.5): short notes at the bottom centre of the window, over the transfer
+// drawer, newest at the bottom. At most three (the app lets the oldest go for a fourth). Each goes
+// after 4 s, or 8 s when it has an action ("Undo", "View Release"); its time stands still while the
+// pointer is over it or it has the keyboard focus. Esc on a focused toast dismisses it.
+//
+// Each toast is a polite live region, so Narrator reads it when it appears; Tab reaches it (and its
+// button) after the window's other controls.
+//
+// The app keeps the list and what each action does (`src/comfort/toast.rs`): a toast tells it when
+// it is done (`dismissed`) or its button was pressed (`action`), by id.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
@@ -9,8 +16,25 @@ import { ToastData } from "../types.slint";
 
 component Toast inherits Rectangle {
     in property <ToastData> data;
+    // The toast or its button has the keyboard focus.
+    out property <bool> focused: keys.has-focus || root.button-focused;
     callback action();
     callback dismissed();
+
+    // How long it stays, and how long it has been up with its time running.
+    property <duration> stays: root.data.action != "" ? 8s : 4s;
+    property <duration> shown: 0ms;
+    // Told the app it is done (once only: the app removes it a moment later).
+    property <bool> gone: false;
+    property <bool> button-focused: false;
+    property <bool> appeared: false;
+
+    function close() {
+        if (!root.gone) {
+            root.gone = true;
+            root.dismissed();
+        }
+    }
 
     background: Theme.sheet;
     border-radius: Theme.radius-md;
@@ -19,55 +43,120 @@ component Toast inherits Rectangle {
     drop-shadow-blur: 12px;
     drop-shadow-offset-y: 4px;
     drop-shadow-color: Theme.shadow-sheet;
-    accessible-role: text;
+    opacity: root.appeared ? 1 : 0;
+    animate opacity { duration: Theme.motion ? 180ms : 0ms; }
+    forward-focus: keys;
+    accessible-role: groupbox;
     accessible-label: root.data.text;
+    accessible-live-region: polite;
+    init => { root.appeared = true; }
 
-    HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 8px;
-        padding-top: 8px;
-        padding-bottom: 8px;
-        spacing: 10px;
-
-        if root.data.kind != 0: VerticalLayout {
-            alignment: center;
-
-            Image {
-                source: root.data.kind == 1 ? Icons.check : Icons.warn;
-                colorize: root.data.kind == 1 ? Theme.green : Theme.orange;
-                width: 14px;
-                height: 14px;
-                accessible-role: none;
+    Timer {
+        interval: 100ms;
+        running: !root.gone && !hover.has-hover && !root.focused;
+        triggered => {
+            root.shown += 100ms;
+            if (root.shown >= root.stays) {
+                root.close();
             }
         }
-        Text {
-            horizontal-stretch: 1;
-            text: root.data.text;
-            color: Theme.label;
-            font-size: Theme.font-body;
-            vertical-alignment: center;
-            overflow: elide;
+    }
+
+    // Over the whole toast and around its button, so that the pointer on the button still holds it.
+    hover := TouchArea {
+        keys := FocusScope {
+            focus-on-click: false;
+            key-pressed(event) => {
+                if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift) {
+                    root.close();
+                    return accept;
+                }
+                return reject;
+            }
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 8px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 10px;
+
+                if root.data.kind != 0: VerticalLayout {
+                    alignment: center;
+
+                    Image {
+                        source: root.data.kind == 1 ? Icons.check : Icons.warn;
+                        colorize: root.data.kind == 1 ? Theme.green : Theme.orange;
+                        width: 14px;
+                        height: 14px;
+                        accessible-role: none;
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 120px;
+                    text: root.data.text;
+                    color: Theme.label;
+                    font-size: Theme.font-body;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    // The toast itself says it.
+                    accessible-role: none;
+                }
+                if root.data.action != "": CapsuleButton {
+                    text: root.data.action;
+                    changed has-focus => { root.button-focused = self.has-focus; }
+                    clicked => { root.action(); }
+                }
+            }
         }
-        if root.data.action != "": CapsuleButton {
-            text: root.data.action;
-            clicked => { root.action(); }
-        }
+    }
+
+    // The keyboard focus on the toast itself (its button draws its own).
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: keys.has-focus;
     }
 }
 
 export component ToastStack inherits VerticalLayout {
     in property <[ToastData]> toasts;
-    // A toast's action was pressed, or it was dismissed (Esc): by its id.
+    // A toast's action was pressed, or it was dismissed (its time ran out, or Esc): by its id.
     callback action(int);
     callback dismissed(int);
+    // A toast that had the keyboard focus went (Esc, or its action): the window gives the focus
+    // back to what it was in before.
+    callback focus-back();
 
     spacing: 8px;
     alignment: end;
 
-    for toast in root.toasts: Toast {
-        data: toast;
-        min-height: 40px;
-        action => { root.action(toast.id); }
-        dismissed => { root.dismissed(toast.id); }
+    for toast in root.toasts: HorizontalLayout {
+        alignment: center;
+
+        Toast {
+            data: toast;
+            min-height: 40px;
+            action => {
+                let had-focus = self.focused;
+                root.action(toast.id);
+                if (had-focus) {
+                    root.focus-back();
+                }
+            }
+            dismissed => {
+                let had-focus = self.focused;
+                root.dismissed(toast.id);
+                if (had-focus) {
+                    root.focus-back();
+                }
+            }
+        }
     }
 }

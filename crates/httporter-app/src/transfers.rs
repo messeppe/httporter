@@ -1338,7 +1338,13 @@ impl Transfers {
     /// HTTPorter isn't in front (or flashes its taskbar button when notifications are off).
     fn notify_if_away(&self, snapshot: &EngineSnapshot, took: Duration, hwnd: isize) {
         let files = snapshot.files_done + snapshot.files_failed;
-        if took < NOTIFY_AFTER || files == 0 || hwnd == 0 || win::is_foreground(hwnd) {
+        // In the tray, the tray tells it when the queue has emptied, then the app ends (T3).
+        if took < NOTIFY_AFTER
+            || files == 0
+            || hwnd == 0
+            || win::is_foreground(hwnd)
+            || crate::comfort::in_tray()
+        {
             return;
         }
         let site = snapshot
@@ -1599,9 +1605,7 @@ fn install_sheets(ui: &AppWindow, transfers: &Arc<Transfers>) {
         let transfers = transfers.clone();
         move || transfers.new_folder_cancel()
     });
-    // Keep Running: the alert has closed itself, and nothing else changes. (Its other two
-    // answers are wired with closing the window, `install_close`.)
-    ui.on_quit_keep_running(|| {});
+    // The quit alert's three answers are wired with closing the window (`install_close`).
     ui.on_resume_banner_resume({
         let (transfers, weak) = (transfers.clone(), weak.clone());
         move || {
@@ -1697,6 +1701,9 @@ fn install_close(ui: &AppWindow, transfers: &Arc<Transfers>, settings: SettingsS
                 let _ = slint::quit_event_loop();
                 return CloseRequestResponse::HideWindow;
             };
+            // Closed while in the tray (the tray's Quit, or a WM_CLOSE from outside): the window
+            // comes back first, so that the quit alert can be seen.
+            crate::comfort::show_from_tray(&ui);
             if transfers.must_ask_before_closing() {
                 let snapshot = transfers.engine.snapshot();
                 let unfinished = snapshot.active_count + snapshot.queued_count;
@@ -1712,6 +1719,19 @@ fn install_close(ui: &AppWindow, transfers: &Arc<Transfers>, settings: SettingsS
             }
             let _ = slint::quit_event_loop();
             CloseRequestResponse::HideWindow
+        }
+    });
+    // Keep Running: the alert has closed itself, and the transfers go on. With the tray setting
+    // on, the window (and Settings with it) goes into the tray meanwhile, without ending the event
+    // loop (`comfort::tray`); otherwise nothing else changes.
+    ui.on_quit_keep_running({
+        let (weak, close_settings) = (ui.as_weak(), close_settings.clone());
+        move || {
+            if let Some(ui) = weak.upgrade()
+                && crate::comfort::hide_into_tray(&ui)
+            {
+                close_settings();
+            }
         }
     });
     // The alert's two ways out end the event loop themselves (`Transfers::quit`); the Settings
