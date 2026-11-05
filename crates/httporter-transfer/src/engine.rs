@@ -1555,6 +1555,10 @@ impl Entry {
             done_bytes: self.done_bytes,
             error: self.error.clone(),
             paused: self.paused,
+            folder: matches!(
+                self.job,
+                Job::Delete { folder: true, .. } | Job::CreateFolder { .. }
+            ),
         }
     }
 }

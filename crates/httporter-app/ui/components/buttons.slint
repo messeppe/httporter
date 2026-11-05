@@ -4,7 +4,7 @@ import { Theme } from "../theme.slint";
 import { VCenter } from "layout.slint";
 
 // Focus ring drawn 3 px outside the control it belongs to, shown while that control has keyboard
-// focus. The control sizes it (`width`/`height` 6 px larger, `radius` 3 px larger) from its own
+// focus, and not once the control is turned off (ledger 153: it may be turned off while focused). The control sizes it (`width`/`height` 6 px larger, `radius` 3 px larger) from its own
 // geometry. Place it after the content and before the TouchArea.
 component FocusRing inherits Rectangle {
     in property <bool> has-focus;
@@ -14,7 +14,7 @@ component FocusRing inherits Rectangle {
     y: -3px;
     border-radius: root.radius;
     border-width: 2px;
-    border-color: Theme.accent;
+    border-color: Theme.focus-ring;
     visible: root.has-focus;
 }
 
@@ -62,7 +62,7 @@ export component ToolButton inherits Rectangle {
     }
 
     FocusRing {
-        has-focus: root.has-focus;
+        has-focus: root.has-focus && root.enabled;
         width: parent.width + 6px;
         height: parent.height + 6px;
         radius: parent.border-radius + 3px;
@@ -100,7 +100,7 @@ export component CapsuleButton inherits Rectangle {
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
-    height: 28px;
+    height: Theme.control-height;
     border-radius: self.height / 2;
     background: root.primary ? Theme.accent : Theme.control;
     // A plain button is outlined in `field-border` (3:1 against the surface in both themes): the
@@ -142,7 +142,7 @@ export component CapsuleButton inherits Rectangle {
     }
 
     FocusRing {
-        has-focus: root.has-focus;
+        has-focus: root.has-focus && root.enabled;
         width: parent.width + 6px;
         height: parent.height + 6px;
         radius: parent.border-radius + 3px;

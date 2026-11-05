@@ -1373,6 +1373,7 @@ async fn views_show_kind_path_size_and_progress() {
             done_bytes: 0,
             error: None,
             paused: false,
+            folder: false,
         }
     );
 }

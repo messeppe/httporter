@@ -1,17 +1,19 @@
 //! Human-readable file sizes and Finder-style relative dates for the file panes.
+//!
+//! The numbers are worked out here; their words (the units, "Today", the months) are `copy.rs`'s
+//! (ruling Q36).
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
+use crate::copy::{
+    self, BYTES_UNIT as BYTES, SIZE_UNITS as UNITS, day_month_year, today_at, yesterday_at,
+};
 
 /// Size in 1024-based units (`B`, `KB`, `MB`, `GB`), one decimal above bytes: `383.4 KB`.
 /// `GB` is the largest unit, so a terabyte reads `1024.0 GB`.
 pub fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 3] = ["KB", "MB", "GB"];
     if bytes < 1024 {
-        return format!("{bytes} B");
+        return copy::size_in(&bytes.to_string(), BYTES);
     }
     let mut value = bytes as f64 / 1024.0;
     let mut unit = 0;
@@ -20,7 +22,7 @@ pub fn format_size(bytes: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    format!("{value:.1} {}", UNITS[unit])
+    copy::size_in(&format!("{value:.1}"), UNITS[unit])
 }
 
 /// A count with thousands separators: `13,793`.
@@ -55,9 +57,8 @@ pub fn format_rate(rate: f64) -> String {
 /// Whole numbers once the total is 100 or more in that unit, one decimal below; under 1 KB it is
 /// bytes. Units roll over as in [`format_size`], so `GB` is the largest.
 pub fn format_progress(done: u64, total: u64) -> String {
-    const UNITS: [&str; 3] = ["KB", "MB", "GB"];
     if total < 1024 {
-        return format!("{done} of {total} B");
+        return copy::progress_in(&done.to_string(), &total.to_string(), BYTES);
     }
     let mut divisor = 1024.0;
     let mut unit = 0;
@@ -67,9 +68,9 @@ pub fn format_progress(done: u64, total: u64) -> String {
     }
     let (done, total) = (done as f64 / divisor, total as f64 / divisor);
     if total >= 100.0 {
-        format!("{done:.0} of {total:.0} {}", UNITS[unit])
+        copy::progress_in(&format!("{done:.0}"), &format!("{total:.0}"), UNITS[unit])
     } else {
-        format!("{done:.1} of {total:.1} {}", UNITS[unit])
+        copy::progress_in(&format!("{done:.1}"), &format!("{total:.1}"), UNITS[unit])
     }
 }
 
@@ -80,11 +81,11 @@ pub fn format_date(t: NaiveDateTime, now: NaiveDateTime) -> String {
     let day = t.date();
     let today = now.date();
     if day == today {
-        format!("Today {:02}:{:02}", t.hour(), t.minute())
+        today_at(t.hour(), t.minute())
     } else if today.pred_opt() == Some(day) {
-        format!("Yesterday {:02}:{:02}", t.hour(), t.minute())
+        yesterday_at(t.hour(), t.minute())
     } else {
-        format!("{} {} {}", t.day(), MONTHS[t.month0() as usize], t.year())
+        day_month_year(t.day(), t.month0(), t.year())
     }
 }
 

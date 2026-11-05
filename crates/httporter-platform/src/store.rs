@@ -192,6 +192,33 @@ pub enum StoreError {
     Encode(String),
 }
 
+/// A stored setting read back: the whole value when it reads; otherwise each top-level field
+/// that reads over the defaults, so that one damaged or retyped field costs only itself (ledger
+/// 118); the defaults when the text is not JSON at all.
+fn decode_setting<T: DeserializeOwned + Serialize + Default>(text: &str) -> T {
+    use serde_json::Value;
+
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return T::default();
+    };
+    if let Ok(read) = T::deserialize(&value) {
+        return read;
+    }
+    let (Value::Object(stored), Ok(Value::Object(mut kept))) =
+        (value, serde_json::to_value(T::default()))
+    else {
+        return T::default();
+    };
+    for (field, stored_value) in stored {
+        let mut trial = kept.clone();
+        trial.insert(field.clone(), stored_value.clone());
+        if T::deserialize(&Value::Object(trial)).is_ok() {
+            kept.insert(field, stored_value);
+        }
+    }
+    T::deserialize(&Value::Object(kept)).unwrap_or_default()
+}
+
 /// `%APPDATA%\HTTPorter\httporter.db` (the per-user roaming config folder).
 ///
 /// If the platform reports no config folder the path is relative to the working directory.
@@ -354,20 +381,79 @@ impl Store {
     }
 
     /// The setting stored under `key`, or `T::default()` when there is none or it cannot be
-    /// read (missing, damaged, or written in a shape this build no longer understands). A
-    /// setting must never stop the app starting.
-    pub fn settings<T: DeserializeOwned + Default>(&self, key: &str) -> T {
-        self.conn
+    /// read (missing, damaged, written in a shape this build no longer understands, or the
+    /// database failed). A setting must never stop the app starting. Never write back what this
+    /// returned: after a failed read it is the defaults, which would replace what is stored. Use
+    /// [`Self::update_settings`], which writes only what changed (ledger 138, 144).
+    pub fn settings<T: DeserializeOwned + Serialize + Default>(&self, key: &str) -> T {
+        self.try_settings(key).unwrap_or_default()
+    }
+
+    /// The setting stored under `key`: `T::default()` when there is none, and the database's
+    /// error when it could not be read (busy past the timeout, a disk error), which may pass.
+    /// A stored value that is damaged loses only what is damaged (ledger 118): each top-level
+    /// field that can't be read takes its default, and the others are kept.
+    pub fn try_settings<T: DeserializeOwned + Serialize + Default>(
+        &self,
+        key: &str,
+    ) -> Result<T, StoreError> {
+        let text = self
+            .conn
             .query_row(
                 "SELECT value FROM settings WHERE key = ?1",
                 params![key],
                 |row| row.get::<_, String>(0),
             )
-            .optional()
-            .ok()
-            .flatten()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .optional()?;
+        Ok(text.map(|text| decode_setting(&text)).unwrap_or_default())
+    }
+
+    /// Writes to the setting under `key` only the top-level fields that differ between `before`
+    /// (what the caller last read or wrote) and `after`, over what is stored now, read in the
+    /// same transaction: the other fields stay as stored, even when the caller's copy of them is
+    /// only the defaults of a read that failed (ledger 138, 144). With nothing readable stored,
+    /// or a value that is not a set of fields, `after` is stored whole. A read that fails writes
+    /// nothing.
+    pub fn update_settings<T: Serialize>(
+        &self,
+        key: &str,
+        before: &T,
+        after: &T,
+    ) -> Result<(), StoreError> {
+        let encode =
+            |value: &T| serde_json::to_value(value).map_err(|e| StoreError::Encode(e.to_string()));
+        let (before, after) = (encode(before)?, encode(after)?);
+        let tx = self.conn.unchecked_transaction()?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let stored = stored.and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let merged = match (stored, &before, after) {
+            (
+                Some(serde_json::Value::Object(mut stored)),
+                serde_json::Value::Object(before),
+                serde_json::Value::Object(after),
+            ) => {
+                for (field, value) in after {
+                    if before.get(&field) != Some(&value) {
+                        stored.insert(field, value);
+                    }
+                }
+                serde_json::Value::Object(stored)
+            }
+            (_, _, after) => after,
+        };
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, merged.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Stores `value` as JSON under `key`, replacing what was there.

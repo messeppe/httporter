@@ -5,7 +5,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { EditItem, PlaceItem, ProfileItem, SiteItem } from "../types.slint";
-import { MonoTile, StatusDot } from "chips.slint";
+import { HealthMark, MonoTile } from "chips.slint";
 import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { VCenter } from "layout.slint";
 
@@ -13,7 +13,7 @@ import { VCenter } from "layout.slint";
 component SectionTitle inherits Rectangle {
     in property <string> text;
 
-    height: 31px;
+    height: 31px + Theme.grow-small;
 
     Text {
         x: 8px;
@@ -25,26 +25,40 @@ component SectionTitle inherits Rectangle {
     }
 }
 
-// One site: provider tile, name over subtitle, health dot (mockup `.sb-item` with `.sb-two`).
-// Reachable with Tab, selected with Space or Return. A right click, the Menu key or Shift+F10
-// asks for its context menu, at a point of the window.
+// One site: provider tile, name over subtitle, health mark (mockup `.sb-item` with `.sb-two`).
+// The site list is one Tab stop (ledger 155): Tab reaches the row the list last had (`tab-stop`),
+// Up and Down (Home, End) move along it, Space or Return selects the row. A right click, the Menu
+// key or Shift+F10 asks for its context menu, at a point of the window.
 component SiteRow inherits Rectangle {
     in property <SiteItem> site;
     in property <bool> selected;
+    // The row Tab lands on in the site list.
+    in property <bool> tab-stop;
+    // Goes up when the list moves the keyboard to a row: the row that is `tab-stop` then takes
+    // the focus.
+    in property <int> focus-ask;
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
     callback context-pressed(Point);
+    // Up (-1), Down (1), Home (-1000000) or End (1000000) on the row.
+    callback step(int);
 
     min-height: Theme.sidebar-item-height;
     border-radius: Theme.radius-sm;
     background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
     forward-focus: key-focus;
     accessible-role: list-item;
-    accessible-label: @tr("{}, {}", root.site.name, root.site.subtitle);
+    // The health is in the words too, not only in the mark (ledger 130).
+    accessible-label: root.site.healthy ? @tr("{}, {}", root.site.name, root.site.subtitle) : @tr("{}, {}, last request failed", root.site.name, root.site.subtitle);
+    accessible-item-selectable: true;
     accessible-item-selected: root.selected;
-    // The dot's colour is not the only way to learn that a site has a problem.
-    accessible-description: root.site.healthy ? "" : @tr("Last request failed");
     accessible-action-default => { root.clicked(); }
+
+    changed focus-ask => {
+        if (root.tab-stop) {
+            key-focus.focus();
+        }
+    }
 
     HorizontalLayout {
         padding-left: 8px;
@@ -58,7 +72,7 @@ component SiteRow inherits Rectangle {
                 text: root.site.name;
                 color: Theme.label;
                 font-size: Theme.font-body;
-                font-weight: root.selected ? Theme.weight-medium : 400;
+                font-weight: root.selected ? Theme.weight-medium : Theme.weight-regular;
                 overflow: elide;
             }
             Text {
@@ -68,14 +82,14 @@ component SiteRow inherits Rectangle {
                 overflow: elide;
             }
         }
-        VCenter { StatusDot { tint: root.site.healthy ? Theme.green : Theme.label3; } }
+        VCenter { HealthMark { ok: root.site.healthy; } }
     }
 
     // Focus ring inside the row: the scroll view around the list would clip one drawn outside.
     Rectangle {
         border-radius: parent.border-radius;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -83,10 +97,29 @@ component SiteRow inherits Rectangle {
     key-focus := FocusScope {
         x: 0;
         width: 0;
+        focus-on-tab-navigation: root.tab-stop;
         key-pressed(event) => {
             if (Activation.triggers(event)) {
                 root.clicked();
                 return accept;
+            }
+            if (!event.modifiers.alt && !event.modifiers.control && !event.modifiers.shift) {
+                if (event.text == Key.UpArrow) {
+                    root.step(-1);
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.step(1);
+                    return accept;
+                }
+                if (event.text == Key.Home) {
+                    root.step(-1000000);
+                    return accept;
+                }
+                if (event.text == Key.End) {
+                    root.step(1000000);
+                    return accept;
+                }
             }
             // The Menu key and Shift+F10: the row's context menu, at its left.
             if (event.text == Key.Menu || (event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && event.text == Key.F10)) {
@@ -138,7 +171,7 @@ component ProfileRow inherits Rectangle {
         VCenter {
             Image {
                 source: Icons.send;
-                colorize: root.selected ? Theme.accent : Theme.label2;
+                colorize: root.selected ? Theme.accent-text : Theme.label2;
                 width: 16px;
                 height: 16px;
                 accessible-role: none;
@@ -149,7 +182,7 @@ component ProfileRow inherits Rectangle {
             text: root.profile.name;
             color: Theme.label;
             font-size: Theme.font-body;
-            font-weight: root.selected ? Theme.weight-medium : 400;
+            font-weight: root.selected ? Theme.weight-medium : Theme.weight-regular;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
@@ -166,7 +199,7 @@ component ProfileRow inherits Rectangle {
     Rectangle {
         border-radius: parent.border-radius;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -247,7 +280,7 @@ component ItemRow inherits Rectangle {
     Rectangle {
         border-radius: parent.border-radius;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -318,6 +351,20 @@ export component Sidebar inherits Rectangle {
 
     // The row the site menu was opened on.
     property <int> menu-site: -1;
+    // The site row Tab lands on (ledger 155: the list is one Tab stop): the one the keyboard
+    // was last on, else the selected one, else the first. `focus-ask` goes up when Up or Down
+    // move the keyboard to another row.
+    property <int> key-site: -1;
+    property <int> tab-site: root.key-site >= 0 && root.key-site < root.sites.length ? root.key-site : (root.selected-site >= 0 && root.selected-site < root.sites.length ? root.selected-site : 0);
+    property <int> focus-ask: 0;
+
+    // The keyboard goes `by` rows along the site list, from the row it is on.
+    function step-site(by: int) {
+        if (root.sites.length > 0) {
+            root.key-site = Math.max(0, Math.min(root.sites.length - 1, root.tab-site + by));
+            root.focus-ask += 1;
+        }
+    }
     // The Favorites and Editing rows their menus were opened on.
     property <int> menu-favorite: -1;
     property <int> menu-edit: -1;
@@ -342,6 +389,9 @@ export component Sidebar inherits Rectangle {
     border-radius: Theme.radius-lg;
     border-width: 0.5px;
     border-color: Theme.sep;
+
+    // A click selects a site without moving the keyboard: Tab lands on it next.
+    changed selected-site => { root.key-site = root.selected-site; }
 
     changed sheet-open => {
         if (!root.sheet-open) {
@@ -412,14 +462,20 @@ export component Sidebar inherits Rectangle {
                     Text {
                         text: @tr("No sites yet. Add one to start browsing and publishing.");
                         color: Theme.label2;
-                        font-size: 12px;
+                        font-size: Theme.font-caption;
                         wrap: word-wrap;
                     }
                 }
                 for site[i] in root.sites: SiteRow {
                     site: site;
                     selected: i == root.selected-site && root.selected-profile < 0;
-                    clicked => { root.site-selected(i); }
+                    tab-stop: i == root.tab-site;
+                    focus-ask: root.focus-ask;
+                    step(by) => { root.step-site(by); }
+                    clicked => {
+                        root.key-site = i;
+                        root.site-selected(i);
+                    }
                     context-pressed(point) => { root.show-site-menu(i, point); }
                 }
                 SectionTitle { text: @tr("Publish"); }
@@ -435,7 +491,7 @@ export component Sidebar inherits Rectangle {
                     Text {
                         text: @tr("Click Publish to make a profile for the open site.");
                         color: Theme.label2;
-                        font-size: 12px;
+                        font-size: Theme.font-caption;
                         wrap: word-wrap;
                     }
                 }
@@ -446,7 +502,7 @@ export component Sidebar inherits Rectangle {
                     Text {
                         text: @tr("Publish profiles appear here after you add a site.");
                         color: Theme.label2;
-                        font-size: 12px;
+                        font-size: Theme.font-caption;
                         wrap: word-wrap;
                     }
                 }

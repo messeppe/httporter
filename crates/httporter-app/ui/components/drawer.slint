@@ -53,7 +53,7 @@ component QuietButton inherits Rectangle {
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
-    height: 28px;
+    height: Theme.control-height;
     border-radius: self.height / 2;
     background: area.has-hover ? Theme.hover : transparent;
     forward-focus: key-focus;
@@ -93,7 +93,7 @@ component QuietButton inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -122,7 +122,7 @@ component TabButton inherits Rectangle {
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
-    height: 24px;
+    height: Theme.tab-height;
     border-radius: 6px;
     background: root.selected ? Theme.control : (area.has-hover ? Theme.hover : transparent);
     border-width: root.selected ? 0.5px : 0px;
@@ -141,8 +141,8 @@ component TabButton inherits Rectangle {
         Text {
             text: root.text;
             color: Theme.label;
-            font-size: 12px;
-            font-weight: root.selected ? Theme.weight-semibold : 400;
+            font-size: Theme.font-caption;
+            font-weight: root.selected ? Theme.weight-semibold : Theme.weight-regular;
             vertical-alignment: center;
             accessible-role: none;
         }
@@ -151,7 +151,7 @@ component TabButton inherits Rectangle {
     Rectangle {
         border-radius: parent.border-radius;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -183,14 +183,14 @@ component Stat inherits HorizontalLayout {
     Text {
         text: root.value;
         color: Theme.label;
-        font-size: 12px;
+        font-size: Theme.font-caption;
         font-weight: Theme.weight-semibold;
         vertical-alignment: center;
     }
     Text {
         text: root.unit;
         color: Theme.label2;
-        font-size: 12px;
+        font-size: Theme.font-caption;
         vertical-alignment: center;
     }
 }
@@ -226,7 +226,7 @@ component TransferItem inherits Rectangle {
 
     property <int> percent: Math.round(root.item.percent);
 
-    height: 30px;
+    height: Theme.row-height + 2px;
     background: root.chosen ? Theme.accent-soft : transparent;
     accessible-role: list-item;
     accessible-item-selected: root.chosen;
@@ -295,7 +295,7 @@ component TransferItem inherits Rectangle {
                     Text {
                         text: root.item.name;
                         color: Theme.label;
-                        font-size: 12px;
+                        font-size: Theme.font-caption;
                         vertical-alignment: center;
                         overflow: elide;
                         accessible-role: none;
@@ -327,7 +327,7 @@ component TransferItem inherits Rectangle {
                     height: parent.height;
                     text: root.item.detail;
                     color: root.tab == 2 ? Theme.red : Theme.label2;
-                    font-size: 12px;
+                    font-size: Theme.font-caption;
                     vertical-alignment: center;
                     overflow: elide;
                     accessible-role: none;
@@ -338,7 +338,7 @@ component TransferItem inherits Rectangle {
                 text: root.item.size;
                 width: 70px;
                 color: Theme.label2;
-                font-size: 12px;
+                font-size: Theme.font-caption;
                 horizontal-alignment: right;
                 vertical-alignment: center;
                 overflow: elide;
@@ -353,14 +353,14 @@ component TransferItem inherits Rectangle {
                     height: parent.height;
                     text: @tr("{}%", root.percent);
                     color: Theme.label2;
-                    font-size: 12px;
+                    font-size: Theme.font-caption;
                     horizontal-alignment: right;
                     vertical-alignment: center;
                     accessible-role: none;
                 }
                 if root.tab == 2: VCenter {
                     CapsuleButton {
-                        height: 22px;
+                        height: Theme.control-small-height;
                         text: @tr("Retry");
                         clicked => { root.retry(); }
                     }
@@ -373,7 +373,7 @@ component TransferItem inherits Rectangle {
                 if root.tab == 0 || root.tab == 1: VCenter {
                     ToolButton {
                         width: 24px;
-                        height: 22px;
+                        height: Theme.control-small-height;
                         icon: Icons.x;
                         label: @tr("Cancel {}", root.item.name);
                         clicked => { root.cancel(); }
@@ -441,16 +441,17 @@ export component TransferDrawer inherits Rectangle {
 
     property <[TransferRow]> shown-rows: root.tab == 0 ? root.active-rows : (root.tab == 1 ? root.queued-rows : (root.tab == 2 ? root.failed-rows : root.done-rows));
     // The list shows up to six rows and leaves room for one line when it is empty.
-    property <length> list-height: Math.min(Math.max(root.shown-rows.length, 1), 6) * 30px;
+    property <length> list-height: Math.min(Math.max(root.shown-rows.length, 1), 6) * (Theme.row-height + 2px);
     // The header: 10 px of padding round the ring's row (34 px), 8 px, and the tabs' row (28 px).
-    property <length> head-height: 90px;
+    // With larger text the title's two lines and the tabs' row grow.
+    property <length> head-height: 90px + 3 * Theme.grow;
 
     background: Theme.content;
     border-radius: Theme.radius-md;
     border-width: 0.5px;
     border-color: Theme.sep-strong;
     clip: true;
-    height: root.open ? root.head-height + root.list-height + 1px : 48px;
+    height: root.open ? root.head-height + root.list-height + 1px : 48px + Theme.grow;
     accessible-role: groupbox;
     accessible-label: @tr("Transfers");
 
@@ -480,7 +481,7 @@ export component TransferDrawer inherits Rectangle {
             horizontal-stretch: 1;
             color: Theme.label;
             font-size: Theme.font-body;
-            font-weight: root.running ? Theme.weight-semibold : 400;
+            font-weight: root.running ? Theme.weight-semibold : Theme.weight-regular;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -532,7 +533,7 @@ export component TransferDrawer inherits Rectangle {
                     Text {
                         text: root.line;
                         color: Theme.label2;
-                        font-size: 12px;
+                        font-size: Theme.font-caption;
                         overflow: elide;
                     }
                 }
@@ -554,20 +555,20 @@ export component TransferDrawer inherits Rectangle {
                             Text {
                                 text: @tr("about");
                                 color: Theme.label2;
-                                font-size: 12px;
+                                font-size: Theme.font-caption;
                                 vertical-alignment: center;
                             }
                             Text {
                                 text: root.eta;
                                 color: Theme.label;
-                                font-size: 12px;
+                                font-size: Theme.font-caption;
                                 font-weight: Theme.weight-semibold;
                                 vertical-alignment: center;
                             }
                             Text {
                                 text: @tr("left");
                                 color: Theme.label2;
-                                font-size: 12px;
+                                font-size: Theme.font-caption;
                                 vertical-alignment: center;
                             }
                         }
@@ -607,7 +608,7 @@ export component TransferDrawer inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
                 // The tabs (mockup `.tabs`): a capsule tray with the chosen tab raised.
                 Rectangle {
-                    height: 28px;
+                    height: Theme.tab-height + 4px;
                     border-radius: 8px;
                     background: Theme.chip;
                     accessible-role: tab-list;
@@ -660,7 +661,7 @@ export component TransferDrawer inherits Rectangle {
                     height: parent.height;
                     text: root.tab == 0 ? @tr("Nothing is transferring.") : (root.tab == 1 ? @tr("Nothing is waiting.") : (root.tab == 2 ? @tr("Nothing has failed.") : @tr("Nothing has finished yet.")));
                     color: Theme.label2;
-                    font-size: 12px;
+                    font-size: Theme.font-caption;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }

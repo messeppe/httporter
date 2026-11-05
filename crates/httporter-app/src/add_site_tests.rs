@@ -1297,9 +1297,13 @@ fn a_site_whose_last_request_failed_is_described_as_such() {
         sick,
     ])));
     w.show().unwrap();
-    let description = |name: &str| row_starting(&w, name).accessible_description().unwrap();
-    assert_eq!(description("example-shop.com"), "");
-    assert_eq!(description("media-archive"), "Last request failed");
+    // Ledger 130: said in the row's label, as the mark's shape and colour show it.
+    let label = |name: &str| row_starting(&w, name).accessible_label().unwrap();
+    assert_eq!(label("example-shop.com"), "example-shop.com, Bunny");
+    assert_eq!(
+        label("media-archive"),
+        "media-archive, Bunny, last request failed"
+    );
 }
 
 // ---- Fix round 1: error announcements, error focus, outlines, placeholder ----

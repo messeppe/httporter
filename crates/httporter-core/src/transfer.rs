@@ -118,6 +118,8 @@ pub struct JobView {
     pub error: Option<String>,
     /// A queued job held back with `Engine::pause` until it is resumed.
     pub paused: bool,
+    /// The job is about a folder (a folder's delete, or making one), not a file (review M15).
+    pub folder: bool,
 }
 
 /// The batch that finished last, for the collapsed drawer's "Last transfer …".

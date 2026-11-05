@@ -35,7 +35,7 @@ component InfoRow inherits Rectangle {
             width: 96px;
             text: root.label;
             color: Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             vertical-alignment: top;
             accessible-role: none;
         }
@@ -44,8 +44,8 @@ component InfoRow inherits Rectangle {
             text: root.value;
             color: root.value-color;
             font-family: root.mono ? Theme.font-mono : Theme.font-family;
-            font-size: root.mono ? Theme.font-small : 12px;
-            font-weight: root.strong ? Theme.weight-semibold : 400;
+            font-size: root.mono ? Theme.font-small : Theme.font-caption;
+            font-weight: root.strong ? Theme.weight-semibold : Theme.weight-regular;
             wrap: root.mono ? TextWrap.char-wrap : TextWrap.word-wrap;
             vertical-alignment: top;
             accessible-role: none;
@@ -127,7 +127,7 @@ component PanelButton inherits Rectangle {
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
-    height: 28px;
+    height: Theme.control-height;
     min-width: 60px;
     horizontal-stretch: 1;
     border-radius: self.height / 2;
@@ -179,8 +179,8 @@ component PanelButton inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
-        visible: root.has-focus;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.enabled;
     }
 
     key-focus := FocusScope {
@@ -210,7 +210,7 @@ component DeleteButton inherits Rectangle {
     callback clicked();
 
     width: 36px;
-    height: 28px;
+    height: Theme.control-height;
     border-radius: self.height / 2;
     background: Theme.control;
     border-width: 1px;
@@ -242,8 +242,8 @@ component DeleteButton inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
-        visible: root.has-focus;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.enabled;
     }
 
     // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
@@ -304,15 +304,15 @@ export component Inspector inherits Rectangle {
 
         Text {
             text: @tr("No Selection");
-            color: Theme.label3;
+            color: Theme.label2;
             font-size: Theme.font-title;
             font-weight: Theme.weight-semibold;
             horizontal-alignment: center;
         }
         Text {
             text: @tr("Select a file to see its preview, details and links.");
-            color: Theme.label3;
-            font-size: 12px;
+            color: Theme.label2;
+            font-size: Theme.font-caption;
             horizontal-alignment: center;
             wrap: word-wrap;
         }
@@ -385,7 +385,7 @@ export component Inspector inherits Rectangle {
                 if root.one && root.data.kind-text != "": Text {
                     text: root.data.kind-text;
                     color: Theme.label2;
-                    font-size: 12px;
+                    font-size: Theme.font-caption;
                     wrap: word-wrap;
                 }
             }
