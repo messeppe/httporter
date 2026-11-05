@@ -92,8 +92,9 @@ fn enter_on_a_site_row_selects_it() {
         let picked = picked.clone();
         move |i| picked.set(i)
     });
-    // Tab order: sidebar toggle, row 0, row 1 (Back, Forward and Publish are disabled).
-    tab(&w, 3);
+    // Tab order: sidebar toggle, the toolbar's Two panes, Single pane and Synchronized browsing,
+    // row 0, row 1 (Back, Forward, Compare and Publish are disabled).
+    tab(&w, 6);
     tap(w.window(), Key::Return);
     assert_eq!(picked.get(), 1);
     assert_eq!(w.get_selected_site(), 1);
@@ -102,7 +103,7 @@ fn enter_on_a_site_row_selects_it() {
 #[test]
 fn space_on_a_site_row_selects_it() {
     let w = window_with_two_sites();
-    tab(&w, 2);
+    tab(&w, 5);
     tap(w.window(), Key::Space);
     assert_eq!(w.get_selected_site(), 0);
 }
@@ -115,7 +116,7 @@ fn add_site_works_from_the_keyboard() {
         let added = added.clone();
         move || added.set(added.get() + 1)
     });
-    tab(&w, 4);
+    tab(&w, 7);
     tap(w.window(), Key::Return);
     assert_eq!(added.get(), 1);
     // Add Site opens a modal sheet; closing it puts the focus back on the button.
@@ -148,7 +149,7 @@ fn settings_is_turned_off_until_it_exists_and_says_so() {
     );
     // Not a Tab stop: after Add Site comes the This PC list.
     assert!(!w.get_local_pane_active());
-    tab(&w, 5);
+    tab(&w, 8);
     assert!(
         w.get_local_pane_active(),
         "the focus is in the This PC list"
@@ -515,7 +516,7 @@ fn toolbar_buttons_follow_rules() {
 
     // They are Tab stops while they are on, and Return presses the one with the focus.
     w.set_can_upload(true);
-    tab(&w, 2); // the sidebar toggle, then Upload
+    tab(&w, 5); // the sidebar toggle, the View group's three, then Upload
     tap(w.window(), Key::Return);
     assert_eq!(counted(&counts)[0], 2);
 }
@@ -660,11 +661,12 @@ fn polish_3_alt_arrows_act_on_the_pane_with_focus_including_crumbs_and_headers()
     let went = record_travel(&w);
     let alt = |key: Key| chord(w.window(), &[Key::Alt], key);
 
-    // Tab stops: 1 the sidebar toggle, 2 Back and 3 Forward (both can be pressed here), 4 the
-    // site's row, 5 Add Site, 6 This PC's list, 7 and 8 its two crumbs that are buttons, 9 its
-    // Refresh, 10 to 12 its column headers, 13 the cloud pane's list, 14 and 15 its crumbs, then
-    // (Refresh is off with no site) 16 to 18 its headers.
-    tab(&w, 7);
+    // Tab stops: 1 the sidebar toggle, 2 Back and 3 Forward (both can be pressed here), 4 to 6
+    // the View group (Two panes, Single pane, Synchronized browsing), 7 the site's row, 8 Add
+    // Site, 9 This PC's list, 10 and 11 its two crumbs that are buttons, 12 its Refresh, 13 to 15
+    // its column headers, 16 the cloud pane's list, 17 and 18 its crumbs, then (Refresh is off
+    // with no site) 19 to 21 its headers.
+    tab(&w, 10);
     alt(Key::LeftArrow);
     assert_eq!(*went.borrow(), [("back", true)], "from a crumb of This PC");
     tab(&w, 3);
@@ -689,7 +691,7 @@ fn polish_3_alt_arrows_act_on_the_pane_with_focus_including_crumbs_and_headers()
     alt(Key::LeftArrow);
     assert_eq!(went.borrow().last(), Some(&("back", false)));
 
-    // And back in This PC, at a header, with Shift+Tab: 15 down to 10.
+    // And back in This PC, at a header, with Shift+Tab: 18 down to 13.
     for _ in 0..5 {
         tap(w.window(), Key::Backtab);
     }
@@ -771,8 +773,8 @@ fn polish_4_alt_space_and_alt_return_do_not_press_crumbs_headers_rows_or_add_sit
         chord(w.window(), &[Key::Alt], Key::Return);
     };
 
-    // The sidebar's row (Tab 2) and the Add Site button (Tab 3).
-    tab(&w, 2);
+    // The sidebar's row (Tab 5, past the View group) and the Add Site button (Tab 6).
+    tab(&w, 5);
     with_alt(&w);
     tab(&w, 1);
     with_alt(&w);

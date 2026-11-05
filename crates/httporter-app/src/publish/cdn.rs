@@ -233,7 +233,7 @@ fn cancel_key(p: &Publisher) {
 
 /// Waits until the engine has no late checks left for `site` (ruling Q55): a check may send a
 /// file again, and a purge must come after it.
-async fn settled(engine: &Engine, site: &SiteId) {
+pub(super) async fn settled(engine: &Engine, site: &SiteId) {
     let mut changes = engine.changes();
     while engine.pending_checks_for(site) > 0 {
         if let Ok(Err(_)) = tokio::time::timeout(CHECKS_POLL, changes.changed()).await {

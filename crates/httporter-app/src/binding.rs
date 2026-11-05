@@ -1869,6 +1869,10 @@ fn refresh_toolbar(ui: &AppWindow, shown: &Shown) {
     ui.set_can_delete(state.can_delete);
     // Rename, Move To… and the other I4 writes to the open site.
     ui.set_can_write(shown.transfers_ready && site_open && !read_only);
+    // Purge from CDN and the inspector follow the same changes (I4, T5).
+    if let Some(manager) = manage::manager() {
+        manager.shown_changed(ui);
+    }
     ui.set_delete_note(state.delete_note.into());
     ui.set_actions_note(if shown.transfers_ready {
         SharedString::new()
