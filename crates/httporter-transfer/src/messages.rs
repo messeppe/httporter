@@ -63,3 +63,30 @@ pub const NOT_DELETED_UPLOADS_FAILED: &str = "Not deleted because uploads failed
 
 /// A publish meant to purge the CDN, but the app had no way to (no pull zone, no key).
 pub const NO_PURGER: &str = "The CDN couldn't be purged: no pull zone or account key.";
+
+/// A move or rename would put an item where `{name}` already is (`plan_move`).
+pub const MOVE_EXISTS: &str = "\"{name}\" already exists there.";
+
+/// [`MOVE_EXISTS`] filled in.
+pub fn move_exists(name: &str) -> String {
+    MOVE_EXISTS.replace("{name}", name)
+}
+
+/// A folder can't be moved into itself or into a folder inside it.
+pub const MOVE_INTO_ITSELF: &str = "A folder can't be moved into itself.";
+
+/// The item is already where it would be moved to, under that name.
+pub const MOVE_SAME_PLACE: &str = "It's already there.";
+
+/// The new name can't be a name on the site (empty, `.`, `..`, or with a `/`).
+pub const MOVE_BAD_NAME: &str = "That name can't be used.";
+
+/// A rename names one item.
+pub const MOVE_RENAME_ONE: &str = "Only one item can be renamed at a time.";
+
+/// A file of a move was cancelled, so the move stopped and kept the originals.
+pub const MOVE_CANCELLED: &str = "The move was cancelled.";
+
+/// A moved folder wasn't deleted: files that weren't part of the move turned up in it.
+pub const MOVE_FOLDER_NOT_EMPTY: &str =
+    "The folder was kept: it holds files that weren't part of the move.";

@@ -47,7 +47,7 @@ use httporter_core::{
     TransferSettings, with_retry,
 };
 use tokio::runtime::Handle;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tokio::time::Instant;
 
 use crate::bucket::TokenBucket;
@@ -128,6 +128,9 @@ pub type SiteLookup<'a> = &'a dyn Fn(&SiteId) -> Option<SiteInfo>;
 
 /// How many jobs each of a snapshot's lists shows at most.
 pub const WINDOW: usize = 200;
+
+/// How many job events wait for a slow receiver before it loses the oldest.
+const EVENTS: usize = 4096;
 
 /// The journal writer takes at most this many updates in one go.
 const JOURNAL_CHUNK: usize = 512;
@@ -537,6 +540,10 @@ struct State {
     /// The batches submitted with [`Engine::submit_tracked`], by their number, until
     /// [`Engine::wait_batch`] takes them.
     tracked: HashMap<u64, Tracked>,
+    /// Where every job that ends is told ([`Engine::events`]).
+    events: broadcast::Sender<JobEvent>,
+    /// The `Cache-Control` rules of each site: (folder, value).
+    cache_rules: HashMap<SiteId, Vec<(RemotePath, String)>>,
 }
 
 /// How a job ended, for [`JobEvent`].
@@ -562,16 +569,43 @@ pub struct JobEvent {
 impl Engine {
     /// The jobs that end from now on, one [`JobEvent`] each (a channel of 4096; a receiver that
     /// lags loses the oldest).
-    pub fn events(&self) -> tokio::sync::broadcast::Receiver<JobEvent> {
-        todo!("T3")
+    ///
+    /// An upload that waits for its late-delete check (ruling Q55) is told done once the check
+    /// found it, so nothing hears "done" of a file the site may still drop.
+    pub fn events(&self) -> broadcast::Receiver<JobEvent> {
+        self.inner.lock().events.subscribe()
     }
 
     /// Uploads under `prefix` on `site` are sent with this `Cache-Control` (the longest prefix
-    /// wins); `None` removes the rule.
+    /// wins); `None` removes the rule. Uploads queued already take it when they start.
     pub fn set_cache_control(&self, site: &SiteId, prefix: &RemotePath, value: Option<String>) {
-        let _ = (site, prefix, value);
-        todo!("T3")
+        let mut st = self.inner.lock();
+        let rules = st.cache_rules.entry(site.clone()).or_default();
+        rules.retain(|(folder, _)| folder != prefix);
+        if let Some(value) = value
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            rules.push((prefix.clone(), value));
+        }
+        if rules.is_empty() {
+            st.cache_rules.remove(site);
+        }
     }
+
+    /// `error` in the words of the Failed tab (the app's `describe`).
+    pub(crate) fn describe(&self, error: &ProviderError) -> String {
+        (self.inner.describe)(error)
+    }
+}
+
+/// The value of the longest of `rules` (folder, value) that `path` is within.
+fn cache_control_for(rules: &[(RemotePath, String)], path: &RemotePath) -> Option<String> {
+    rules
+        .iter()
+        .filter(|(folder, _)| path.is_within(folder))
+        .max_by_key(|(folder, _)| folder.segments().count())
+        .map(|(_, value)| value.clone())
 }
 
 impl Engine {
@@ -985,6 +1019,7 @@ impl Engine {
             for id in checked {
                 if let Some(check) = st.checks.remove(&id) {
                     st.track(check.batch, id, Some(End::Cancelled));
+                    st.emit(check.lane, &check.job, 0, JobEventOutcome::Cancelled);
                 }
                 self.inner.writer.set_state(id, JobState::Cancelled, None);
                 held.insert(id);
@@ -1548,7 +1583,35 @@ impl State {
             run_seq: 0,
             rechecked: Rechecked::default(),
             tracked: HashMap::new(),
+            events: broadcast::channel(EVENTS).0,
+            cache_rules: HashMap::new(),
         }
+    }
+
+    /// The site whose lane is `lane`.
+    fn site_of(&self, lane: usize) -> Option<&SiteId> {
+        self.lane_of
+            .iter()
+            .find(|&(_, &index)| index == lane)
+            .map(|(site, _)| site)
+    }
+
+    /// Tells the receivers of [`Engine::events`] that `job` on `lane` ended.
+    fn emit(&self, lane: usize, job: &Job, bytes: u64, outcome: JobEventOutcome) {
+        if self.events.receiver_count() == 0 {
+            return;
+        }
+        let Some(site) = self.site_of(lane).cloned() else {
+            return;
+        };
+        let _ = self.events.send(JobEvent {
+            site,
+            site_name: self.lanes[lane].name.clone(),
+            kind: job.kind(),
+            path: crate::lane::remote_of(job).as_str().to_owned(),
+            bytes,
+            outcome,
+        });
     }
 
     /// Notes how job `id` of batch `batch` ended (`None`: it is open again), when the batch is
@@ -1635,6 +1698,11 @@ impl State {
                 .provider
                 .capabilities()
                 .cut_uploads_delete_late;
+            let rules = self
+                .site_of(lane)
+                .and_then(|site| self.cache_rules.get(site))
+                .cloned()
+                .unwrap_or_default();
             while let Some((kind, ids)) = self.lanes[lane].next_unit(&self.jobs) {
                 let unit = UnitId(self.next_unit);
                 self.next_unit += 1;
@@ -1666,24 +1734,29 @@ impl State {
                             }
                             _ => {}
                         }
+                        let cache_control = match &entry.job {
+                            Job::Upload { remote, .. } => cache_control_for(&rules, remote),
+                            _ => None,
+                        };
                         items.push((
                             id,
                             entry.job.clone(),
                             sent,
                             entry.checksum.clone(),
                             journalled,
+                            cache_control,
                         ));
                     }
                 }
                 let work = match items.len() {
                     1 => {
-                        let (id, job, sent, checksum, journalled) = items.remove(0);
-                        work_for(id, job, sent, checksum, journalled)
+                        let (id, job, sent, checksum, journalled, cache_control) = items.remove(0);
+                        work_for(id, job, sent, checksum, journalled, cache_control)
                     }
                     _ => Work::DeleteFiles {
                         items: items
                             .into_iter()
-                            .map(|(id, job, sent, _, _)| {
+                            .map(|(id, job, sent, _, _, _)| {
                                 (id, crate::lane::remote_of(&job).clone(), sent)
                             })
                             .collect(),
@@ -1807,11 +1880,16 @@ impl State {
             round: entry.checks.saturating_add(1),
             run: self.run_seq,
         });
+        // Told done now, or once its check found it (ruling Q55).
+        let told = (check.is_none() && self.events.receiver_count() > 0).then(|| entry.job.clone());
         match check {
             Some(check) => {
                 self.checks.insert(id, check);
             }
             None => writer.set_state(id, JobState::Done, None),
+        }
+        if let Some(job) = told {
+            self.emit(lane, &job, size, JobEventOutcome::Done);
         }
         self.run.files_done += 1;
         self.run.bytes_finished += size;
@@ -1844,7 +1922,11 @@ impl State {
         entry.done_bytes = 0;
         entry.error = Some(reason.clone());
         entry.stop = None;
-        let (size, batch) = (entry.size, entry.batch);
+        let (size, batch, lane) = (entry.size, entry.batch, entry.lane);
+        let told = (self.events.receiver_count() > 0).then(|| entry.job.clone());
+        if let Some(job) = told {
+            self.emit(lane, &job, 0, JobEventOutcome::Failed(reason.clone()));
+        }
         self.run.bytes_failed += size;
         self.failed.insert(id);
         if let Some(info) = self.batches.get_mut(&batch) {
@@ -1868,6 +1950,10 @@ impl State {
         self.aborts
             .give_up(provider, &entry.job, entry.multipart.as_ref());
         let was_failed = entry.status == Status::Failed;
+        // A failed job was told already; letting it go is no new end.
+        if !was_failed {
+            self.emit(entry.lane, &entry.job, 0, JobEventOutcome::Cancelled);
+        }
         if was_failed {
             self.failed.remove(&id);
             self.run.bytes_failed -= entry.size;
@@ -2195,6 +2281,7 @@ fn work_for(
     sent: bool,
     checksum: Option<Checksum>,
     journalled: Option<u64>,
+    cache_control: Option<String>,
 ) -> Work {
     match job {
         Job::Upload { local, remote, .. } => Work::Upload {
@@ -2202,6 +2289,7 @@ fn work_for(
             local,
             remote,
             journalled,
+            cache_control,
         },
         Job::Download { remote, local, .. } => Work::Download {
             id,
@@ -2469,6 +2557,7 @@ impl Inner {
                 st.rechecked.checked += 1;
                 if there {
                     self.writer.set_state(id, JobState::Done, None);
+                    st.emit(check.lane, &check.job, check.size, JobEventOutcome::Done);
                     continue;
                 }
                 st.reopen(id, &check);

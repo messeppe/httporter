@@ -348,6 +348,8 @@ pub(crate) enum Work {
         /// The journal's count of updates dealt with once it holds this upload's "possibly
         /// sent" mark, which must be there before anything is sent (ruling Q55).
         journalled: Option<u64>,
+        /// The `Cache-Control` of the longest rule set for this path, if any.
+        cache_control: Option<String>,
     },
     Download {
         id: JobId,
@@ -481,12 +483,13 @@ async fn run(inner: &Arc<Inner>, spec: &UnitSpec, part: Option<&PartSlot>) {
             local,
             remote,
             journalled,
+            cache_control,
         } => {
             // A crash from here on leaves the upload marked possibly sent (ruling Q55).
             if let Some(mark) = journalled {
                 inner.journalled(*mark).await;
             }
-            let result = upload(inner, spec, *id, local, remote).await;
+            let result = upload(inner, spec, *id, local, remote, cache_control.as_deref()).await;
             inner.finish(spec.unit, *id, result);
         }
         Work::Download {
@@ -648,12 +651,13 @@ struct Prepared {
     md5: Option<[u8; 16]>,
 }
 
-/// Looks the file up again before an attempt and hashes it again when it changed since it was
-/// hashed (its size or modification time differs), or when it never was.
+/// Looks the file up again before an attempt and, when `hash`, hashes it again when it changed
+/// since it was hashed (its size or modification time differs), or when it never was. SHA-256
+/// and MD5 come from one read.
 async fn prepare(
     files: &Arc<dyn LocalFiles>,
     local: &Path,
-    verify: bool,
+    hash: bool,
     current: Option<Prepared>,
 ) -> Result<Prepared, Failure> {
     let (len, modified) = {
@@ -665,11 +669,11 @@ async fn prepare(
     if let Some(current) = current
         && current.len == len
         && current.modified == modified
-        && (!verify || current.sha256.is_some())
+        && (!hash || current.sha256.is_some())
     {
         return Ok(current);
     }
-    if !verify {
+    if !hash {
         return Ok(Prepared {
             len,
             modified,
@@ -697,13 +701,21 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Sends a local file. Before each attempt the file is looked at again and re-hashed if it
 /// changed. A checksum mismatch re-hashes it and sends it once more; a second one fails the job
 /// as damaged twice.
+///
+/// The file is hashed when checksums are verified, and always for a service whose listings
+/// carry no SHA-256 (S3): its SHA-256 is recorded with the object, for comparing it later. Only
+/// a verified upload asks the service to check the bytes. `cache_control` goes with it.
 async fn upload(
     inner: &Arc<Inner>,
     spec: &UnitSpec,
     id: JobId,
     local: &Path,
     remote: &RemotePath,
+    cache_control: Option<&str>,
 ) -> Result<(), Failure> {
+    let records_sha256 =
+        spec.provider.capabilities().checksum_in_listing != Some(ChecksumKind::Sha256);
+    let hash = spec.verify || records_sha256;
     let meter: Arc<dyn BodyMeter> = Arc::new(JobMeter {
         inner: inner.clone(),
         unit: spec.unit,
@@ -719,7 +731,7 @@ async fn upload(
             let (prepared, meter, content_type, cut) = (&prepared, &meter, &content_type, &cut);
             async move {
                 let current = lock(prepared).clone();
-                let fresh = prepare(&spec.files, local, spec.verify, current).await?;
+                let fresh = prepare(&spec.files, local, hash, current).await?;
                 *lock(prepared) = Some(fresh.clone());
                 inner.set_size(spec.unit, id, fresh.len);
                 inner.restart_progress(spec.unit, id);
@@ -734,9 +746,10 @@ async fn upload(
                 );
                 let opts = UploadOptions {
                     sha256: fresh.sha256,
-                    md5: fresh.md5,
+                    md5: fresh.md5.filter(|_| spec.verify),
                     meter: Some(meter.clone()),
                     parts: Some(parts),
+                    cache_control: cache_control.map(str::to_owned),
                     ..UploadOptions::new(content_type.clone())
                 };
                 let source = UploadSource::File {

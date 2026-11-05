@@ -55,7 +55,9 @@ use crate::body::{
 };
 use crate::errors::{self, ERROR_BODY_MAX, network_error};
 use crate::sigv4::{Credentials, EMPTY_PAYLOAD_SHA256, UNSIGNED_PAYLOAD, sha256_hex};
-use crate::storage::{ANSWER_MAX, S3Storage, b64, failure, object_headers, signed_headers};
+use crate::storage::{
+    ANSWER_MAX, S3Storage, b64, failure, object_headers, part_size_header, signed_headers,
+};
 use crate::xml;
 
 /// Files larger than this are uploaded in parts.
@@ -194,7 +196,7 @@ impl S3Storage {
                 Some(earlier) => (earlier.upload_id, earlier.part_size, earlier.done),
                 None => {
                     let part_size = plan_part_size(self.part_size, len);
-                    let upload_id = self.create_upload(object, opts).await?;
+                    let upload_id = self.create_upload(object, opts, part_size).await?;
                     if let Some(journal) = &journal {
                         journal.started(&upload_id, part_size);
                     }
@@ -254,15 +256,18 @@ impl S3Storage {
         }
     }
 
-    /// `CreateMultipartUpload`; answers the upload id.
+    /// `CreateMultipartUpload`, with the object's headers and its `part_size` recorded as
+    /// `x-amz-meta-httporter-part-size`; answers the upload id.
     async fn create_upload(
         &self,
         object: &Url,
         opts: &UploadOptions,
+        part_size: u64,
     ) -> Result<String, ProviderError> {
         let mut url = object.clone();
         url.set_query(Some("uploads"));
-        let extra = object_headers(opts);
+        let mut extra = object_headers(opts);
+        extra.push(part_size_header(part_size));
         let response = self
             .call(
                 Method::POST,

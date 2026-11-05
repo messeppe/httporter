@@ -43,12 +43,15 @@ use futures_util::future::join_all;
 use futures_util::stream::FuturesUnordered;
 use httporter_core::{
     ByteStream, Capabilities, Checksum, ChecksumKind, EmptyFolders, Entry, HttpProtocol, Listing,
-    ProviderError, ProxyMode, RemotePath, RequestInfo, StorageProvider, TransferSettings,
-    UploadOptions, UploadSource, encode_segment,
+    META_PART_SIZE, META_SHA256, ObjectInfo, ProviderError, ProxyMode, RemotePath, RequestInfo,
+    StorageProvider, TransferSettings, UploadOptions, UploadSource, encode_segment,
 };
 use md5::{Digest, Md5};
 use percent_encoding::percent_decode_str;
-use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue,
+    LAST_MODIFIED,
+};
 use reqwest::{Body, Method, Version, redirect};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -59,7 +62,7 @@ use crate::errors::{self, ERROR_BODY_MAX, network_error};
 use crate::multipart::{MULTIPART_THRESHOLD, PART_SIZE};
 use crate::presets::{Endpoint, bucket_url, object_url};
 use crate::sigv4::{
-    Credentials, EMPTY_PAYLOAD_SHA256, SignInput, UNSIGNED_PAYLOAD, sha256_hex, sign,
+    Credentials, EMPTY_PAYLOAD_SHA256, SignInput, UNSIGNED_PAYLOAD, presign_get, sha256_hex, sign,
 };
 use crate::xml::{self, DELETE_MAX, DeleteFailure, ListPage};
 
@@ -77,8 +80,12 @@ pub const TRANSFER_CONCURRENCY_MAX: usize = 128;
 /// keys of the longest possible length is about 2 MB.
 pub(crate) const ANSWER_MAX: usize = 32 * 1024 * 1024;
 
-/// The metadata header that carries an upload's SHA-256, for comparing files later.
-pub(crate) const SHA256_META: &str = "x-amz-meta-httporter-sha256";
+/// What every user-defined metadata header starts with.
+const META_PREFIX: &str = "x-amz-meta-";
+
+/// `CopyObject` copies on the service and answers only when done, which for a file of a few
+/// GB takes a while: it may take longer than a short request, at least this long.
+const COPY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The content type of a folder marker, which is what the S3 console writes.
 const FOLDER_CONTENT_TYPE: &str = "application/x-directory";
@@ -234,7 +241,7 @@ impl S3Storage {
                 list_concurrency: LIST_CONCURRENCY,
                 delete_concurrency: DELETE_CONCURRENCY,
                 transfer_concurrency_max: TRANSFER_CONCURRENCY_MAX,
-                presign: false, // I4
+                presign: true,
                 read_only: false,
                 // A PUT replaces the object whole or not at all, and a multipart upload is only
                 // an object once completed (ruling Q55).
@@ -888,6 +895,149 @@ impl StorageProvider for S3Storage {
         let object = object_url(&self.endpoint, bucket, path);
         self.abort_upload(&object, upload_id).await
     }
+
+    /// `HeadObject`: the size, the date, the ETag, the content type and the `x-amz-meta-*`
+    /// metadata (an upload's SHA-256 and part size among them). S3 keeps no creation date, so
+    /// `created` is `None`. A missing key is [`ProviderError::NotFound`].
+    async fn stat(&self, path: &RemotePath) -> Result<ObjectInfo, ProviderError> {
+        let bucket = self.bucket()?;
+        if path.is_root() {
+            return Err(ProviderError::NotFound);
+        }
+        let _slot = self
+            .list_slots
+            .acquire()
+            .await
+            .map_err(|_| limiter_closed("listing"))?;
+        let url = object_url(&self.endpoint, bucket, path);
+        let response = self
+            .call(Method::HEAD, url, &[], EMPTY_PAYLOAD_SHA256, None, None)
+            .await?;
+        if !response.status().is_success() {
+            return Err(failure(response, self.request_timeout).await);
+        }
+        Ok(object_info(path, response.headers()))
+    }
+
+    /// `CopyObject` from `from` to `to` in this bucket, with the metadata copied as it is
+    /// (`MetadataDirective: COPY`): the content type, `Cache-Control` and the recorded SHA-256
+    /// go along. An existing `to` is overwritten. S3 may answer `200` and fail while it copies;
+    /// that is the error. A file larger than one copy may take (5 GiB) is
+    /// [`ProviderError::Permanent`] with [`httporter_core::copy::COPY_TOO_LARGE`].
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> Result<(), ProviderError> {
+        let bucket = self.bucket()?;
+        if from.is_root() || to.is_root() {
+            return Err(ProviderError::Refused(
+                "The bucket root is a folder, not a file".into(),
+            ));
+        }
+        let url = object_url(&self.endpoint, bucket, to);
+        let source = format!("/{}/{}", encode_segment(bucket), from.to_url_path(false));
+        let extra = [
+            ("x-amz-copy-source".to_owned(), source),
+            ("x-amz-metadata-directive".to_owned(), "COPY".to_owned()),
+        ];
+        let _slot = self
+            .transfer_slots
+            .acquire()
+            .await
+            .map_err(|_| limiter_closed("transfer"))?;
+        let timeout = self.request_timeout.max(COPY_TIMEOUT);
+        let response = self
+            .call(
+                Method::PUT,
+                url,
+                &extra,
+                EMPTY_PAYLOAD_SHA256,
+                Some(Vec::new()),
+                Some(timeout),
+            )
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            let body = read_limited(response, ANSWER_MAX).await?;
+            return xml::parse_copy(&body, status.as_u16());
+        }
+        let retry_after = errors::retry_after(response.headers());
+        let body = tokio::time::timeout(timeout, read_capped(response, ERROR_BODY_MAX))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        let doc = xml::parse_error(&body);
+        let too_large = doc.code.as_deref() == Some("InvalidRequest")
+            && doc
+                .message
+                .as_deref()
+                .is_some_and(|message| message.to_ascii_lowercase().contains("larger than"));
+        if too_large {
+            return Err(ProviderError::Permanent(
+                httporter_core::copy::COPY_TOO_LARGE.to_owned(),
+            ));
+        }
+        Err(errors::from_response(status.as_u16(), retry_after, &body))
+    }
+
+    /// A SigV4 pre-signed `GET` link to the object, valid for `expires` (at most seven days).
+    /// Made here from the credentials, without asking the service: it does not check that the
+    /// key exists.
+    fn presign(&self, path: &RemotePath, expires: Duration) -> Result<String, ProviderError> {
+        let bucket = self.bucket()?;
+        if path.is_root() {
+            return Err(ProviderError::Refused(
+                "The bucket root is a folder, not a file".into(),
+            ));
+        }
+        let url = object_url(&self.endpoint, bucket, path);
+        Ok(presign_get(
+            &url,
+            &self.creds,
+            &self.endpoint.region,
+            Utc::now(),
+            expires.as_secs(),
+        )
+        .to_string())
+    }
+}
+
+/// What a `HeadObject` answer says about the file at `path`.
+fn object_info(path: &RemotePath, headers: &HeaderMap) -> ObjectInfo {
+    let text = |name: HeaderName| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let content_type = text(CONTENT_TYPE).map(str::to_owned);
+    let mut metadata: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            // Header names are kept in lower case.
+            let name = name.as_str().strip_prefix(META_PREFIX)?;
+            let value = String::from_utf8_lossy(value.as_bytes()).trim().to_owned();
+            Some((name.to_owned(), value))
+        })
+        .collect();
+    metadata.sort();
+    ObjectInfo {
+        entry: Entry {
+            path: path.clone(),
+            is_folder: false,
+            size: text(CONTENT_LENGTH)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            modified: text(LAST_MODIFIED)
+                .and_then(|value| DateTime::parse_from_rfc2822(value).ok())
+                .map(|time| time.with_timezone(&Utc)),
+            checksum: checksum_from_etag(text(ETAG)),
+            content_type: content_type.clone(),
+            replicated_regions: Vec::new(),
+        },
+        created: None,
+        content_type,
+        metadata,
+    }
 }
 
 /// The names one listing call left out because no [`RemotePath`] can hold them.
@@ -1081,8 +1231,8 @@ fn outcomes(
 }
 
 /// The headers that describe an object being written: its content type (S3 does not guess it,
-/// and an object without one is served as `binary/octet-stream`) and its SHA-256 for later
-/// comparisons.
+/// and an object without one is served as `binary/octet-stream`), its SHA-256 for later
+/// comparisons (`x-amz-meta-httporter-sha256`) and its `Cache-Control` when one is set.
 pub(crate) fn object_headers(opts: &UploadOptions) -> Vec<(String, String)> {
     let content_type = if opts.content_type.is_empty() {
         "application/octet-stream"
@@ -1091,9 +1241,26 @@ pub(crate) fn object_headers(opts: &UploadOptions) -> Vec<(String, String)> {
     };
     let mut headers = vec![("content-type".to_owned(), content_type.to_owned())];
     if let Some(sha256) = &opts.sha256 {
-        headers.push((SHA256_META.to_owned(), hex::encode(sha256)));
+        headers.push((format!("{META_PREFIX}{META_SHA256}"), hex::encode(sha256)));
+    }
+    if let Some(cache_control) = opts
+        .cache_control
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        headers.push(("cache-control".to_owned(), cache_control.to_owned()));
     }
     headers
+}
+
+/// The metadata header a multipart upload records its part size in, for recomputing its ETag
+/// from a local file later.
+pub(crate) fn part_size_header(part_size: u64) -> (String, String) {
+    (
+        format!("{META_PREFIX}{META_PART_SIZE}"),
+        part_size.to_string(),
+    )
 }
 
 /// The headers for `method url`: the caller's `extra` headers (all of them signed) plus the

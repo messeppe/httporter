@@ -20,8 +20,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use httporter_core::{
     AuthHint, ByteStream, Capabilities, ChecksumKind, EmptyFolders, HttpProtocol, Listing,
-    MAX_RETRY_AFTER, ProviderError, ProxyMode, RemotePath, RetryPolicy, StorageProvider,
-    TransferSettings, UploadOptions, UploadSource, encode_segment, with_retry,
+    MAX_RETRY_AFTER, ObjectInfo, ProviderError, ProxyMode, RemotePath, RetryPolicy,
+    StorageProvider, TransferSettings, UploadOptions, UploadSource, encode_segment, with_retry,
 };
 use reqwest::header::{CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
 use reqwest::{RequestBuilder, StatusCode, redirect};
@@ -435,6 +435,13 @@ impl StorageProvider for BunnyStorage {
             .map_err(network_error)?;
         let _ = read_capped(&mut response, ERROR_BODY_MAX).await;
         Ok(())
+    }
+
+    /// The parent's listing entry plus `DateCreated`. `copy` and `presign` keep the defaults:
+    /// Bunny Storage can do neither. `UploadOptions::cache_control` is not sent either: the
+    /// pull zone decides how files are cached.
+    async fn stat(&self, path: &RemotePath) -> Result<ObjectInfo, ProviderError> {
+        self.stat_path(path).await
     }
 }
 

@@ -219,6 +219,18 @@ pub(crate) fn parse_initiate(body: &[u8], status: u16) -> Result<String, Provide
 /// body is checked for one. Anything else is taken as done: the upload has been assembled
 /// whatever else the service chooses to tell about it (some answer with nothing).
 pub(crate) fn parse_complete(body: &[u8], status: u16) -> Result<(), ProviderError> {
+    error_in_success(body, status)
+}
+
+/// What a successful-looking answer to `CopyObject` says. Like `CompleteMultipartUpload`, S3
+/// may answer `200` and fail while it copies, with an `<Error>` in the body instead of the
+/// `<CopyObjectResult>`.
+pub(crate) fn parse_copy(body: &[u8], status: u16) -> Result<(), ProviderError> {
+    error_in_success(body, status)
+}
+
+/// An `<Error>` document in the body of a `200` is that error; anything else is done.
+fn error_in_success(body: &[u8], status: u16) -> Result<(), ProviderError> {
     let text = String::from_utf8_lossy(body);
     if root_name(&text).as_deref() == Some("Error") {
         let doc = parse_error(body);

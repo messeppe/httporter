@@ -1680,7 +1680,7 @@ async fn capabilities_are_the_s3_contract() {
     assert_eq!(caps.list_concurrency, 8);
     assert_eq!(caps.delete_concurrency, 8);
     assert_eq!(caps.transfer_concurrency_max, 128);
-    assert!(!caps.presign);
+    assert!(caps.presign);
     assert!(!caps.read_only);
 }
 
