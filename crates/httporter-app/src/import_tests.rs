@@ -139,6 +139,7 @@ fn import_debug_never_shows_secrets() {
         key_id: "AKIDWORK".into(),
         secret: "sk-hunter2".into(),
         region: Some("eu-west-1".into()),
+        temporary: false,
     };
     for text in [
         format!("{env:?}"),
@@ -184,6 +185,7 @@ fn import_prefills_the_add_site_fields_without_the_secret() {
         key_id: "AKIDWORK".into(),
         secret: "sk".into(),
         region: Some("eu-west-1".into()),
+        temporary: false,
     });
     assert_eq!(
         (aws.provider, aws.region.as_str(), aws.key_id.as_str()),
@@ -195,6 +197,7 @@ fn import_prefills_the_add_site_fields_without_the_secret() {
         key_id: "K".into(),
         secret: "s".into(),
         region: None,
+        temporary: false,
     });
     assert_eq!(no_region.region, "");
 }

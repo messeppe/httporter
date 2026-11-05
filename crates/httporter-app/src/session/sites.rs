@@ -12,10 +12,10 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use httporter_bunny::{REGIONS, ZoneInfo, ZoneList, storage_host};
+use httporter_bunny::{REGIONS, UnusableZone, ZoneInfo, ZoneList, storage_host};
 use httporter_core::{
-    AccountId, ProviderError, ProviderKind, RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
-    StorageProvider,
+    AccountId, ConflictPolicy, ProviderError, ProviderKind, RemotePath, S3Preset, S3Site, SiteId,
+    SiteRecord, StorageProvider,
 };
 use httporter_platform::{
     AccountRecord, CredentialKey, CredentialStore, SiteList, SiteSecret, Store, StoreError,
@@ -28,6 +28,7 @@ use super::{Session, blocking, lock};
 use crate::add_site::ValidSite;
 use crate::add_site::{SiteForm, s3_host};
 use crate::copy::{self, Attempt};
+use crate::manage::settings_tabs::site_read_only;
 use crate::site_hub::{HubError, SiteHub, list_interactive, read_secret};
 
 /// The outcome of the Add Site sheet's Test Connection.
@@ -188,26 +189,39 @@ impl Session {
         lock(&self.book).sites.clone()
     }
 
-    /// The sidebar's rows, in the order of [`Self::sites`].
+    /// The sidebar's rows, in the order of [`Self::sites`]. A read-only site's subtitle ends
+    /// "· Read-only".
     pub fn site_items(&self) -> Vec<SiteItemData> {
-        let book = lock(&self.book);
-        book.sites
-            .iter()
-            .map(|site| {
-                let provider = SiteProvider::of(site);
-                let subtitle = match provider {
-                    SiteProvider::Bunny => {
-                        copy::site_subtitle(copy::BUNNY, region_city(&site.region))
+        let items: Vec<SiteItemData> = {
+            let book = lock(&self.book);
+            book.sites
+                .iter()
+                .map(|site| {
+                    let provider = SiteProvider::of(site);
+                    let subtitle = match provider {
+                        SiteProvider::Bunny => {
+                            copy::site_subtitle(copy::BUNNY, region_city(&site.region))
+                        }
+                        SiteProvider::S3(preset) => copy::s3_subtitle(preset.label(), &site.region),
+                    };
+                    SiteItemData {
+                        id: site.id.0.clone(),
+                        name: site.name.clone(),
+                        subtitle,
+                        provider,
+                        healthy: book.healthy.get(&site.id).copied().unwrap_or(true),
                     }
-                    SiteProvider::S3(preset) => copy::s3_subtitle(preset.label(), &site.region),
-                };
-                SiteItemData {
-                    id: site.id.0.clone(),
-                    name: site.name.clone(),
-                    subtitle,
-                    provider,
-                    healthy: book.healthy.get(&site.id).copied().unwrap_or(true),
+                })
+                .collect()
+        };
+        // The extras are read with the site list let go: they have a lock of their own.
+        items
+            .into_iter()
+            .map(|mut item| {
+                if site_read_only(self, &SiteId(item.id.clone())) {
+                    item.subtitle = copy::read_only_subtitle(&item.subtitle);
                 }
+                item
             })
             .collect()
     }
@@ -427,7 +441,26 @@ impl Session {
         let (factory, settings) = (self.hub.factory(), self.hub.settings());
         // Making the client sets up TLS, which takes a while.
         let answer = blocking(move || factory.bunny_zones(key, &settings)).await;
-        answer.await.map_err(|error| copy::account_failed(&error))
+        let mut list = answer.await.map_err(|error| copy::account_failed(&error))?;
+        // A zone that is a saved site already is greyed out, not added twice (review M6). Bunny
+        // zone names are unique, so the name is what tells.
+        let saved: Vec<String> = lock(&self.book)
+            .sites
+            .iter()
+            .filter(|site| site.provider == ProviderKind::Bunny)
+            .map(|site| site.container.to_ascii_lowercase())
+            .collect();
+        let (added, new): (Vec<ZoneInfo>, Vec<ZoneInfo>) = list
+            .zones
+            .into_iter()
+            .partition(|zone| saved.contains(&zone.name.to_ascii_lowercase()));
+        list.zones = new;
+        list.unusable
+            .extend(added.into_iter().map(|zone| UnusableZone {
+                name: zone.name,
+                reason: copy::ZONE_ALREADY_ADDED.to_owned(),
+            }));
+        Ok(list)
     }
 
     /// Adds every zone of `zones` as a site, with its password, as Find Zones found them (Ruling
@@ -806,6 +839,34 @@ pub(super) fn listing_error_text(
         region,
         dir,
     )
+}
+
+/// What Settings › Sites and Advanced read from the site database (I4): the conflict choice
+/// remembered for a site (review M3), and the checksum cache's size.
+impl Session {
+    /// The choice remembered for the uploads (`upload`) or downloads of `site`, if any: what
+    /// Settings › Sites shows, with Forget (review M3).
+    pub async fn remembered_conflicts(
+        &self,
+        site: &SiteId,
+        upload: bool,
+    ) -> Option<ConflictPolicy> {
+        let (store, key) = (self.store.clone(), site_conflicts_key(site, upload));
+        blocking(move || lock(&store).settings(&key)).await
+    }
+
+    /// How many files the checksum cache remembers (Settings › Advanced).
+    pub async fn hash_count(&self) -> Result<u64, String> {
+        let store = self.store.clone();
+        blocking(move || lock(&store).hash_count().map_err(|e| e.to_string())).await
+    }
+
+    /// Forgets every checksum the cache remembers (Settings › Advanced's Clear): the files are
+    /// read again when next compared.
+    pub async fn clear_hashes(&self) -> Result<(), String> {
+        let store = self.store.clone();
+        blocking(move || lock(&store).hash_clear().map_err(|e| e.to_string())).await
+    }
 }
 
 /// Why `site` has no client, in words.

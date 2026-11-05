@@ -277,6 +277,11 @@ pub fn site_subtitle(service: &str, place: &str) -> String {
     format!("{service} · {place}")
 }
 
+/// The sidebar's second line for a read-only site (I4): "Bunny · Singapore · Read-only".
+pub fn read_only_subtitle(subtitle: &str) -> String {
+    format!("{subtitle} · Read-only")
+}
+
 /// The service name on a Bunny site's subtitle.
 pub const BUNNY: &str = "Bunny";
 /// The service name in the toolbar's subtitle for a Bunny site.
@@ -386,6 +391,8 @@ pub const BUNNY_ACCOUNT_NAME: &str = "Bunny account";
 const BUNNY_API_HOST: &str = "api.bunny.net";
 /// Find Zones found nothing that can be added.
 pub const NO_ZONES: &str = "This account has no storage zones that can be added.";
+/// Find Zones: a zone that is a saved site already (review M6), greyed out with this reason.
+pub const ZONE_ALREADY_ADDED: &str = "already added as a site";
 /// An S3 key that may not list the buckets: the user types the name instead.
 pub const BUCKETS_NOT_ALLOWED: &str = "This key can't list buckets. Type the bucket name instead.";
 
@@ -433,6 +440,14 @@ pub fn aws_profile_label(name: &str, region: Option<&str>) -> String {
         None => name.to_owned(),
     }
 }
+
+/// An AWS CLI profile with temporary credentials (a session token) in Import's list (review M5).
+pub fn aws_temporary_label(label: &str) -> String {
+    format!("{label}, Temporary credentials, not supported")
+}
+
+/// Use Profile on a profile with temporary credentials.
+pub const AWS_TEMPORARY: &str = "That profile has temporary credentials (a session token), which      HTTPorter doesn't support. Choose a profile with a permanent access key.";
 
 // ---- Selection, the toolbar and the context menus ----
 
