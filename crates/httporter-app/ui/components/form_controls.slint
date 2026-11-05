@@ -39,7 +39,7 @@ export component Field inherits Rectangle {
         input.select-all();
     }
 
-    height: 28px;
+    height: Theme.control-height;
     forward-focus: input;
     border-radius: 7px;
     background: Theme.field;
@@ -143,7 +143,7 @@ export component Field inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 }
@@ -190,7 +190,7 @@ export component FormRow inherits HorizontalLayout {
 
     Text {
         width: 120px;
-        height: 28px;
+        height: Theme.control-height;
         text: root.label;
         color: Theme.label;
         font-size: Theme.font-body;
@@ -210,7 +210,7 @@ export component FormRow inherits HorizontalLayout {
 component RegionList inherits Rectangle {
     in property <[string]> model;
     in property <int> current-index;
-    in property <length> item-height: 28px;
+    in property <length> item-height: Theme.row-height;
     callback chosen(int);
 
     // Scrolls the list just far enough to show the current row.
@@ -299,7 +299,7 @@ export component RegionPicker inherits Rectangle {
         }
     }
 
-    height: 28px;
+    height: Theme.control-height;
     forward-focus: key-focus;
     border-radius: 7px;
     background: Theme.field;
@@ -347,7 +347,7 @@ export component RegionPicker inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -386,7 +386,7 @@ export component RegionPicker inherits Rectangle {
         x: 0px;
         y: root.open-up ? -self.height - 4px : root.height + 4px;
         width: root.width;
-        height: min(root.model.length, 8) * 28px + 8px;
+        height: min(root.model.length, 8) * Theme.row-height + 8px;
         close-policy: close-on-click-outside;
         forward-focus: list-scope;
 
@@ -463,7 +463,7 @@ export component SecretField inherits Rectangle {
     // The eye was pressed; the argument is whether the text is now shown.
     callback reveal-toggled(bool);
 
-    height: 28px;
+    height: Theme.control-height;
     forward-focus: field;
 
     field := Field {
@@ -483,7 +483,7 @@ export component SecretField inherits Rectangle {
         x: parent.width - self.width - 4px;
         y: 2px;
         width: 28px;
-        height: 24px;
+        height: parent.height - 4px;
         icon: root.revealed ? Icons.eye-off : Icons.eye;
         label: root.revealed ? root.hide-label : root.show-label;
         clicked => {
@@ -504,7 +504,7 @@ export component CheckLine inherits Rectangle {
     // The user asked for this state.
     callback toggled(bool);
 
-    height: 22px;
+    height: 22px + Theme.grow;
     forward-focus: key-focus;
     opacity: root.enabled ? 1 : 0.5;
     accessible-role: checkbox;
@@ -561,8 +561,8 @@ export component CheckLine inherits Rectangle {
         height: parent.height + 6px;
         border-radius: 8px;
         border-width: 2px;
-        border-color: Theme.accent;
-        visible: root.has-focus;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.enabled;
     }
 
     // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
@@ -604,7 +604,8 @@ export component RadioList inherits Rectangle {
         }
     }
 
-    height: root.options.length * 26px;
+    // Each option is 22 px (more with larger text) and 4 px apart.
+    height: root.options.length * (26px + Theme.grow);
     forward-focus: key-focus;
     accessible-role: radio-group;
     accessible-label: root.label;
@@ -614,7 +615,7 @@ export component RadioList inherits Rectangle {
         alignment: start;
 
         for option[i] in root.options: Rectangle {
-            height: 22px;
+            height: 22px + Theme.grow;
             accessible-role: radio-button;
             accessible-checkable: true;
             accessible-checked: i == root.current;
@@ -653,7 +654,7 @@ export component RadioList inherits Rectangle {
                 height: parent.height + 6px;
                 border-radius: 8px;
                 border-width: 2px;
-                border-color: Theme.accent;
+                border-color: Theme.focus-ring;
                 visible: root.has-focus && i == root.current;
             }
 
