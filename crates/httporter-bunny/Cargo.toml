@@ -2,6 +2,7 @@
 name = "httporter-bunny"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]
@@ -9,7 +10,7 @@ async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
-httporter-core = { version = "0.1.0", path = "../httporter-core" }
+httporter-core = { version = "1.0.0", path = "../httporter-core" }
 reqwest = { workspace = true, features = ["rustls-no-provider", "http2", "stream", "system-proxy"] }
 rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }

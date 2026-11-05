@@ -6,7 +6,8 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "1.0.0"
+license = "MIT OR Apache-2.0"
 publish = false
 
 # Shared dependency versions. Members opt in with `name.workspace = true` and
@@ -21,6 +22,8 @@ dotenvy = "0.15.7"
 futures-util = "0.3.34"
 hex = "0.4.3"
 hmac = "0.13.0"
+# Dev only: Slint's headless backend for the window tests.
+i-slint-backend-testing = "1.18"
 # Exact pin: the credential-store backend must not drift between builds.
 keyring = "=3.6.3"
 md-5 = "0.11.0"
@@ -46,6 +49,8 @@ slint = { version = "1.18", default-features = false, features = [
     "renderer-software",
     "accessibility",
 ] }
+# Build only: compiles the .slint files; same version as `slint`.
+slint-build = "1.18"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = "1.54.1"

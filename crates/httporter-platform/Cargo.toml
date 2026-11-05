@@ -2,12 +2,13 @@
 name = "httporter-platform"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]
 chrono.workspace = true
 dirs = "7.0.0"
-httporter-core = { version = "0.1.0", path = "../httporter-core" }
+httporter-core = { version = "1.0.0", path = "../httporter-core" }
 keyring = { workspace = true, features = ["windows-native"] }
 rfd.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
@@ -17,16 +18,22 @@ thiserror.workspace = true
 windows = { workspace = true, features = [
     "Data_Xml_Dom",
     "UI_Notifications",
+    "UI_ViewManagement",
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_DataExchange",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_Accessibility",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

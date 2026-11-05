@@ -2,6 +2,7 @@
 name = "httporter-app"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [[bin]]
@@ -20,14 +21,19 @@ httporter-transfer = { path = "../httporter-transfer" }
 # Not used directly: adds WebP and GIF to the png + jpeg that Slint's own image loading
 # decodes (`Image::load_from_path`). resvg already links both decoders.
 image = { version = "0.25.10", default-features = false, features = ["webp", "gif"] }
-slint = { workspace = true, features = ["unstable-winit-030"] }
+# The update check (system/update.rs): the same features as httporter-bunny, so nothing new links.
+reqwest = { workspace = true, features = ["rustls-no-provider", "http2", "stream", "system-proxy"] }
+# raw-window-handle-06: the owner window of the file pickers.
+slint = { workspace = true, features = ["unstable-winit-030", "raw-window-handle-06"] }
 tokio = { workspace = true, features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
-slint-build = "1.18"
+# The exe's icon, version info and manifest (assets/icon/httporter.rc).
+embed-resource = "3"
+slint-build.workspace = true
 
 [dev-dependencies]
-i-slint-backend-testing = "1.18"
+i-slint-backend-testing.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
