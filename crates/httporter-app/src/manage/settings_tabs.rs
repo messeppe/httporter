@@ -33,11 +33,9 @@ use crate::{AppWindow, SettingsWindow, SiteSettingsData, SiteSettingsRow, Theme}
 
 /// Whether the stored UI state and site extras may be read without the user asking: at start
 /// (the saved appearance), whenever the window redraws (the read-only marks, the sidebar's
-/// "· Read-only") and before a batch is sent ([`site_read_only`]). Off while the session's
-/// `ui_state` and `site_extras` are still `todo!()` stubs (T4 fills them in another worktree):
-/// until then nothing here reads them before the user opens Settings › General or Sites.
-/// **Turn it on when T4 is merged**, or read-only sites are not enforced.
-pub const STORED_EXTRAS_READY: bool = false;
+/// "· Read-only") and before a batch is sent ([`site_read_only`]). On since T4's store is
+/// merged; off, read-only sites would not be enforced.
+pub const STORED_EXTRAS_READY: bool = true;
 
 /// The tabs this file draws, by their place in the window's row of tabs.
 const GENERAL_TAB: i32 = 0;

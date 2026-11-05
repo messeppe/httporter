@@ -753,8 +753,7 @@ pub fn install(ui: &AppWindow, m: &Arc<Manager>) {
         let ui = ui.as_weak();
         move || {
             if let Some(ui) = ui.upgrade() {
-                // TODO(merge): call `super::quicklook_view::show(&ui, &m, single_side(&ui))` (T6);
-                // until then the window's `quick-look`, which T6 wires to it, opens it.
+                // The window's `quick-look`, which `quicklook_view` handles, opens it.
                 ui.invoke_quick_look(ui.get_single_side());
             }
         }
@@ -795,5 +794,28 @@ pub fn install(ui: &AppWindow, m: &Arc<Manager>) {
                 purge(&m, &ui);
             }
         }
+    });
+    restore_view(ui, m);
+}
+
+/// Opens in the view the user left at the last start (read on a blocking thread: the UI state is
+/// in the site database).
+fn restore_view(ui: &AppWindow, m: &Manager) {
+    let (weak, session) = (ui.as_weak(), m.session.clone());
+    m.link.rt().spawn(async move {
+        let Ok(state) = tokio::task::spawn_blocking(move || session.ui_state()).await else {
+            return;
+        };
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let Some(m) = super::manager() else {
+                return;
+            };
+            if matches!(state.view, ViewMode::Inspector) {
+                set_view(&ui, &m, 1);
+            }
+            if state.grid {
+                set_grid(&ui, &m, true);
+            }
+        });
     });
 }
