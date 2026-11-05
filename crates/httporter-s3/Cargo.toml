@@ -17,7 +17,8 @@ md-5.workspace = true
 percent-encoding.workspace = true
 # `overlapped-lists`: some services put `<Contents>` and `<CommonPrefixes>` in any order.
 quick-xml = { workspace = true, features = ["serialize", "overlapped-lists"] }
-reqwest = { workspace = true, features = ["rustls", "http2", "stream", "system-proxy"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "http2", "stream", "system-proxy"] }
+rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }

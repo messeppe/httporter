@@ -430,6 +430,8 @@ impl S3Raw {
     fn new(env: &TestEnv) -> Self {
         assert_test_bucket(&env.bucket);
         let (endpoint, _) = s3_endpoint(env);
+        // reqwest brings no TLS crypto (`rustls-no-provider`): use ring's, as the providers do.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(60))

@@ -10,7 +10,8 @@ bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 httporter-core = { version = "0.1.0", path = "../httporter-core" }
-reqwest = { workspace = true, features = ["rustls", "http2", "stream", "system-proxy"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "http2", "stream", "system-proxy"] }
+rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "fs", "time"] }

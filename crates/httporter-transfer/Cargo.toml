@@ -23,7 +23,8 @@ dotenvy.workspace = true
 httporter-bunny = { version = "0.1.0", path = "../httporter-bunny" }
 httporter-platform = { version = "0.1.0", path = "../httporter-platform" }
 httporter-s3 = { version = "0.1.0", path = "../httporter-s3" }
-reqwest = { workspace = true, features = ["rustls", "http2"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "http2"] }
+rustls.workspace = true
 tempfile.workspace = true
 # rt-multi-thread: the harness runs the engine on a runtime made as the app makes its own.
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
