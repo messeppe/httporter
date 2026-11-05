@@ -230,7 +230,7 @@ impl Aborts {
         self.running.fetch_add(1, Ordering::SeqCst);
         let running = AbortRunning(self.running.clone());
         let changes = self.changes.clone();
-        self.rt.spawn(async move {
+        crate::task::spawn_on(&self.rt, async move {
             let _ = provider.abort_multipart(&remote, &upload_id).await;
             drop(running);
             changes.send_modify(|n| *n = n.wrapping_add(1));
@@ -636,8 +636,8 @@ impl Engine {
             check_wake: Notify::new(),
             changes,
         });
-        rt.spawn(dispatch_loop(inner.clone()));
-        rt.spawn(check_loop(inner.clone()));
+        crate::task::spawn_on(&rt, dispatch_loop(inner.clone()));
+        crate::task::spawn_on(&rt, check_loop(inner.clone()));
         Self {
             _owner: Arc::new(Owner(inner.clone())),
             inner,
@@ -1463,7 +1463,7 @@ async fn dispatch_loop(inner: Arc<Inner>) {
             continue;
         }
         for spec in units {
-            inner.rt.spawn(run_unit(inner.clone(), spec));
+            crate::task::spawn_on(&inner.rt, run_unit(inner.clone(), spec));
         }
         inner.bump();
     }
@@ -2665,7 +2665,7 @@ impl Inner {
             !std::mem::replace(&mut lane_ref.probing, true)
         };
         if start_probe {
-            self.rt.spawn(offline::probe(self.clone(), lane));
+            crate::task::spawn_on(&self.rt, offline::probe(self.clone(), lane));
         }
         self.bump();
     }
@@ -2905,14 +2905,17 @@ impl JournalWriter {
         let pending = Arc::new(AtomicUsize::new(0));
         let errors = Arc::new(AtomicU64::new(0));
         let dealt_with = Arc::new(AtomicU64::new(0));
-        rt.spawn(write_journal(
-            rx,
-            journal,
-            pending.clone(),
-            errors.clone(),
-            dealt_with.clone(),
-            changes,
-        ));
+        crate::task::spawn_on(
+            rt,
+            write_journal(
+                rx,
+                journal,
+                pending.clone(),
+                errors.clone(),
+                dealt_with.clone(),
+                changes,
+            ),
+        );
         Self {
             tx,
             pending,
@@ -3008,7 +3011,7 @@ async fn write_journal(
         let mut waits = JOURNAL_RETRIES.iter();
         let written = loop {
             let (journal, chunk) = (journal.clone(), updates.clone());
-            let written = tokio::task::spawn_blocking(move || journal.apply(&chunk).is_ok())
+            let written = crate::task::spawn_blocking(move || journal.apply(&chunk).is_ok())
                 .await
                 .unwrap_or(false);
             match waits.next() {

@@ -119,7 +119,7 @@ impl ProviderFactory for RealFactory {
 /// panics the caller, as it would had `work` run in place. (The pool is only gone when the
 /// runtime is shutting down, and then nothing is waiting for the answer any more.)
 pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
-    match tokio::task::spawn_blocking(work).await {
+    match crate::rt::spawn_blocking(work).await {
         Ok(value) => value,
         Err(e) => match e.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),

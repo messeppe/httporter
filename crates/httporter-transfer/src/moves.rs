@@ -290,7 +290,7 @@ async fn copy_through(
     temp_dir: &Path,
     outcome: &mut MoveOutcome,
 ) -> Result<Vec<RemotePath>, JournalError> {
-    let _ = tokio::task::spawn_blocking({
+    let _ = crate::task::spawn_blocking({
         let dir = temp_dir.to_owned();
         move || std::fs::create_dir_all(dir)
     })
@@ -394,7 +394,7 @@ fn top_folders(plan: &MovePlan) -> Vec<RemotePath> {
 /// Empties `dir` (the downloads a move made), best effort.
 async fn empty_dir(dir: &Path) {
     let dir = dir.to_owned();
-    let _ = tokio::task::spawn_blocking(move || {
+    let _ = crate::task::spawn_blocking(move || {
         let Ok(children) = std::fs::read_dir(&dir) else {
             return;
         };

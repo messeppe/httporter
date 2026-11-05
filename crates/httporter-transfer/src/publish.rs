@@ -482,7 +482,7 @@ pub(crate) async fn run_batch(
     };
     // The journal is written before anything starts: a disk write, so off the runtime.
     let submitter = engine.clone();
-    let id = tokio::task::spawn_blocking(move || submitter.submit_tracked(batch))
+    let id = crate::task::spawn_blocking(move || submitter.submit_tracked(batch))
         .await
         .map_err(|_| JournalError(messages::STOPPED_UNEXPECTEDLY.to_owned()))??;
     Ok(engine.wait_batch(&id).await)

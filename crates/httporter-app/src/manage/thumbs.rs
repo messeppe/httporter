@@ -269,7 +269,7 @@ async fn make(m: &Manager, source: Source) -> Option<SharedPixelBuffer<Rgba8Pixe
         Source::Local(path) => {
             let meta = {
                 let path = path.clone();
-                tokio::task::spawn_blocking(move || fs::metadata(path))
+                crate::rt::spawn_blocking(move || fs::metadata(path))
                     .await
                     .ok()?
                     .ok()?
@@ -307,7 +307,7 @@ async fn make(m: &Manager, source: Source) -> Option<SharedPixelBuffer<Rgba8Pixe
         }
     };
     let out = cached_path(&key);
-    tokio::task::spawn_blocking(move || {
+    crate::rt::spawn_blocking(move || {
         if out.exists()
             && let Some((pixels, _)) = decode_scaled(&out, SIZE)
         {

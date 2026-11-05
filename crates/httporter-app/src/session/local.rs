@@ -228,7 +228,7 @@ impl Session {
             }),
             Some(dir) => {
                 let dir = dir.clone();
-                tokio::task::spawn_blocking(move || list_local(&dir))
+                crate::rt::spawn_blocking(move || list_local(&dir))
                     .await
                     .unwrap_or_else(|e| Err(io::Error::other(e)))
             }

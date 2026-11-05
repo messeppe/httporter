@@ -352,7 +352,7 @@ pub async fn compare_trees(
         let (root, skip, found) = (local_root.to_owned(), skip.clone(), found.clone());
         async move {
             let at = root.clone();
-            tokio::task::spawn_blocking(move || LocalTree::walk(&root, &skip, &found, &stop))
+            crate::task::spawn_blocking(move || LocalTree::walk(&root, &skip, &found, &stop))
                 .await
                 .unwrap_or_else(|_| {
                     Err(CompareError::Local {
@@ -612,7 +612,7 @@ async fn local_etag(cache: &HashCache, file: &LocalFile, part_size: u64) -> io::
         return Ok(etag);
     }
     let path = file.path.clone();
-    let etag = tokio::task::spawn_blocking(move || multipart_etag(&path, part_size))
+    let etag = crate::task::spawn_blocking(move || multipart_etag(&path, part_size))
         .await
         .unwrap_or_else(|_| Err(io::Error::other(messages::HASHING_STOPPED)))?;
     if let Some(key) = key {
@@ -636,7 +636,7 @@ async fn digest(cache: &HashCache, file: &LocalFile) -> io::Result<FileHashes> {
     }
     let store = cache.store.clone();
     let (path, size, modified) = (file.path.clone(), file.size, file.modified);
-    let hashes = tokio::task::spawn_blocking(move || {
+    let hashes = crate::task::spawn_blocking(move || {
         if let (Some(store), Some(modified)) = (&store, modified)
             && let Some(hashes) = store.load(&path, size, modified)
         {

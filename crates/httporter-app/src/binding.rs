@@ -39,6 +39,7 @@ use crate::import::{
 };
 use crate::manage::{self, Manager, Side};
 use crate::publish::{self, Publisher};
+use crate::rt::Rt;
 use crate::selection::{ActivePane, Selection, ToolbarInputs, ToolbarState, toolbar_state};
 use crate::session::{
     LocalView, RemoteView, Session, SiteItemData, SiteProvider, TestResult, Ticket,
@@ -258,7 +259,7 @@ fn clear_status(ui: &AppWindow, pane: ActivePane) {
 
 struct Ctx {
     ui: Weak<AppWindow>,
-    rt: Handle,
+    rt: Rt,
     session: Arc<Session>,
     shown: Arc<Mutex<Shown>>,
     /// The site the cloud pane is opening, while it is on its way.
@@ -318,7 +319,7 @@ impl SheetState {
 #[derive(Clone)]
 pub struct Link {
     ui: Weak<AppWindow>,
-    rt: Handle,
+    rt: Rt,
     session: Arc<Session>,
     shown: Arc<Mutex<Shown>>,
 }
@@ -328,7 +329,7 @@ impl Link {
         &self.ui
     }
 
-    pub fn rt(&self) -> &Handle {
+    pub fn rt(&self) -> &Rt {
         &self.rt
     }
 
@@ -1241,6 +1242,7 @@ fn install_with(
     session: Session,
     engines: Option<Engines>,
 ) -> (Arc<Session>, Option<Arc<Transfers>>, Link, Rc<Ctx>) {
+    let rt = Rt::new(rt);
     let regions: Vec<SharedString> = REGIONS.iter().map(|(_, city)| (*city).into()).collect();
     ui.set_region_names(ModelRc::new(VecModel::from(regions)));
     let session = Arc::new(session);

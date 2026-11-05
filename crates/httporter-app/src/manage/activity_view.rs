@@ -150,7 +150,7 @@ pub fn site_removed(name: &str) {
 
 /// Logs every transfer job that ends (cancelled ones aside). The engine's channel drops the
 /// oldest events for a reader that lags; those are not logged.
-fn spawn_engine_events(rt: &tokio::runtime::Handle, transfers: Arc<Transfers>) {
+fn spawn_engine_events(rt: &crate::rt::Rt, transfers: Arc<Transfers>) {
     rt.spawn(async move {
         let mut events = transfers.engine().events();
         loop {

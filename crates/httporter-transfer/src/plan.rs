@@ -448,7 +448,7 @@ fn outermost(entries: &[Entry]) -> Vec<&Entry> {
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ProviderError> {
-    tokio::task::spawn_blocking(work)
+    crate::task::spawn_blocking(work)
         .await
         .map_err(|e| ProviderError::Permanent(format!("planning stopped: {e}")))
 }
@@ -772,7 +772,7 @@ fn compared_by(checksum: Option<&Checksum>) -> CompareBy {
 }
 
 async fn hash_local(path: PathBuf) -> io::Result<FileHashes> {
-    tokio::task::spawn_blocking(move || hash_file(&path))
+    crate::task::spawn_blocking(move || hash_file(&path))
         .await
         .unwrap_or_else(|e| Err(io::Error::other(e)))
 }

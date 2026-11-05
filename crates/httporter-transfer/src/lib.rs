@@ -18,6 +18,7 @@ mod plan;
 mod publish;
 mod rate;
 mod search;
+mod task;
 
 pub use bucket::TokenBucket;
 pub use compare::{

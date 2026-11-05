@@ -26,6 +26,7 @@ mod import;
 mod local_fs;
 mod manage;
 mod publish;
+mod rt;
 mod selection;
 mod session;
 mod settings_view;

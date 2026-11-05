@@ -803,7 +803,7 @@ pub fn install(ui: &AppWindow, m: &Arc<Manager>) {
 fn restore_view(ui: &AppWindow, m: &Manager) {
     let (weak, session) = (ui.as_weak(), m.session.clone());
     m.link.rt().spawn(async move {
-        let Ok(state) = tokio::task::spawn_blocking(move || session.ui_state()).await else {
+        let Ok(state) = crate::rt::spawn_blocking(move || session.ui_state()).await else {
             return;
         };
         let _ = weak.upgrade_in_event_loop(move |ui| {

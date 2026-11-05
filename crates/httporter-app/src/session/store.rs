@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use httporter_core::{ConflictPolicy, SiteId, TransferSettings};
 use httporter_platform::{SETTINGS_TRANSFERS, Store, site_conflicts_key};
-use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
 use super::{Session, blocking, lock};
+use crate::rt::Rt;
 
 impl Session {
     /// The Transfers settings in use: as stored when the session started (the defaults when
@@ -24,7 +24,7 @@ impl Session {
     /// another end up with the newest stored, whatever order their threads run in.
     pub fn save_settings(
         &self,
-        rt: &Handle,
+        rt: &Rt,
         settings: TransferSettings,
     ) -> JoinHandle<Result<(), String>> {
         let (store, pending) = (self.store.clone(), self.pending_settings.clone());

@@ -62,7 +62,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> io::Result<T> + Send + 'static,
 {
-    match tokio::task::spawn_blocking(f).await {
+    match crate::task::spawn_blocking(f).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(LocalError::Io(error)),
         Err(_) => Err(LocalError::Stopped),
