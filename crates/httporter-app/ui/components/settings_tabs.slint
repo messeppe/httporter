@@ -6,7 +6,7 @@
 // properties and reports each edit; the app (`src/manage/settings_tabs.rs`) checks it, stores it
 // and draws the answer, with a message under the field it is about.
 
-import { ScrollView } from "std-widgets.slint";
+import { AboutSlint, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Activation, CapsuleButton } from "buttons.slint";
@@ -16,10 +16,11 @@ import { VCenter } from "layout.slint";
 import { SiteSettingsData, SiteSettingsRow } from "../types.slint";
 
 // The pieces below are the Transfers tab's (`settings_window.slint`), which that file keeps to
-// itself: it imports this one, so this one cannot import from it.
+// itself: it imports this one, so this one cannot import from it. They are exported for
+// Settings › Security (`security_tab.slint`, I5).
 
 // A titled block of rows (mockup `.sb-sec` over a `.group`).
-component Section inherits VerticalLayout {
+export component Section inherits VerticalLayout {
     in property <string> title;
 
     spacing: 6px;
@@ -38,7 +39,7 @@ component Section inherits VerticalLayout {
 }
 
 // The rounded box around the rows of a section (mockup `.group`).
-component Group inherits Rectangle {
+export component Group inherits Rectangle {
     background: Theme.content;
     border-radius: Theme.radius-md;
     border-width: 0.5px;
@@ -51,7 +52,7 @@ component Group inherits Rectangle {
 
 // One row of a group (mockup `.group-row`): what the setting is called and, in small type under
 // it, what it does; its controls at the right. `error` is a red line under the explanation.
-component GroupRow inherits Rectangle {
+export component GroupRow inherits Rectangle {
     in property <string> title;
     in property <string> help;
     in property <string> error;
@@ -107,7 +108,7 @@ component GroupRow inherits Rectangle {
 }
 
 // On/off switch (mockup `.switch`: 38 x 22 px). Space toggles it.
-component Switch inherits Rectangle {
+export component Switch inherits Rectangle {
     in property <string> label;
     in-out property <bool> checked: false;
     out property <bool> has-focus: key-focus.has-focus;
@@ -177,14 +178,14 @@ component Switch inherits Rectangle {
 }
 
 // A note under the groups of a tab, in small type.
-component Note inherits Text {
+export component Note inherits Text {
     color: Theme.label2;
     font-size: Theme.font-small;
     wrap: word-wrap;
 }
 
 // The padding and spacing of a tab's column of sections (as Transfers).
-component TabColumn inherits VerticalLayout {
+export component TabColumn inherits VerticalLayout {
     padding-left: 24px;
     padding-right: 24px;
     padding-top: 20px;
@@ -195,7 +196,8 @@ component TabColumn inherits VerticalLayout {
 
 // ---- General ----
 
-// Appearance, the start view, Restore tabs, Ask before previewing big files, the preview cache.
+// Appearance, the start view, Restore tabs, Ask before previewing big files, the preview cache;
+// the tray, the update check and About (I5, T4).
 export component GeneralTab inherits Rectangle {
     // 0 system, 1 light, 2 dark.
     in-out property <int> appearance;
@@ -206,6 +208,19 @@ export component GeneralTab inherits Rectangle {
     in property <string> preview-cache-text;
     callback clear-preview-cache();
     callback edited();
+    // ---- I5 (T4) ----
+    // Keep running in the tray when the window is closed during transfers.
+    in-out property <bool> tray: true;
+    // The opt-in update check at start; `updates-available` is false when the build has no
+    // release address, and `updates-note` is the last check's result.
+    in-out property <bool> check-updates: false;
+    in property <bool> updates-available: false;
+    in property <string> updates-note;
+    callback check-now();
+    // About: the version, and THIRD-PARTY-NOTICES.txt beside the exe (when it is there).
+    in property <string> app-version;
+    in property <bool> licenses-available: false;
+    callback open-licenses();
 
     ScrollView {
         TabColumn {
@@ -278,6 +293,73 @@ export component GeneralTab inherits Rectangle {
 
             Note {
                 text: @tr("Previews and thumbnails not used for 7 days are removed at start.");
+            }
+
+            Section {
+                title: @tr("Tray");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Keep running in the tray when the window is closed during transfers");
+                        last: true;
+
+                        Switch {
+                            label: @tr("Keep running in the tray when the window is closed during transfers");
+                            checked <=> root.tray;
+                            toggled => { root.edited(); }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                title: @tr("Updates");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Check for updates at start");
+
+                        Switch {
+                            label: @tr("Check for updates at start");
+                            checked <=> root.check-updates;
+                            toggled => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Check now");
+                        help: root.updates-note;
+                        last: true;
+
+                        CapsuleButton {
+                            text: @tr("Check Now");
+                            enabled: root.updates-available;
+                            clicked => { root.check-now(); }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                title: @tr("About");
+
+                Group {
+                    GroupRow {
+                        title: @tr("HTTPorter {}", root.app-version);
+                        help: @tr("Free software under the MIT or Apache-2.0 license");
+                        last: true;
+
+                        CapsuleButton {
+                            text: @tr("Third-Party Licenses…");
+                            enabled: root.licenses-available;
+                            clicked => { root.open-licenses(); }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: center;
+
+                    AboutSlint { }
+                }
             }
         }
     }

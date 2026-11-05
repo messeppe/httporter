@@ -53,10 +53,11 @@ pub enum Side {
 /// view keeps its own state here, in its own file's type; the views read the fields.
 #[allow(dead_code)] // T4–T9 read the fields.
 pub struct Manager {
-    session: Arc<Session>,
-    transfers: Arc<Transfers>,
-    publisher: Arc<Publisher>,
-    link: Link,
+    // Crate-wide for the I5 modules (`window`, `comfort`, `system`).
+    pub(crate) session: Arc<Session>,
+    pub(crate) transfers: Arc<Transfers>,
+    pub(crate) publisher: Arc<Publisher>,
+    pub(crate) link: Link,
     inspector: Mutex<inspector_view::InspectorState>,
     quicklook: Mutex<quicklook_view::QuickLookState>,
     edits: Mutex<edit::Edits>,

@@ -10,6 +10,11 @@ export global Theme {
     in-out property <int> appearance: 0;
     out property <bool> dark: appearance == 2 || (appearance == 0 && Palette.color-scheme == ColorScheme.dark);
 
+    // Windows' text size (Settings › Accessibility › Text size, 1.0 to 2.25) and "Animation
+    // effects": the app sets both at start from `win::text_scale()` / `win::animations_enabled()`.
+    in property <float> text-scale: 1.0;
+    in property <bool> motion: true;
+
     // Accent. `accent` is for fills behind white text; `accent-text` is the accent used as text.
     out property <color> accent: #0071e3;
     out property <color> accent-text: dark ? #5aa9ff : #0066cc;

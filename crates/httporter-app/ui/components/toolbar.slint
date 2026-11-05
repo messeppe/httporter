@@ -1,4 +1,5 @@
-// Toolbar row under the standard Windows title bar (mockup `.titlebar`, without the caption buttons).
+// The toolbar row (mockup `.titlebar`), which is also the window's title bar (I5, T2): the caption
+// buttons sit at its right end, and its empty background drags the window.
 
 import { LineEdit } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
@@ -6,6 +7,7 @@ import { Icons } from "../icons.slint";
 import { ToolButton, CapsuleButton } from "buttons.slint";
 import { ConnectionPill } from "chips.slint";
 import { VCenter } from "layout.slint";
+import { CaptionButtons } from "caption_buttons.slint";
 
 export component Toolbar inherits Rectangle {
     in property <string> title;
@@ -71,6 +73,26 @@ export component Toolbar inherits Rectangle {
     callback search-submitted(string);
     callback search-cancel();
 
+    // ---- The title bar (I5, T2) ----
+    // The window is maximized or active, and the app-drawn maximize button is hovered or pressed
+    // (Windows reports those, see `caption_buttons.slint`).
+    in property <bool> window-maximized: false;
+    in property <bool> window-active: true;
+    in property <bool> caption-max-hovered: false;
+    in property <bool> caption-max-pressed: false;
+    // Where the maximize button is, in window coordinates and logical pixels.
+    out property <length> caption-max-x: captions.max-button-x;
+    out property <length> caption-max-y: captions.max-button-y;
+    out property <length> caption-max-width: captions.max-button-width;
+    out property <length> caption-max-height: captions.max-button-height;
+    callback caption-minimize();
+    callback caption-toggle-maximize();
+    callback caption-close();
+    // A press on the empty toolbar (drag the window), and a right-click there (the system menu,
+    // at that point in window coordinates).
+    callback caption-drag();
+    callback caption-menu(length, length);
+
     // Ctrl+F.
     public function focus-search() {
         if (root.search-available && !root.profile-page) {
@@ -89,7 +111,22 @@ export component Toolbar inherits Rectangle {
         background: Theme.sep;
     }
 
+    // The empty toolbar is the window's caption: a press drags the window, a double-click
+    // maximizes or restores it, a right-click opens the system menu. It lies under the controls,
+    // which keep their own presses.
+    caption-area := TouchArea {
+        double-clicked => { root.caption-toggle-maximize(); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.caption-drag();
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                root.caption-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+
     HorizontalLayout {
+        width: parent.width - captions.width;
         padding-left: 14px;
         padding-right: 14px;
         spacing: 10px;
@@ -367,5 +404,18 @@ export component Toolbar inherits Rectangle {
                 clicked => { root.publish(); }
             }
         }
+    }
+
+    captions := CaptionButtons {
+        x: parent.width - self.width;
+        y: 0px;
+        height: parent.height;
+        maximized: root.window-maximized;
+        active: root.window-active;
+        max-hovered: root.caption-max-hovered;
+        max-pressed: root.caption-max-pressed;
+        minimize => { root.caption-minimize(); }
+        toggle-maximize => { root.caption-toggle-maximize(); }
+        close => { root.caption-close(); }
     }
 }

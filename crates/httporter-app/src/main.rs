@@ -18,6 +18,7 @@ use transfers::Transfers;
 
 mod add_site;
 mod binding;
+mod comfort;
 mod copy;
 mod drawer_view;
 mod drop_hook;
@@ -34,8 +35,10 @@ mod sheets_view;
 mod single_instance;
 mod site_hub;
 mod sort;
+mod system;
 mod transfers;
 mod viewmodel;
+mod window;
 
 #[cfg(test)]
 mod add_site_tests;
@@ -47,6 +50,10 @@ mod lint_tests;
 mod pane_tests;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // A reset confirmed last time (Settings › Security) wipes everything before anything opens it:
+    // before the store, and before the single-instance check, since it waits for the instance
+    // that asked for it to let go of the mutex. Without its marker it does nothing.
+    system::reset::run_pending_reset();
     // A second HTTPorter would take the first one's live queue for unfinished work (review
     // M10): it shows the first one's window instead.
     if !single_instance::first() {
@@ -124,6 +131,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         copy::describe_transfer_error,
     );
     let ui = AppWindow::new()?;
+    // Windows' text size and "Animation effects" (read again when they change, T5).
+    ui.global::<Theme>().set_text_scale(win::text_scale());
+    ui.global::<Theme>().set_motion(win::animations_enabled());
     let transfers = binding::install_app(
         &ui,
         rt.handle().clone(),
@@ -131,7 +141,19 @@ fn run() -> Result<(), Box<dyn Error>> {
         binding::Engines { engine, journal },
     );
     install_drop(&ui, transfers.clone());
-    ui.run()?;
+    // I5: the window chrome, comfort (tray, toasts, undo, shortcuts) and system (security, reset,
+    // updates, about), over what the installs above wired.
+    if let Some(manager) = manage::manager() {
+        window::install(&ui, &manager.session);
+        comfort::install(&ui, &manager, &transfers);
+        system::install(&ui, &manager, &transfers);
+    }
+    // Run until told to quit rather than until the last window hides, so that the window can hide
+    // into the tray while transfers carry on (T3). Closing the window quits as before
+    // (`transfers::install_close`).
+    ui.show()?;
+    slint::run_event_loop_until_quit()?;
+    ui.hide()?;
     // Edited files still waiting for their re-upload go first.
     if let Some(manager) = manage::manager() {
         manager.flush_edits();

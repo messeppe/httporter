@@ -30,7 +30,9 @@ pub use journal::{JobRecord, JobState, Journal, JournalError, JournalUpdate, Mem
 pub use mime::content_type_for;
 pub use mock::{MockOp, MockProvider};
 pub use path::{PathError, RemotePath, encode_segment};
-pub use places::{Favorite, PlaceKind, TabState, UI_STATE_KEY, UiState, ViewMode};
+pub use places::{
+    ColumnWidths, Favorite, PlaceKind, TabState, UI_STATE_KEY, UiState, ViewMode, WindowPlacement,
+};
 pub use provider::{
     BodyMeter, ByteStream, FileStamp, Listing, META_PART_SIZE, META_SHA256, MultipartProgress,
     ObjectInfo, PartJournal, RequestInfo, StorageProvider, UploadOptions, UploadSource,

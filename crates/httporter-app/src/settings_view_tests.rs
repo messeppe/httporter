@@ -358,9 +358,8 @@ fn only_transfers_tab_has_controls() {
         // Every tab can be chosen, so the note can be read.
         assert_ne!(button.accessible_enabled(), Some(false), "{tab}");
         press(&w, AccessibleRole::Tab, tab);
-        // Only Security is still to come (I5); General, Sites and Advanced have their own (I4).
-        let note = usize::from(tab == "Security");
-        assert_eq!(count(&w, NOTE), note, "{tab}");
+        // Every tab has its own controls now: General, Sites and Advanced (I4), Security (I5).
+        assert_eq!(count(&w, NOTE), 0, "{tab}");
         for control in TRANSFERS_CONTROLS {
             assert_eq!(count(&w, control), 0, "{tab}: {control}");
         }

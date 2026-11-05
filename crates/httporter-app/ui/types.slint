@@ -435,3 +435,12 @@ export struct SiteSettingsData {
     download-choice: string,
     error: string,
 }
+
+// One toast of the toast stack (I5). `action` is the button's label, "" for none; `kind`: 0 info,
+// 1 done, 2 warning.
+export struct ToastData {
+    id: int,
+    text: string,
+    action: string,
+    kind: int,
+}

@@ -1,0 +1,73 @@
+// Toasts (I5; T3 finishes them, §8.7.5): short notes at the bottom centre of the window, over the
+// transfer drawer, newest at the bottom. At most three; each goes after 4 s, or 8 s when it has
+// an action ("Undo", "View Release"). The app keeps the list and its timers (`src/comfort/`).
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { CapsuleButton } from "buttons.slint";
+import { ToastData } from "../types.slint";
+
+component Toast inherits Rectangle {
+    in property <ToastData> data;
+    callback action();
+    callback dismissed();
+
+    background: Theme.sheet;
+    border-radius: Theme.radius-md;
+    border-width: 0.5px;
+    border-color: Theme.sep-strong;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: Theme.shadow-sheet;
+    accessible-role: text;
+    accessible-label: root.data.text;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 8px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 10px;
+
+        if root.data.kind != 0: VerticalLayout {
+            alignment: center;
+
+            Image {
+                source: root.data.kind == 1 ? Icons.check : Icons.warn;
+                colorize: root.data.kind == 1 ? Theme.green : Theme.orange;
+                width: 14px;
+                height: 14px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.data.text;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.data.action != "": CapsuleButton {
+            text: root.data.action;
+            clicked => { root.action(); }
+        }
+    }
+}
+
+export component ToastStack inherits VerticalLayout {
+    in property <[ToastData]> toasts;
+    // A toast's action was pressed, or it was dismissed (Esc): by its id.
+    callback action(int);
+    callback dismissed(int);
+
+    spacing: 8px;
+    alignment: end;
+
+    for toast in root.toasts: Toast {
+        data: toast;
+        min-height: 40px;
+        action => { root.action(toast.id); }
+        dismissed => { root.dismissed(toast.id); }
+    }
+}

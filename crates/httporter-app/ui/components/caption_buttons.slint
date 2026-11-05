@@ -1,0 +1,133 @@
+// The window's caption buttons (I5; T2 finishes them): Minimize, Maximize or Restore, and Close,
+// at the right end of the row that is the title bar. 46 px wide each, as tall as the row; Close
+// turns red when hovered. The glyphs are 10 px paths in the manner of Segoe Fluent Icons.
+//
+// Over the maximize button Windows answers `HTMAXBUTTON` (for the Windows 11 Snap Layouts
+// flyout), so the mouse messages there never reach Slint: the app tells the button it is hovered
+// or pressed (`max-hovered`, `max-pressed`), and reads where it is (`max-button-x` …
+// `max-button-height`).
+
+import { Theme } from "../theme.slint";
+
+component CaptionButton inherits Rectangle {
+    in property <string> label;
+    // Close: a red background with a white glyph when hovered.
+    in property <bool> danger: false;
+    // The window is active: inactive windows dim their glyphs.
+    in property <bool> active: true;
+    // Hover and press reported by the app (the maximize button, see above).
+    in property <bool> hovered-outside: false;
+    in property <bool> pressed-outside: false;
+    out property <bool> hovered: touch.has-hover || root.hovered-outside;
+    out property <bool> pressed: touch.pressed || root.pressed-outside;
+    out property <color> glyph: root.danger && root.hovered ? #ffffff : (root.active ? Theme.label : Theme.label3);
+    callback clicked();
+
+    width: 46px;
+    background: root.danger && root.hovered ? (root.pressed ? #c42b1ce6 : #c42b1c) : (root.pressed ? Theme.sel-quiet : (root.hovered ? Theme.hover : transparent));
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    @children
+}
+
+export component CaptionButtons inherits Rectangle {
+    // The window is maximized: the middle button restores.
+    in property <bool> maximized: false;
+    in property <bool> active: true;
+    in property <bool> max-hovered: false;
+    in property <bool> max-pressed: false;
+    // Only Close (the Settings window).
+    in property <bool> close-only: false;
+    callback minimize();
+    callback toggle-maximize();
+    callback close();
+    // Where the maximize button is, in window coordinates and logical pixels (0 wide with
+    // `close-only`).
+    out property <length> max-button-x: root.absolute-position.x + maximize.x;
+    out property <length> max-button-y: root.absolute-position.y + maximize.y;
+    out property <length> max-button-width: root.close-only ? 0px : maximize.width;
+    out property <length> max-button-height: root.close-only ? 0px : maximize.height;
+
+    width: root.close-only ? 46px : 3 * 46px;
+
+    if !root.close-only: CaptionButton {
+        x: 0px;
+        height: root.height;
+        label: @tr("Minimize");
+        active: root.active;
+        clicked => { root.minimize(); }
+
+        Path {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 10px;
+            height: 10px;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 0 5 L 10 5";
+            stroke: parent.glyph;
+            stroke-width: 1px;
+        }
+    }
+
+    maximize := CaptionButton {
+        x: 46px;
+        height: root.height;
+        visible: !root.close-only;
+        label: root.maximized ? @tr("Restore") : @tr("Maximize");
+        active: root.active;
+        hovered-outside: root.max-hovered;
+        pressed-outside: root.max-pressed;
+        clicked => { root.toggle-maximize(); }
+
+        if !root.maximized: Path {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 10px;
+            height: 10px;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 0.5 0.5 L 9.5 0.5 L 9.5 9.5 L 0.5 9.5 Z";
+            stroke: parent.glyph;
+            stroke-width: 1px;
+        }
+        if root.maximized: Path {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 10px;
+            height: 10px;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 2.5 2.5 L 2.5 0.5 L 9.5 0.5 L 9.5 7.5 L 7.5 7.5 M 0.5 2.5 L 7.5 2.5 L 7.5 9.5 L 0.5 9.5 Z";
+            stroke: parent.glyph;
+            stroke-width: 1px;
+        }
+    }
+
+    CaptionButton {
+        x: root.close-only ? 0px : 92px;
+        height: root.height;
+        label: @tr("Close");
+        danger: true;
+        active: root.active;
+        clicked => { root.close(); }
+
+        Path {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 10px;
+            height: 10px;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+            stroke: parent.glyph;
+            stroke-width: 1px;
+        }
+    }
+}

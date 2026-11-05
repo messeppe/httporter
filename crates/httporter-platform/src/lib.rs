@@ -7,7 +7,10 @@ pub mod win;
 
 pub use activity::{ActivityLog, LOG_FILE_BYTES, LOG_FILES, default_log_dir};
 pub use cache::{cache_bytes, cache_dir, prune_cache};
-pub use creds::{CredError, CredentialKey, CredentialStore, KeyringStore, MemoryStore, SiteSecret};
+pub use creds::{
+    CredError, CredentialKey, CredentialKind, CredentialStore, KeyringStore, MemoryStore,
+    SiteSecret,
+};
 pub use journal::SqliteJournal;
 pub use store::{
     AccountRecord, SETTINGS_TRANSFERS, SiteList, Store, StoreError, default_db_path,

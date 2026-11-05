@@ -1664,6 +1664,8 @@ fn settings_window(transfers: &Arc<Transfers>) -> Option<SettingsWindow> {
         move |settings| transfers.apply_settings(settings)
     });
     crate::manage::settings_tabs::wire(&window);
+    crate::window::wire_settings(&window);
+    crate::system::wire_settings(&window);
     let weak = window.as_weak();
     window.window().on_close_requested(move || {
         if let Some(window) = weak.upgrade() {
@@ -1675,7 +1677,8 @@ fn settings_window(transfers: &Arc<Transfers>) -> Option<SettingsWindow> {
 }
 
 /// Closing the window while transfers run or wait asks first (the quit alert). Closing it hides
-/// the Settings window too, so the event loop ends.
+/// the Settings window too and ends the event loop (`main` runs it until it is told to quit, so
+/// that a hidden window can keep it going).
 fn install_close(ui: &AppWindow, transfers: &Arc<Transfers>, settings: SettingsSlot) {
     let weak = ui.as_weak();
     let close_settings = {
@@ -1691,6 +1694,7 @@ fn install_close(ui: &AppWindow, transfers: &Arc<Transfers>, settings: SettingsS
         let close_settings = close_settings.clone();
         move || {
             let Some(ui) = weak.upgrade() else {
+                let _ = slint::quit_event_loop();
                 return CloseRequestResponse::HideWindow;
             };
             if transfers.must_ask_before_closing() {
@@ -1706,6 +1710,7 @@ fn install_close(ui: &AppWindow, transfers: &Arc<Transfers>, settings: SettingsS
                 transfers.quit(Quit::Pause);
                 return CloseRequestResponse::KeepWindowShown;
             }
+            let _ = slint::quit_event_loop();
             CloseRequestResponse::HideWindow
         }
     });

@@ -45,6 +45,27 @@ pub enum ViewMode {
     Inspector,
 }
 
+/// Where the main window was left: its normal (restored) outer rectangle in physical pixels, and
+/// whether it was maximized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
+}
+
+/// The widths of the list's Size, Modified and Status columns, in logical pixels; 0 is the
+/// column's default width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnWidths {
+    pub size: u16,
+    pub modified: u16,
+    pub status: u16,
+}
+
 /// How the window was left and the General settings, kept as JSON under [`UI_STATE_KEY`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -60,6 +81,15 @@ pub struct UiState {
     pub restore_tabs: bool,
     /// On by default.
     pub ask_big_preview: bool,
+    /// None until the window has been closed once.
+    pub window: Option<WindowPlacement>,
+    pub columns: ColumnWidths,
+    /// "Keep running in the tray when the window is closed during transfers": on by default.
+    pub tray: bool,
+    /// The update check at start: off until the user turns it on.
+    pub check_updates: bool,
+    /// When the release feed was last read, in Unix seconds; 0 is never.
+    pub last_update_check: i64,
 }
 
 impl Default for UiState {
@@ -73,6 +103,11 @@ impl Default for UiState {
             appearance: 0,
             restore_tabs: true,
             ask_big_preview: true,
+            window: None,
+            columns: ColumnWidths::default(),
+            tray: true,
+            check_updates: false,
+            last_update_check: 0,
         }
     }
 }

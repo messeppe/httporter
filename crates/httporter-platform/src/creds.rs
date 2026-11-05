@@ -71,6 +71,37 @@ impl CredentialKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// What the key is for, read from its form.
+    pub fn kind(&self) -> CredentialKind {
+        if self.0.starts_with(SITE_PREFIX) {
+            CredentialKind::Site
+        } else if self.0.starts_with(ACCOUNT_PREFIX) {
+            CredentialKind::Account
+        } else {
+            CredentialKind::Other
+        }
+    }
+
+    /// The site or account id the key is for; for [`CredentialKind::Other`], the whole key.
+    pub fn id(&self) -> &str {
+        self.0
+            .strip_prefix(SITE_PREFIX)
+            .or_else(|| self.0.strip_prefix(ACCOUNT_PREFIX))
+            .unwrap_or(&self.0)
+    }
+}
+
+const SITE_PREFIX: &str = "HTTPorter/site/";
+const ACCOUNT_PREFIX: &str = "HTTPorter/account/";
+
+/// What a stored secret belongs to: a site, a provider account, or something else HTTPorter
+/// wrote under its service name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CredentialKind {
+    Site,
+    Account,
+    Other,
 }
 
 /// The secret a site signs in with, as one credential-store value.
@@ -150,6 +181,8 @@ pub trait CredentialStore: Send + Sync {
     fn get(&self, key: &CredentialKey) -> Result<Option<String>, CredError>;
     /// Deleting a key that does not exist is not an error.
     fn delete(&self, key: &CredentialKey) -> Result<(), CredError>;
+    /// Every target this app wrote (service "HTTPorter"), and none of another app's.
+    fn keys(&self) -> Result<Vec<CredentialKey>, CredError>;
 }
 
 /// Windows Credential Manager, via the `keyring` crate.
@@ -185,6 +218,10 @@ impl CredentialStore for KeyringStore {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn keys(&self) -> Result<Vec<CredentialKey>, CredError> {
+        todo!("T4")
     }
 }
 
@@ -226,6 +263,18 @@ impl CredentialStore for MemoryStore {
     fn delete(&self, key: &CredentialKey) -> Result<(), CredError> {
         self.secrets().remove(key.as_str());
         Ok(())
+    }
+
+    fn keys(&self) -> Result<Vec<CredentialKey>, CredError> {
+        let prefix = format!("{SERVICE}/");
+        let mut keys: Vec<CredentialKey> = self
+            .secrets()
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .map(|key| CredentialKey(key.clone()))
+            .collect();
+        keys.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(keys)
     }
 }
 

@@ -1,0 +1,79 @@
+// Settings › Security (I5; T4 finishes it): the passwords and keys HTTPorter saved in Windows
+// Credential Manager, and Reset HTTPorter (§11). Like the other tabs it only draws its properties
+// and reports each press; the app (`src/system/`) counts, removes and resets.
+
+import { ScrollView } from "std-widgets.slint";
+import { CapsuleButton } from "buttons.slint";
+import { Group, GroupRow, Note, Section, TabColumn } from "settings_tabs.slint";
+
+export component SecurityTab inherits Rectangle {
+    // What Credential Manager holds for HTTPorter: site secrets, account keys, and keys whose site
+    // or account no longer exists.
+    in property <int> site-keys;
+    in property <int> account-keys;
+    in property <int> unused-keys;
+    // The result of Remove Unused Keys, empty for none.
+    in property <string> security-message;
+    // Reset may be pressed (no transfers or edits pending); `reset-note` says why not.
+    in property <bool> reset-allowed;
+    in property <string> reset-note;
+    callback remove-unused-keys();
+    callback open-credential-manager();
+    // Reset HTTPorter… was pressed (the app asks first), and the reset was confirmed.
+    callback reset-requested();
+    callback reset-confirmed();
+
+    ScrollView {
+        TabColumn {
+            Section {
+                title: @tr("Saved passwords and keys");
+
+                Group {
+                    GroupRow {
+                        title: @tr("{n} site" | "{n} sites" % root.site-keys);
+                        help: @tr("Stored in Windows Credential Manager, never in HTTPorter's files.");
+                        error: root.security-message;
+
+                        CapsuleButton {
+                            text: @tr("Remove Unused Keys");
+                            enabled: root.unused-keys > 0;
+                            clicked => { root.remove-unused-keys(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("{n} account key" | "{n} account keys" % root.account-keys);
+                        last: true;
+
+                        CapsuleButton {
+                            text: @tr("Open Credential Manager");
+                            clicked => { root.open-credential-manager(); }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                title: @tr("Reset");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Reset HTTPorter");
+                        help: root.reset-allowed ? @tr("Removes all sites, settings and history from this PC.") : root.reset-note;
+                        last: true;
+
+                        CapsuleButton {
+                            text: @tr("Reset HTTPorter…");
+                            destructive: true;
+                            enabled: root.reset-allowed;
+                            clicked => { root.reset-requested(); }
+                        }
+                    }
+                }
+            }
+
+            Note {
+                text: @tr("Files on your sites are not touched.");
+            }
+        }
+    }
+}

@@ -32,6 +32,8 @@ import { TabStrip } from "components/tab_strip.slint";
 import { SearchFilterBar } from "components/search_bar.slint";
 import { MoveSheet, MoveWarningSheet, PresignSheet, RenameSheet } from "components/manage_sheets.slint";
 import { ActivitySheet } from "components/activity.slint";
+import { ToastData } from "types.slint";
+import { ToastStack } from "components/toast.slint";
 
 export { FileKind, FileRow, PaneBounds, ProviderTile, S3Errors, SiteDraft, SiteItem, Theme, ZoneChoice }
 export { TransferRow }
@@ -39,6 +41,7 @@ export { ConflictContents, ConflictRow }
 export { SettingsWindow }
 export { CompareStatus, CompareSummary, HistoryDetail, HistoryRow, PlanGroup, PlanRow, ProfileDraft, ProfileItem, ProfileView, PublishSheetData }
 export { ActivityFilterData, ActivityRow, CodeLine, CodeSpan, EditConflictData, EditItem, InspectorData, MoveData, MoveWarningData, PaletteIcon, PaletteItem, PlaceItem, PresignData, QuickLookData, RenameData, SearchFilters, SiteSettingsData, SiteSettingsRow, TabItem }
+export { ToastData }
 
 // Error message shown above the panes. When the open site's error is one editing the site fixes
 // (no password saved, a sign-in that failed), it offers Edit Site… and Remove Site….
@@ -606,6 +609,45 @@ export component AppWindow inherits Window {
 
     // The open site is read-only (T8): a banner like the others, while not empty.
     in property <string> read-only-banner-text;
+
+    // ---- I5 ----
+    // The window chrome (T2): the toolbar row is the title bar. The app reports the window's state
+    // and the maximize button's hover and press (Windows answers HTMAXBUTTON over it, for Snap
+    // Layouts), and reads where that button is: absolute, logical. `caption-layout-changed` says
+    // it moved; `caption-menu` is the system menu at a point, in window coordinates.
+    in property <bool> window-maximized;
+    in property <bool> window-active: true;
+    in property <bool> caption-max-hovered;
+    in property <bool> caption-max-pressed;
+    out property <length> caption-max-x: toolbar.caption-max-x;
+    out property <length> caption-max-y: toolbar.caption-max-y;
+    out property <length> caption-max-width: toolbar.caption-max-width;
+    out property <length> caption-max-height: toolbar.caption-max-height;
+    callback caption-minimize();
+    callback caption-toggle-maximize();
+    callback caption-close();
+    callback caption-drag();
+    callback caption-menu(length, length);
+    callback caption-layout-changed();
+    changed caption-max-x => { root.caption-layout-changed(); }
+    changed caption-max-y => { root.caption-layout-changed(); }
+    changed caption-max-width => { root.caption-layout-changed(); }
+    changed caption-max-height => { root.caption-layout-changed(); }
+    // Comfort (T3): the toasts (a toast's action or its dismissal, by id), undo (Ctrl+Z), reopen
+    // the last closed tab (Ctrl+Shift+T), the other pane (F6) and the parent folder (Alt+Up).
+    in property <[ToastData]> toasts;
+    callback toast-action(int);
+    callback toast-dismissed(int);
+    callback undo();
+    callback reopen-tab();
+    callback switch-pane();
+    callback go-up();
+    // The list columns' widths (T5; Name takes the rest): the app restores them at start and saves
+    // them on `columns-resized`.
+    in-out property <length> col-size-width: 76px;
+    in-out property <length> col-modified-width: 128px;
+    in-out property <length> col-status-width: 96px;
+    callback columns-resized();
     // M11 (T9): Retry Selected on the drawer's Failed tab.
     callback transfers-retry-selected([int]);
     // The Publish sheet's Flat (0) | Tree (1), its filter and a tree folder opened or closed (T9).
@@ -755,6 +797,41 @@ export component AppWindow inherits Window {
                     remote-pane.focus();
                     return accept;
                 }
+                // Ctrl+Z: undo the last local action (I5).
+                if (ctrl && (event.text == "z" || event.text == "Z")) {
+                    if (!event.repeat) {
+                        root.undo();
+                    }
+                    return accept;
+                }
+                // Ctrl+Shift+T: reopen the tab closed last (I5).
+                if (event.modifiers.control && event.modifiers.shift && !event.modifiers.alt && !event.modifiers.meta && (event.text == "t" || event.text == "T")) {
+                    if (!event.repeat) {
+                        root.reopen-tab();
+                    }
+                    return accept;
+                }
+                // Ctrl+,: Settings (I5).
+                if (ctrl && event.text == ",") {
+                    if (!event.repeat && root.settings-available) {
+                        root.open-settings();
+                    }
+                    return accept;
+                }
+                // Alt+Up: the parent folder of the pane in use (I5).
+                if (event.modifiers.alt && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.shift && event.text == Key.UpArrow) {
+                    if (!event.repeat) {
+                        root.go-up();
+                    }
+                    return accept;
+                }
+                // F6: the other pane (I5).
+                if (bare && event.text == Key.F6) {
+                    if (!event.repeat) {
+                        root.switch-pane();
+                    }
+                    return accept;
+                }
                 // Ctrl+T: a new tab; Ctrl+W: close this one (never the last).
                 if (ctrl && (event.text == "t" || event.text == "T")) {
                     if (!event.repeat) {
@@ -864,6 +941,15 @@ export component AppWindow inherits Window {
                 refresh => { root.refresh(); }
                 search-submitted(text) => { root.search-submitted(text); }
                 search-cancel => { root.search-cancel(); }
+                window-maximized: root.window-maximized;
+                window-active: root.window-active;
+                caption-max-hovered: root.caption-max-hovered;
+                caption-max-pressed: root.caption-max-pressed;
+                caption-minimize => { root.caption-minimize(); }
+                caption-toggle-maximize => { root.caption-toggle-maximize(); }
+                caption-close => { root.caption-close(); }
+                caption-drag => { root.caption-drag(); }
+                caption-menu(x, y) => { root.caption-menu(x, y); }
             }
 
             if root.tabs.length > 1: TabStrip {
@@ -1242,6 +1328,17 @@ export component AppWindow inherits Window {
             font-weight: Theme.weight-semibold;
             vertical-alignment: center;
         }
+    }
+
+    // The toasts (I5, T3): bottom centre, over the transfer drawer, under the sheets.
+    ToastStack {
+        width: min(480px, root.width - 32px);
+        height: self.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - Theme.statusbar-height - 56px;
+        toasts: root.toasts;
+        action(id) => { root.toast-action(id); }
+        dismissed(id) => { root.toast-dismissed(id); }
     }
 
     // On top of everything else, so that it also dims the toolbar and swallows the pointer.

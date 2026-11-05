@@ -1,22 +1,34 @@
-//! Windows services: taskbar progress, notifications, file pickers, clipboard files.
+//! Windows services: taskbar progress, notifications, file pickers, clipboard files, the title
+//! bar, window placement, the tray icon and the accessibility settings.
 //!
 //! The test suite covers only the pure parts (state-to-flag mapping, toast XML, the
 //! registration values). Anything that touches the real desktop (a toast, a picker, the
 //! clipboard, the registry, a taskbar button) is left to a person to check, because running
 //! it from tests would pop windows and notifications up at whoever runs them.
 
+mod a11y;
 mod clipboard;
 mod notify;
 mod pickers;
+mod placement;
 mod shell;
 mod taskbar;
+mod titlebar;
+mod tray;
 mod watch;
 
+pub use a11y::{animations_enabled, text_scale};
 pub use clipboard::{clipboard_files, set_clipboard_text};
 pub use notify::{ensure_app_identity, notify, notify_or_flash};
 pub use pickers::{pick_file, pick_files, pick_folder, pick_save_file};
+pub use placement::{placement, visible_placement};
 pub use shell::{mono_font_family, open_default, open_url, open_with};
 pub use taskbar::{TaskbarProgress, TaskbarState, flash, is_foreground};
+pub use titlebar::{
+    CaptionEvent, CaptionRect, TitleBar, is_maximized, minimize, show_system_menu, start_drag,
+    toggle_maximize,
+};
+pub use tray::{Tray, TrayEvent};
 pub use watch::DirWatcher;
 
 use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};

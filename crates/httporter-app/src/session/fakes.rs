@@ -357,6 +357,11 @@ impl CredentialStore for SpyStore {
         self.note();
         self.inner.delete(key)
     }
+
+    fn keys(&self) -> Result<Vec<CredentialKey>, CredError> {
+        self.note();
+        self.inner.keys()
+    }
 }
 
 pub(crate) fn fixed_now() -> NaiveDateTime {

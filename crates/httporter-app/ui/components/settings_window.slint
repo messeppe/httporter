@@ -1,6 +1,5 @@
-// The Settings window (mockup `Settings.dc.html`): a window of its own with a row of tabs. Only
-// Transfers and Publish have controls in this version; the other tabs show a note, and their
-// buttons stay turned on so that the note can be seen.
+// The Settings window (mockup `Settings.dc.html`): a window of its own with a row of tabs, each
+// with its own controls.
 //
 // Every edit applies at once (the window has no OK button): the window tells its owner through
 // `changed()`, and the owner reads the properties back, checks them and shows a message under the
@@ -16,6 +15,8 @@ import { Segmented } from "sheets.slint";
 import { VCenter } from "layout.slint";
 import { ProfileItem, SiteSettingsData, SiteSettingsRow } from "../types.slint";
 import { AdvancedTab, GeneralTab, SitesTab } from "settings_tabs.slint";
+import { SecurityTab } from "security_tab.slint";
+import { CaptionButtons } from "caption_buttons.slint";
 
 // One tab of the row under the title (mockup: a 82 px button with the icon over its name).
 // Reachable with Tab, activated with Space or Return.
@@ -587,7 +588,7 @@ component PublishTab inherits Rectangle {
 }
 
 export component SettingsWindow inherits Window {
-    // The tabs, in order. Only Transfers (2) and Publish (4) have controls.
+    // The tabs, in order.
     property <[string]> tab-names: [@tr("General"), @tr("Sites"), @tr("Transfers"), @tr("Security"), @tr("Publish"), @tr("Advanced")];
     property <[image]> tab-icons: [Icons.gear, Icons.globe, Icons.updown, Icons.lock, Icons.send, Icons.chip];
 
@@ -658,6 +659,34 @@ export component SettingsWindow inherits Window {
     // A tab was opened (its number), for the app to refresh what it shows.
     callback tab-shown(int);
 
+    // ---- I5 ----
+    // The title row is the window's caption (T2): Close only. A press on its empty part drags the
+    // window, a right-click opens the system menu (at that point, in window coordinates).
+    in property <bool> settings-window-active: true;
+    callback settings-caption-close();
+    callback settings-caption-drag();
+    callback settings-caption-menu(length, length);
+    // General (T4): the tray, the update check and About (see `GeneralTab`).
+    in-out property <bool> tray: true;
+    in-out property <bool> check-updates: false;
+    in property <bool> updates-available: false;
+    in property <string> updates-note;
+    callback check-now();
+    in property <string> app-version;
+    in property <bool> licenses-available: false;
+    callback open-licenses();
+    // Security (T4, see `SecurityTab`).
+    in property <int> site-keys;
+    in property <int> account-keys;
+    in property <int> unused-keys;
+    in property <string> security-message;
+    in property <bool> reset-allowed;
+    in property <string> reset-note;
+    callback remove-unused-keys();
+    callback open-credential-manager();
+    callback reset-requested();
+    callback reset-confirmed();
+
     changed current-tab => {
         if (root.current-tab == 4) {
             root.publish-shown();
@@ -682,6 +711,18 @@ export component SettingsWindow inherits Window {
             accessible-role: tab-list;
             accessible-label: @tr("Settings sections");
 
+            // The empty part of the row is the window's caption (I5, T2): under the tab buttons,
+            // which keep their own presses.
+            caption-area := TouchArea {
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        root.settings-caption-drag();
+                    } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                        root.settings-caption-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                    }
+                }
+            }
+
             HorizontalLayout {
                 padding-left: 12px;
                 padding-right: 12px;
@@ -703,20 +744,31 @@ export component SettingsWindow inherits Window {
                 height: 1px;
                 background: Theme.sep;
             }
+
+            CaptionButtons {
+                x: parent.width - self.width;
+                y: 0px;
+                height: 32px;
+                close-only: true;
+                active: root.settings-window-active;
+                close => { root.settings-caption-close(); }
+            }
         }
 
-        if root.current-tab == 3: Rectangle {
+        if root.current-tab == 3: SecurityTab {
             vertical-stretch: 1;
             accessible-role: tab-panel;
-            accessible-label: root.tab-names[root.current-tab];
-
-            Text {
-                text: @tr("These settings arrive in a later version.");
-                color: Theme.label2;
-                font-size: Theme.font-body;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
+            accessible-label: root.tab-names[3];
+            site-keys: root.site-keys;
+            account-keys: root.account-keys;
+            unused-keys: root.unused-keys;
+            security-message: root.security-message;
+            reset-allowed: root.reset-allowed;
+            reset-note: root.reset-note;
+            remove-unused-keys => { root.remove-unused-keys(); }
+            open-credential-manager => { root.open-credential-manager(); }
+            reset-requested => { root.reset-requested(); }
+            reset-confirmed => { root.reset-confirmed(); }
         }
 
         if root.current-tab == 2: TransfersTab {
@@ -753,6 +805,14 @@ export component SettingsWindow inherits Window {
             preview-cache-text: root.preview-cache-text;
             clear-preview-cache => { root.clear-preview-cache(); }
             edited => { root.general-edited(); }
+            tray <=> root.tray;
+            check-updates <=> root.check-updates;
+            updates-available: root.updates-available;
+            updates-note: root.updates-note;
+            check-now => { root.check-now(); }
+            app-version: root.app-version;
+            licenses-available: root.licenses-available;
+            open-licenses => { root.open-licenses(); }
         }
 
         if root.current-tab == 1: SitesTab {
