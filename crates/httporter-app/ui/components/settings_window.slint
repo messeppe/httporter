@@ -660,8 +660,9 @@ export component SettingsWindow inherits Window {
     callback tab-shown(int);
 
     // ---- I5 ----
-    // The title row is the window's caption (T2): Close only. A press on its empty part drags the
-    // window, a right-click opens the system menu (at that point, in window coordinates).
+    // The title bar is the window's caption (T2): Close only. A press on its empty part drags the
+    // window, a right-click opens the system menu (at that point, in window coordinates). Its
+    // title dims while the window is not the active one.
     in property <bool> settings-window-active: true;
     callback settings-caption-close();
     callback settings-caption-drag();
@@ -704,15 +705,14 @@ export component SettingsWindow inherits Window {
     min-height: 420px;
 
     VerticalLayout {
-        // The title bar's second half: the tabs.
+        // The title bar (mockup `Settings.dc.html`, I5 T2): a 32 px row with the open tab's name
+        // centred and Close at its right end, over the row of tabs. Its empty parts are the
+        // window's caption: a press drags the window, a right-click opens the system menu. The
+        // tab buttons keep their own presses.
         Rectangle {
             background: Theme.chrome;
-            height: 66px;
-            accessible-role: tab-list;
-            accessible-label: @tr("Settings sections");
+            height: 98px;
 
-            // The empty part of the row is the window's caption (I5, T2): under the tab buttons,
-            // which keep their own presses.
             caption-area := TouchArea {
                 pointer-event(event) => {
                     if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
@@ -723,19 +723,44 @@ export component SettingsWindow inherits Window {
                 }
             }
 
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                padding-top: 2px;
-                padding-bottom: 10px;
-                spacing: 4px;
-                alignment: center;
+            VerticalLayout {
+                // As much padding at the left as Close is wide: the title is centred in the window.
+                HorizontalLayout {
+                    height: 32px;
+                    padding-left: 46px;
+                    padding-right: 46px;
 
-                for name[index] in root.tab-names: TabButton {
-                    text: name;
-                    icon: root.tab-icons[index];
-                    selected: index == root.current-tab;
-                    clicked => { root.current-tab = index; }
+                    Text {
+                        text: root.tab-names[root.current-tab];
+                        color: root.settings-window-active ? Theme.label : Theme.label2;
+                        font-size: Theme.font-body;
+                        font-weight: Theme.weight-semibold;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                Rectangle {
+                    height: 66px;
+                    accessible-role: tab-list;
+                    accessible-label: @tr("Settings sections");
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        padding-top: 2px;
+                        padding-bottom: 10px;
+                        spacing: 4px;
+                        alignment: center;
+
+                        for name[index] in root.tab-names: TabButton {
+                            text: name;
+                            icon: root.tab-icons[index];
+                            selected: index == root.current-tab;
+                            clicked => { root.current-tab = index; }
+                        }
+                    }
                 }
             }
 

@@ -74,6 +74,8 @@ component ErrorBanner inherits Rectangle {
             font-size: Theme.font-body;
             wrap: word-wrap;
             vertical-alignment: center;
+            // Read out at once, as an alert would be (Slint has no "alert" role).
+            accessible-live-region: assertive;
         }
         if root.offer-edit: CapsuleButton {
             text: @tr("Edit Site…");
@@ -945,6 +947,7 @@ export component AppWindow inherits Window {
                 publish => { root.publish(); }
                 toggle-compare => { root.toggle-compare(); }
                 edit-profile => { root.edit-profile(); }
+                sidebar-visible: root.sidebar-visible;
                 toggle-sidebar => { root.sidebar-visible = !root.sidebar-visible; }
                 go-back => { root.go-back(); }
                 go-forward => { root.go-forward(); }
