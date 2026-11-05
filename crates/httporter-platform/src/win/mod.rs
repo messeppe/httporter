@@ -28,7 +28,7 @@ pub use titlebar::{
     CaptionEvent, CaptionRect, TitleBar, is_maximized, minimize, show_system_menu, start_drag,
     toggle_maximize,
 };
-pub use tray::{Tray, TrayEvent};
+pub use tray::{TRAY_SHOW_MESSAGE, TRAY_WINDOW_CLASS, Tray, TrayEvent};
 pub use watch::DirWatcher;
 
 use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};

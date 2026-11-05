@@ -43,8 +43,16 @@ pub enum TrayEvent {
     Quit,
 }
 
-/// The window class of the icon's window.
+/// The window class of the icon's window ([`TRAY_WINDOW_CLASS`], as `RegisterClassExW` takes it).
 const CLASS: PCWSTR = w!("HTTPorter.Tray");
+
+/// The class name of the icon's hidden window, by which a second HTTPorter finds it while the
+/// first one's window is in the tray.
+pub const TRAY_WINDOW_CLASS: &str = "HTTPorter.Tray";
+
+/// Posted to that window (by a second HTTPorter): the same as a click on the icon,
+/// [`TrayEvent::Show`].
+pub const TRAY_SHOW_MESSAGE: u32 = WM_APP + 2;
 
 /// The message the Shell sends the window about the icon.
 const CALLBACK: u32 = WM_APP + 1;
@@ -370,6 +378,10 @@ unsafe extern "system" fn window_proc(
         if let Some(event) = picked {
             (inner.on_event)(event);
         }
+        return LRESULT(0);
+    }
+    if message == TRAY_SHOW_MESSAGE {
+        (inner.on_event)(TrayEvent::Show);
         return LRESULT(0);
     }
     if message == inner.taskbar_created && inner.taskbar_created != 0 {
