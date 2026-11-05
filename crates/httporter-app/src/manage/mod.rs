@@ -23,7 +23,7 @@ mod inspector_view;
 mod links;
 mod move_view;
 mod palette_view;
-mod places;
+pub(crate) mod places;
 mod quicklook_view;
 mod search_view;
 pub mod settings_tabs;

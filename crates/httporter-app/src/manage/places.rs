@@ -15,6 +15,7 @@ use httporter_core::{Favorite, PlaceKind, RemotePath, SiteId};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 use super::{Manager, copy};
+use crate::comfort::undo::UndoAction;
 use crate::viewmodel::{local_crumbs, remote_crumbs};
 use crate::{AppWindow, PlaceItem};
 
@@ -182,7 +183,7 @@ fn add(m: &Arc<Manager>, pane: i32, row: i32) {
     });
 }
 
-/// Remove on Favorites row `index`.
+/// Remove on Favorites row `index`. A toast offers to undo it (I5), as does Ctrl+Z.
 fn remove(m: &Arc<Manager>, index: i32) {
     let Some(favorite) = favorite_at(index) else {
         return;
@@ -191,7 +192,25 @@ fn remove(m: &Arc<Manager>, index: i32) {
     let rt = m.link.rt().clone();
     rt.spawn(async move {
         match m.session.remove_favorite(favorite.id).await {
-            Ok(()) => reload(&m),
+            Ok(()) => {
+                reload(&m);
+                let _ = m.link.ui().upgrade_in_event_loop(move |ui| {
+                    crate::comfort::undo::push(&ui, UndoAction::RestoreFavorite(favorite));
+                });
+            }
+            Err(e) => m.link.status(copy::favorite_failed(e)),
+        }
+    });
+}
+
+/// Undoes a removed favorite (I5: Ctrl+Z, its toast's Undo): it is stored again, at the end of
+/// the list, and shown.
+pub(crate) fn restore(m: &Arc<Manager>, favorite: Favorite) {
+    let m = m.clone();
+    let rt = m.link.rt().clone();
+    rt.spawn(async move {
+        match m.session.add_favorite(Favorite { id: 0, ..favorite }).await {
+            Ok(_) => reload(&m),
             Err(e) => m.link.status(copy::favorite_failed(e)),
         }
     });

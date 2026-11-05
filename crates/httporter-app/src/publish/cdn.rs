@@ -28,6 +28,7 @@ use tokio::sync::oneshot;
 
 use super::{Publisher, PurgerAnswer, copy, lock};
 use crate::AppWindow;
+use crate::comfort::toast;
 use crate::session::blocking;
 use crate::transfers::DeletePurge;
 
@@ -300,13 +301,13 @@ pub(super) fn retry_purge(p: &Arc<Publisher>, history: i64) {
                 purge(&this, &*purger, &site, mode, &paths).await
             }
         };
-        let message = copy::purge_done(&result);
+        let (message, kind) = (copy::purge_done(&result), toast::purge_kind(&result));
         if let Err(e) = this.session.set_history_purge(history, result).await {
             this.link.status(copy::history_not_saved(&e));
             return;
         }
         super::profile_view::refresh(&this);
-        this.link.status(message);
+        toast::post_after_progress(&this.link, kind, message);
     });
 }
 
@@ -390,7 +391,11 @@ async fn purge_after_delete(p: Arc<Publisher>, site: SiteRecord, batch: String) 
         }
     };
     let result = purge(&p, &*purger, &site, PurgeMode::Changed, &outcome.done).await;
-    p.link.status(copy::purge_done(&result));
+    toast::post_after_progress(
+        &p.link,
+        toast::purge_kind(&result),
+        copy::purge_done(&result),
+    );
 }
 
 /// Wires the CDN key sheet, and hands the delete alert's purge to the transfers.

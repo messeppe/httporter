@@ -11,6 +11,8 @@
 //!
 //! A file of this PC simply opens in its program. A read-only site's file opens as a copy that is
 //! not watched.
+//!
+//! A re-upload’s result (uploaded, saved as a copy, failed) is told in a toast (I5).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -28,6 +30,7 @@ use httporter_transfer::{Batch, BatchTarget, hash_file};
 use slint::{Model, ModelRc, VecModel};
 
 use super::{Manager, Side, activity_view, copy};
+use crate::comfort::toast::{self, ToastKind};
 use crate::session::blocking;
 use crate::{AppWindow, EditConflictData, EditItem};
 
@@ -494,10 +497,15 @@ async fn send_edit(
                 file.state = State::Uploaded(time);
             });
             let to_name = to.name().unwrap_or_default();
-            m.link.status(match send {
-                Mode::Copy => copy::edit_saved_copy(to_name, &site.name),
-                Mode::Checked | Mode::Overwrite => copy::edit_uploaded(to_name, &site.name),
-            });
+            // A toast (I5, §8.5.2).
+            toast::post(
+                m.link.ui(),
+                ToastKind::Done,
+                match send {
+                    Mode::Copy => copy::edit_saved_copy(to_name, &site.name),
+                    Mode::Checked | Mode::Overwrite => copy::edit_uploaded(to_name, &site.name),
+                },
+            );
             log(
                 site,
                 &to,
@@ -578,10 +586,14 @@ fn log(site: &SiteRecord, path: &RemotePath, ok: bool, detail: String, bytes: u6
     });
 }
 
-/// File `id`'s upload failed for `reason`.
+/// File `id`'s upload failed for `reason`: a toast says so (I5, §8.5.2).
 fn failed(m: &Manager, id: i32, name: &str, reason: String) {
     update(m, id, |file| file.state = State::Failed);
-    m.link.status(copy::edit_upload_failed(name, reason));
+    toast::post(
+        m.link.ui(),
+        ToastKind::Warning,
+        copy::edit_upload_failed(name, reason),
+    );
 }
 
 /// File `id` changed on its site since it was opened: the sheet asks what to do.

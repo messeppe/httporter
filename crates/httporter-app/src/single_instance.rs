@@ -1,12 +1,13 @@
 //! One HTTPorter per user session (review M10). A second one started while the first runs would
 //! count the first one's live queue as "didn't finish last time": Resume would upload it twice,
 //! Discard would cancel its journal rows. So a second start brings the first one's window to the
-//! front and closes.
+//! front and closes; when that window is hidden in the tray, the tray brings it back (I5).
 
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
+use httporter_platform::win::{TRAY_SHOW_MESSAGE, TRAY_WINDOW_CLASS};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM,
 };
@@ -15,8 +16,8 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE,
-    SetForegroundWindow, ShowWindow,
+    AllowSetForegroundWindow, EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, PostMessageW, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
 use windows_sys::core::BOOL;
 
@@ -44,7 +45,9 @@ pub fn first() -> bool {
 }
 
 /// Brings the window of the HTTPorter already running to the front: the first visible
-/// top-level window titled `title` whose process runs this same program.
+/// top-level window titled `title` whose process runs this same program. With none visible, the
+/// window is in the tray: the tray's hidden window of that program is asked to show it, as a click
+/// on the icon would.
 pub fn show_first(title: &str) {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -54,12 +57,21 @@ pub fn show_first(title: &str) {
         exe,
         own: std::process::id(),
         found: std::ptr::null_mut(),
+        tray: None,
     };
     // SAFETY: `visit` reads `search` through the pointer only during this call, which outlives
     // nothing it borrows.
     unsafe { EnumWindows(Some(visit), &mut search as *mut Search as LPARAM) };
     let window = search.found;
     if window.is_null() {
+        if let Some((tray, pid)) = search.tray {
+            // SAFETY: plain calls; a window gone since makes them fail harmlessly. The first one
+            // may take the foreground, which this (just started) process holds.
+            unsafe {
+                AllowSetForegroundWindow(pid);
+                PostMessageW(tray, TRAY_SHOW_MESSAGE, 0, 0);
+            }
+        }
         return;
     }
     // SAFETY: plain calls on a window handle Windows just handed out; a window gone since
@@ -79,6 +91,8 @@ struct Search {
     /// This process, whose own windows don't count.
     own: u32,
     found: HWND,
+    /// The first one's tray window and process, seen on the way (its window is hidden then).
+    tray: Option<(HWND, u32)>,
 }
 
 /// One top-level window of [`EnumWindows`]: stops at the one [`show_first`] looks for.
@@ -88,23 +102,43 @@ unsafe extern "system" fn visit(window: HWND, search: LPARAM) -> BOOL {
     // SAFETY: plain calls on a window handle the enumeration handed out.
     let visible = unsafe { IsWindowVisible(window) } != 0;
     if !visible {
+        if search.tray.is_none()
+            && is_tray(window)
+            && let Some(pid) = other_instance(window, search)
+        {
+            search.tray = Some((window, pid));
+        }
         return 1;
     }
     let mut text = [0u16; 64];
     // SAFETY: the buffer's length is passed with it.
     let len = unsafe { GetWindowTextW(window, text.as_mut_ptr(), text.len() as i32) };
     let len = usize::try_from(len).unwrap_or(0);
-    if text[..len] != search.title[..] {
-        return 1;
-    }
-    let mut pid = 0u32;
-    // SAFETY: as above; `pid` outlives the call.
-    unsafe { GetWindowThreadProcessId(window, &mut pid) };
-    if pid == 0 || pid == search.own || !runs(pid, &search.exe) {
+    if text[..len] != search.title[..] || other_instance(window, search).is_none() {
         return 1;
     }
     search.found = window;
     0
+}
+
+/// The process of `window` when it is another one running this same program.
+fn other_instance(window: HWND, search: &Search) -> Option<u32> {
+    let mut pid = 0u32;
+    // SAFETY: a plain call on a window handle the enumeration handed out; `pid` outlives it.
+    unsafe { GetWindowThreadProcessId(window, &mut pid) };
+    (pid != 0 && pid != search.own && runs(pid, &search.exe)).then_some(pid)
+}
+
+/// Whether `window` is of the tray icon's window class.
+fn is_tray(window: HWND) -> bool {
+    let mut class = [0u16; 64];
+    // SAFETY: the buffer's length is passed with it.
+    let len = unsafe { GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) };
+    let len = usize::try_from(len).unwrap_or(0);
+    class[..len]
+        .iter()
+        .copied()
+        .eq(TRAY_WINDOW_CLASS.encode_utf16())
 }
 
 /// Whether process `pid` runs the program at `exe` (ignoring case, as Windows does).
