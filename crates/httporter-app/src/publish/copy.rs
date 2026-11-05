@@ -713,6 +713,12 @@ pub fn key_not_forgotten(reason: impl std::fmt::Display) -> String {
 
 // ---- tree, filter, Cache-Control (T9) ----
 
+/// The profile sheet's Cache-Control field on a Bunny site, which can't use it.
+pub const CACHE_CONTROL_BUNNY: &str = "Bunny sets caching in the pull zone.";
+
+/// A Cache-Control value that can't be sent as a header.
+pub const CACHE_CONTROL_INVALID: &str = "The Cache-Control header can hold only plain characters on one line, such as public, max-age=3600.";
+
 //
 //
 //

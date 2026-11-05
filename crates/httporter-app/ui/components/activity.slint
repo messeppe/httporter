@@ -1,45 +1,88 @@
-// The activity log sheet (T9): a kind control, a site pop-up, search, the newest 2,000 events,
-// Export… and Open Log Folder.
-//
-// T1 shell: the properties and an empty panel; Escape closes.
+// The activity log sheet: a kind control, a site pop-up, search, the newest 2,000 events,
+// Export… and Open Log Folder. Opening it (its `init`) asks the app for the rows; every change of
+// the controls hands the new filter back. Escape or Done closes it.
 
+import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { ActivityFilterData, ActivityRow } from "../types.slint";
-import { Modal } from "sheets.slint";
+import { CapsuleButton } from "buttons.slint";
+import { Field, RegionPicker } from "form_controls.slint";
+import { Modal, Segmented } from "sheets.slint";
+import { VCenter } from "layout.slint";
 
-// T1 shell: a scrim with an empty panel; Escape calls `cancel`. The task that builds this file
-// replaces it.
-component Shell inherits Rectangle {
-    in property <length> panel-width: 440px;
-    in property <length> panel-height: 200px;
-    // The panel's top edge; below 0 centres it.
-    in property <length> panel-y: -1px;
-    callback cancel();
+// One event of the list.
+component ActivityItem inherits Rectangle {
+    in property <ActivityRow> entry;
+    in property <int> index;
+    in property <int> count;
 
-    init => { keys.focus(); }
+    height: 28px;
+    background: Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent;
+    accessible-role: list-item;
+    accessible-label: @tr("{}, {}, {}, {}, {}", root.entry.when, root.entry.kind, root.entry.site, root.entry.path, root.entry.detail);
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
 
-    Modal {
-        cancel => { root.cancel(); }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 10px;
 
-        keys := FocusScope {
-            width: 0px;
-            height: 0px;
+        Text {
+            width: 104px;
+            text: root.entry.when;
+            color: Theme.label2;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
         }
-
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: root.panel-y < 0px ? (parent.height - self.height) / 2 : root.panel-y;
-            width: min(root.panel-width, parent.width - 32px);
-            height: min(root.panel-height, parent.height - 32px);
-            background: Theme.sheet;
-            border-radius: Theme.radius-lg;
+        Text {
+            width: 70px;
+            text: root.entry.kind;
+            color: root.entry.failed ? Theme.red : Theme.label;
+            font-size: 12px;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        Text {
+            width: 110px;
+            text: root.entry.site;
+            color: Theme.label2;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        Text {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            text: root.entry.path;
+            color: Theme.label;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        Text {
+            width: 180px;
+            text: root.entry.detail;
+            color: root.entry.failed ? Theme.red : Theme.label2;
+            font-size: 12px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
         }
     }
 }
 
 export component ActivitySheet inherits Rectangle {
     in property <[ActivityRow]> rows;
-    // The site pop-up's names (after "All sites").
+    // The site pop-up's names: "All sites" first, then the sites (`filter.site` counts from the
+    // first site, -1 for all).
     in property <[string]> sites;
     in-out property <ActivityFilterData> filter;
     callback filter-changed(ActivityFilterData);
@@ -47,9 +90,128 @@ export component ActivitySheet inherits Rectangle {
     callback open-folder();
     callback cancelled();
 
-    Shell {
-        panel-width: 720px;
-        panel-height: 520px;
+    // Hands the filter as the controls now say back to the app.
+    function changed-filter(kind: int, site: int, text: string) {
+        root.filter = { kind: kind, site: site, text: text };
+        root.filter-changed(root.filter);
+    }
+
+    init => {
+        kind-control.current = root.filter.kind;
+        search-field.text = root.filter.text;
+        site-picker.current-index = root.filter.site + 1;
+        root.filter-changed(root.filter);
+        search-field.focus();
+    }
+
+    Modal {
+        at-first-stop: kind-control.has-focus;
+        at-last-stop: done-button.has-focus;
         cancel => { root.cancelled(); }
+        confirm => { root.cancelled(); }
+        focus-first => { kind-control.focus(); }
+        focus-last => { done-button.focus(); }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(760px, parent.width - 32px);
+            height: min(540px, parent.height - 32px);
+            background: Theme.sheet;
+            border-radius: Theme.radius-xl;
+            border-width: 0.5px;
+            border-color: Theme.sep-strong;
+            drop-shadow-blur: 64px;
+            drop-shadow-offset-y: 24px;
+            drop-shadow-color: Theme.shadow-sheet;
+            accessible-role: form;
+            accessible-label: @tr("Activity");
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+
+                Text {
+                    text: @tr("Activity");
+                    color: Theme.label;
+                    font-size: 17px;
+                    font-weight: Theme.weight-semibold;
+                    accessible-role: none;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    VCenter {
+                        kind-control := Segmented {
+                            options: [@tr("All"), @tr("Uploads"), @tr("Downloads"), @tr("Deletes"), @tr("Moves"), @tr("Publish"), @tr("Errors")];
+                            label: @tr("Show");
+                            selected(index) => { root.changed-filter(index, root.filter.site, root.filter.text); }
+                        }
+                    }
+                    site-picker := RegionPicker {
+                        width: 150px;
+                        label: @tr("Site");
+                        model: root.sites;
+                        selected(index) => { root.changed-filter(root.filter.kind, index - 1, root.filter.text); }
+                    }
+                    search-field := Field {
+                        horizontal-stretch: 1;
+                        label: @tr("Search the activity");
+                        placeholder: @tr("Search");
+                        edited => { root.changed-filter(root.filter.kind, root.filter.site, self.text); }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.content;
+                    border-radius: Theme.radius-md;
+                    border-width: 0.5px;
+                    border-color: Theme.sep-strong;
+                    clip: true;
+
+                    if root.rows.length == 0: Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: @tr("Nothing to show.");
+                        color: Theme.label2;
+                        font-size: Theme.font-body;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    ListView {
+                        x: -2px;
+                        y: -2px;
+                        width: parent.width + 4px;
+                        height: parent.height + 4px;
+                        accessible-label: @tr("Activity");
+                        accessible-item-count: root.rows.length;
+
+                        for row[i] in root.rows: ActivityItem {
+                            entry: row;
+                            index: i;
+                            count: root.rows.length;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    CapsuleButton {
+                        text: @tr("Export…");
+                        clicked => { root.export(); }
+                    }
+                    CapsuleButton {
+                        text: @tr("Open Log Folder");
+                        clicked => { root.open-folder(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    done-button := CapsuleButton {
+                        text: @tr("Done");
+                        primary: true;
+                        clicked => { root.cancelled(); }
+                    }
+                }
+            }
+        }
     }
 }

@@ -1252,6 +1252,14 @@ impl Transfers {
             drawer.line = String::new();
         }
         apply_drawer(ui, &drawer);
+        // M8: "N connections ready" follows the engine's slow-down for the site shown.
+        if let Some((site, _)) = self.session.remote_shows()
+            && self
+                .session
+                .set_engine_limit(&site, self.engine.site_transfer_limit(&site))
+        {
+            ui.set_status_right(self.session.remote_view().status_right.into());
+        }
         show_banners(ui, &snapshot.state);
         let notice =
             (snapshot.journal_errors > 0).then(|| copy::journal_errors(snapshot.journal_errors));

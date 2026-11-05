@@ -69,6 +69,9 @@ export component ProfileSheet inherits Rectangle {
         if (root.draft.guard-percent != root.seen.guard-percent) {
             percent-field.text = root.draft.guard-percent;
         }
+        if (root.draft.cache-control != root.seen.cache-control) {
+            cache-field.text = root.draft.cache-control;
+        }
         root.seen = root.draft;
     }
 
@@ -87,6 +90,9 @@ export component ProfileSheet inherits Rectangle {
             guard-percent: percent-field.text,
             cdn-note: root.draft.cdn-note,
             error: "",
+            cache-control: cache-field.text,
+            cache-control-enabled: root.draft.cache-control-enabled,
+            cache-control-note: root.draft.cache-control-note,
         };
     }
 
@@ -292,6 +298,22 @@ export component ProfileSheet inherits Rectangle {
                     }
                     Text {
                         text: @tr("A publish that would delete more than this asks you to confirm first.");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+                FormRow {
+                    label: @tr("Cache-Control");
+
+                    cache-field := Field {
+                        label: @tr("Cache-Control header");
+                        placeholder: @tr("public, max-age=3600");
+                        enabled: root.draft.cache-control-enabled;
+                        accepted => { root.submit(); }
+                    }
+                    Text {
+                        text: root.draft.cache-control-note != "" ? root.draft.cache-control-note : @tr("Sent with every file this profile uploads. Leave it empty for none.");
                         color: Theme.label2;
                         font-size: Theme.font-small;
                         wrap: word-wrap;

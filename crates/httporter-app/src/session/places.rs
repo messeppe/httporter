@@ -46,9 +46,26 @@ pub(super) struct PlacesCache {
     extras: HashMap<SiteId, SiteExtras>,
     /// The UI state waiting to be written; the newest wins.
     pending_ui: Option<UiState>,
+    /// M8: how many transfers the engine lets each site run now, after any slow-down.
+    engine_limits: HashMap<SiteId, usize>,
 }
 
 impl Session {
+    /// M8: notes how many transfers the engine lets `site` run now (`None`: not known); whether
+    /// that changed.
+    pub fn set_engine_limit(&self, site: &SiteId, limit: Option<usize>) -> bool {
+        let mut places = lock(&self.places);
+        match limit {
+            Some(limit) => places.engine_limits.insert(site.clone(), limit) != Some(limit),
+            None => places.engine_limits.remove(site).is_some(),
+        }
+    }
+
+    /// M8: how many transfers the engine lets `site` run now, if known.
+    pub(super) fn engine_limit(&self, site: &SiteId) -> Option<usize> {
+        lock(&self.places).engine_limits.get(site).copied()
+    }
+
     /// The sidebar's favorites.
     pub async fn favorites(&self) -> Vec<Favorite> {
         let store = self.store.clone();

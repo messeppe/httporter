@@ -18,7 +18,7 @@ mod sheet_view;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use httporter_core::{CdnPurger, ProfileId, SiteRecord};
+use httporter_core::{CdnPurger, ProfileId, ProviderKind, SiteRecord};
 use httporter_transfer::HashCache;
 
 use crate::AppWindow;
@@ -107,9 +107,32 @@ impl Publisher {
     }
 }
 
-/// Wires the window's Compare, Publish and profile callbacks to `p`.
+/// Wires the window's Compare, Publish and profile callbacks to `p`, and registers each S3
+/// profile's Cache-Control with the engine.
 pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
     compare_view::install(ui, p);
     sheet_view::install(ui, p);
     profile_view::install(ui, p);
+    register_cache_control(p);
+}
+
+/// Tells the engine every S3 profile's Cache-Control (at start, on a task of its own): uploads
+/// under a profile's folder carry it, whether they come from a publish or not.
+fn register_cache_control(p: &Arc<Publisher>) {
+    let p2 = p.clone();
+    p.link.rt().spawn(async move {
+        let sites = p2.session.sites();
+        for profile in p2.session.profiles().await {
+            let s3 = sites
+                .iter()
+                .any(|site| site.id == profile.site && site.provider == ProviderKind::S3);
+            if s3 && profile.cache_control.is_some() {
+                p2.transfers.engine().set_cache_control(
+                    &profile.site,
+                    &profile.remote_dir,
+                    profile.cache_control.clone(),
+                );
+            }
+        }
+    });
 }
