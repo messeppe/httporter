@@ -1628,6 +1628,7 @@ fn settings_window(transfers: &Arc<Transfers>) -> Option<SettingsWindow> {
         let transfers = transfers.clone();
         move |settings| transfers.apply_settings(settings)
     });
+    crate::manage::settings_tabs::wire(&window);
     let weak = window.as_weak();
     window.window().on_close_requested(move || {
         if let Some(window) = weak.upgrade() {

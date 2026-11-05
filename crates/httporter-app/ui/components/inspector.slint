@@ -1,0 +1,26 @@
+// The inspector (T5; mockup `Inspector.dc.html`): 300 px beside the single pane in view-mode 1,
+// with the preview, the metadata, the links with their copy buttons and the actions.
+//
+// T1 shell: the properties and an empty card.
+
+import { Theme } from "../theme.slint";
+import { InspectorData } from "../types.slint";
+
+export component Inspector inherits Rectangle {
+    in property <InspectorData> data;
+    // The preview of an image (`data.is-image`).
+    in property <image> image;
+    callback quick-look();
+    callback download();
+    callback delete();
+    // 0 the public link, 1 the storage link.
+    callback copy(int);
+    callback purge();
+
+    background: Theme.content;
+    border-radius: Theme.radius-md;
+    border-width: 0.5px;
+    border-color: Theme.sep-strong;
+    accessible-role: region;
+    accessible-label: @tr("Inspector");
+}

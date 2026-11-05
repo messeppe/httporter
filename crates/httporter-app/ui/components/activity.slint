@@ -1,0 +1,55 @@
+// The activity log sheet (T9): a kind control, a site pop-up, search, the newest 2,000 events,
+// Export… and Open Log Folder.
+//
+// T1 shell: the properties and an empty panel; Escape closes.
+
+import { Theme } from "../theme.slint";
+import { ActivityFilterData, ActivityRow } from "../types.slint";
+import { Modal } from "sheets.slint";
+
+// T1 shell: a scrim with an empty panel; Escape calls `cancel`. The task that builds this file
+// replaces it.
+component Shell inherits Rectangle {
+    in property <length> panel-width: 440px;
+    in property <length> panel-height: 200px;
+    // The panel's top edge; below 0 centres it.
+    in property <length> panel-y: -1px;
+    callback cancel();
+
+    init => { keys.focus(); }
+
+    Modal {
+        cancel => { root.cancel(); }
+
+        keys := FocusScope {
+            width: 0px;
+            height: 0px;
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: root.panel-y < 0px ? (parent.height - self.height) / 2 : root.panel-y;
+            width: min(root.panel-width, parent.width - 32px);
+            height: min(root.panel-height, parent.height - 32px);
+            background: Theme.sheet;
+            border-radius: Theme.radius-lg;
+        }
+    }
+}
+
+export component ActivitySheet inherits Rectangle {
+    in property <[ActivityRow]> rows;
+    // The site pop-up's names (after "All sites").
+    in property <[string]> sites;
+    in-out property <ActivityFilterData> filter;
+    callback filter-changed(ActivityFilterData);
+    callback export();
+    callback open-folder();
+    callback cancelled();
+
+    Shell {
+        panel-width: 720px;
+        panel-height: 520px;
+        cancel => { root.cancelled(); }
+    }
+}

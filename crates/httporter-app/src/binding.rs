@@ -35,6 +35,7 @@ use crate::add_site::{
 };
 use crate::copy;
 use crate::import::{AwsProfile, aws_draft, env_draft, read_aws_profiles, read_env_file};
+use crate::manage::{self, Manager, Side};
 use crate::publish::{self, Publisher};
 use crate::selection::{ActivePane, Selection, ToolbarInputs, ToolbarState, toolbar_state};
 use crate::session::{
@@ -277,6 +278,8 @@ struct Ctx {
     picking_env: Arc<AtomicBool>,
     /// The transfer engine and what it is waiting for; `None` in the window's tests.
     transfers: Option<Arc<Transfers>>,
+    /// Manage+ (I4), kept here so that the window owns it; `None` in the window's tests.
+    manager: RefCell<Option<Arc<Manager>>>,
 }
 
 /// What the Add Site and Import sheets and the Remove Site alert work with that the window does
@@ -1197,10 +1200,13 @@ pub fn install_app(
     session: Session,
     engines: Engines,
 ) -> Arc<Transfers> {
-    let (session, transfers, link) = install_with(ui, rt, session, Some(engines));
+    let (session, transfers, link, ctx) = install_with(ui, rt, session, Some(engines));
     let transfers = transfers.expect("installed with an engine");
-    let publisher = Publisher::new(session, transfers.clone(), link);
+    let publisher = Publisher::new(session.clone(), transfers.clone(), link.clone());
     publish::install(ui, &publisher);
+    let manager = Manager::new(session, transfers.clone(), publisher, link);
+    manage::install(ui, &manager);
+    *ctx.manager.borrow_mut() = Some(manager);
     transfers
 }
 
@@ -1210,7 +1216,7 @@ fn install_with(
     rt: Handle,
     session: Session,
     engines: Option<Engines>,
-) -> (Arc<Session>, Option<Arc<Transfers>>, Link) {
+) -> (Arc<Session>, Option<Arc<Transfers>>, Link, Rc<Ctx>) {
     let regions: Vec<SharedString> = REGIONS.iter().map(|(_, city)| (*city).into()).collect();
     ui.set_region_names(ModelRc::new(VecModel::from(regions)));
     let session = Arc::new(session);
@@ -1251,6 +1257,7 @@ fn install_with(
         writing: Arc::default(),
         picking_env: Arc::default(),
         transfers: transfers.clone(),
+        manager: RefCell::default(),
     });
     let row = |index: i32| usize::try_from(index).ok();
 
@@ -1268,6 +1275,7 @@ fn install_with(
         let ctx = ctx.clone();
         move |index| {
             if let Some(index) = row(index) {
+                open_file_row(&ctx, Side::Remote, index);
                 ctx.remote(RemoteOp::Open(index, ctx.remote_seen()));
             }
         }
@@ -1298,6 +1306,7 @@ fn install_with(
         let ctx = ctx.clone();
         move |index| {
             if let Some(index) = row(index) {
+                open_file_row(&ctx, Side::Local, index);
                 ctx.local(LocalOp::Open(index, ctx.local_seen()));
             }
         }
@@ -1559,7 +1568,7 @@ fn install_with(
         ui.set_selected_site(0);
         ctx.remote(RemoteOp::Select(0));
     }
-    (session, transfers, link)
+    (session, transfers, link, ctx)
 }
 
 /// Hands a cloud view to the window (from a task).
@@ -1833,6 +1842,11 @@ fn show_selection(ui: &AppWindow, shown: &Shown, pane: ActivePane, before: &[usi
 /// Sets which of the toolbar's commands may be pressed (and the notes that say why not). Without
 /// the transfer engine (`transfers_ready`), none may: the buttons are off, not inert.
 fn refresh_toolbar(ui: &AppWindow, shown: &Shown) {
+    // A site is open once it is chosen, connected and not in the middle of a listing.
+    let site_open =
+        ui.get_selected_site() >= 0 && ui.get_connection_ok() && !ui.get_remote_loading();
+    let read_only =
+        selected_site_id(ui).is_some_and(|id| manage::manager().is_some_and(|m| m.read_only(&id)));
     let state = if shown.transfers_ready {
         toolbar_state(ToolbarInputs {
             active: if ui.get_local_pane_active() {
@@ -1842,12 +1856,8 @@ fn refresh_toolbar(ui: &AppWindow, shown: &Shown) {
             },
             local_selected: shown.local_selection.count(),
             remote_selected: shown.remote_selection.count(),
-            // A site is open once it is chosen, connected and not in the middle of a listing.
-            site_open: ui.get_selected_site() >= 0
-                && ui.get_connection_ok()
-                && !ui.get_remote_loading(),
-            // Read-only sites arrive in I4.
-            read_only: false,
+            site_open,
+            read_only,
             at_drive_list: ui.get_local_crumbs().row_count() == 0,
         })
     } else {
@@ -1857,6 +1867,8 @@ fn refresh_toolbar(ui: &AppWindow, shown: &Shown) {
     ui.set_can_download(state.can_download);
     ui.set_can_new_folder(state.can_new_folder);
     ui.set_can_delete(state.can_delete);
+    // Rename, Move To… and the other I4 writes to the open site.
+    ui.set_can_write(shown.transfers_ready && site_open && !read_only);
     ui.set_delete_note(state.delete_note.into());
     ui.set_actions_note(if shown.transfers_ready {
         SharedString::new()
@@ -2013,6 +2025,7 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     if change.counts() && !failed {
         clear_status(ui, ActivePane::Cloud);
     }
+    manage::tabs::navigated(ui, Side::Remote);
 }
 
 /// Puts a This PC view on screen (everything but the banner), as [`apply_remote`].
@@ -2041,6 +2054,31 @@ fn apply_local(ui: &AppWindow, view: &LocalView, change: Change) {
         ui.set_local_status(view.status.as_str().into());
         clear_status(ui, ActivePane::ThisPc);
     }
+    manage::tabs::navigated(ui, Side::Local);
+}
+
+/// A row of `side` was opened (Enter, a double click, the menu's Open): a file row goes to the
+/// manager ([`Manager::open_file`]); a folder row is the pane's to open.
+fn open_file_row(ctx: &Ctx, side: Side, index: usize) {
+    let Some(ui) = ctx.ui.upgrade() else { return };
+    let rows = match side {
+        Side::Local => ui.get_local_rows(),
+        Side::Remote => ui.get_remote_rows(),
+    };
+    if rows.row_data(index).is_some_and(|row| !row.folder) {
+        let manager = ctx.manager.borrow().clone();
+        if let Some(manager) = manager {
+            manager.open_file(side, index);
+        }
+    }
+}
+
+/// The id of the site selected in the sidebar, if any.
+fn selected_site_id(ui: &AppWindow) -> Option<SiteId> {
+    usize::try_from(ui.get_selected_site())
+        .ok()
+        .and_then(|index| ui.get_sites().row_data(index))
+        .map(|site| SiteId(site.id.to_string()))
 }
 
 /// The Slint tile for a site's provider: the tile's colour comes from this.

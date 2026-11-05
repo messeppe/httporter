@@ -1,0 +1,73 @@
+// Quick Look (T6; mockup `Main.dc.html` overlay `quicklook`, l.335–371): a 760 × 560 panel on a
+// scrim, with the file's text (highlighted, or its changes), image or kind; and the sheet for a
+// file edited here that changed on the site meanwhile.
+//
+// T1 shells: the properties and an empty panel; Escape closes.
+
+import { Theme } from "../theme.slint";
+import { CodeLine, EditConflictData, QuickLookData } from "../types.slint";
+import { Modal } from "sheets.slint";
+
+// T1 shell: a scrim with an empty panel; Escape calls `cancel`. The task that builds this file
+// replaces it.
+component Shell inherits Rectangle {
+    in property <length> panel-width: 440px;
+    in property <length> panel-height: 200px;
+    // The panel's top edge; below 0 centres it.
+    in property <length> panel-y: -1px;
+    callback cancel();
+
+    init => { keys.focus(); }
+
+    Modal {
+        cancel => { root.cancel(); }
+
+        keys := FocusScope {
+            width: 0px;
+            height: 0px;
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: root.panel-y < 0px ? (parent.height - self.height) / 2 : root.panel-y;
+            width: min(root.panel-width, parent.width - 32px);
+            height: min(root.panel-height, parent.height - 32px);
+            background: Theme.sheet;
+            border-radius: Theme.radius-lg;
+        }
+    }
+}
+
+export component QuickLook inherits Rectangle {
+    in property <QuickLookData> data;
+    in property <[CodeLine]> lines;
+    in property <image> image;
+    // 0 the source, 1 the changes.
+    in-out property <int> mode: 0;
+    callback set-mode(int);
+    // -1 the previous file, 1 the next.
+    callback step(int);
+    callback open-browser();
+    callback open-with();
+    callback close();
+
+    Shell {
+        panel-width: 760px;
+        panel-height: 560px;
+        cancel => { root.close(); }
+    }
+}
+
+// "index.html changed on Bunny since you opened it": Overwrite, Save as Copy, Discard My Edit.
+export component EditConflictSheet inherits Rectangle {
+    in property <EditConflictData> data;
+    // 0 overwrite, 1 save as a copy, 2 discard the edit.
+    callback choice(int);
+    callback cancelled();
+
+    Shell {
+        panel-width: 420px;
+        panel-height: 220px;
+        cancel => { root.cancelled(); }
+    }
+}

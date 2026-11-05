@@ -6,6 +6,7 @@
 //! workers) only when the site lists a digest the mode can check.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use httporter_core::{
     RemotePath, SkipRules, StorageProvider, looks_secret, walk,
 };
 
-use crate::hash::{FileHashes, extended, hash_file};
+use crate::hash::{FileHashes, HashStore, extended, hash_file};
 use crate::messages;
 
 /// How many local files are hashed at once.
@@ -75,13 +76,41 @@ impl CompareMode {
     }
 }
 
-/// Local file digests by path, size and modification time, kept in memory only.
-#[derive(Debug, Default)]
+/// Local file digests by path, size and modification time, kept in memory and, with a
+/// [`HashStore`], across restarts.
+#[derive(Default)]
 pub struct HashCache {
     hashes: Mutex<HashMap<(PathBuf, u64, SystemTime), FileHashes>>,
+    /// Where digests are kept across restarts (T3 reads and writes it).
+    store: Option<Arc<dyn HashStore>>,
+}
+
+impl fmt::Debug for HashCache {
+    /// Says only whether a store is set.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HashCache")
+            .field(
+                "hashes",
+                &self
+                    .hashes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .len(),
+            )
+            .field("store", &self.store.is_some())
+            .finish()
+    }
 }
 
 impl HashCache {
+    /// A cache that also keeps its digests in `store`.
+    pub fn with_store(store: Arc<dyn HashStore>) -> Self {
+        Self {
+            hashes: Mutex::default(),
+            store: Some(store),
+        }
+    }
+
     /// `path`'s digests: the ones kept while its size and modification time are unchanged,
     /// else read from the file (and kept).
     pub fn get_or_hash(&self, path: &Path) -> io::Result<FileHashes> {

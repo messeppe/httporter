@@ -650,6 +650,7 @@ fn new_record(
         guard: DeleteGuard::default(),
         created_at: Utc::now(),
         last_published_at: None,
+        cache_control: None,
     }
 }
 
@@ -689,6 +690,10 @@ fn draft_of(target: &SheetTarget, cdn_note: String) -> ProfileDraft {
         guard_percent: r.guard.percent.to_string().into(),
         cdn_note: cdn_note.into(),
         error: SharedString::new(),
+        // T9: the Cache-Control field.
+        cache_control: r.cache_control.as_deref().unwrap_or_default().into(),
+        cache_control_enabled: false,
+        cache_control_note: SharedString::new(),
     }
 }
 

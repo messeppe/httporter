@@ -539,6 +539,41 @@ struct State {
     tracked: HashMap<u64, Tracked>,
 }
 
+/// How a job ended, for [`JobEvent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobEventOutcome {
+    Done,
+    /// Failed, with the words of the Failed tab.
+    Failed(String),
+    Cancelled,
+}
+
+/// A job reached its end (done, failed or cancelled): one per job, from [`Engine::events`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobEvent {
+    pub site: SiteId,
+    pub site_name: String,
+    pub kind: JobKind,
+    pub path: String,
+    pub bytes: u64,
+    pub outcome: JobEventOutcome,
+}
+
+impl Engine {
+    /// The jobs that end from now on, one [`JobEvent`] each (a channel of 4096; a receiver that
+    /// lags loses the oldest).
+    pub fn events(&self) -> tokio::sync::broadcast::Receiver<JobEvent> {
+        todo!("T3")
+    }
+
+    /// Uploads under `prefix` on `site` are sent with this `Cache-Control` (the longest prefix
+    /// wins); `None` removes the rule.
+    pub fn set_cache_control(&self, site: &SiteId, prefix: &RemotePath, value: Option<String>) {
+        let _ = (site, prefix, value);
+        todo!("T3")
+    }
+}
+
 impl Engine {
     /// An idle engine. `describe` turns an error into the plain words shown in the Failed tab
     /// (the app passes its copy), so the engine holds no UI wording.

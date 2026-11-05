@@ -1,0 +1,54 @@
+// The command palette (T7; mockup `Main.dc.html` overlay `palette`, l.377–400, data l.550–557):
+// 600 px wide, 90 px from the top, over a scrim.
+//
+// T1 shell: the properties and an empty panel; Escape closes.
+
+import { Theme } from "../theme.slint";
+import { PaletteItem } from "../types.slint";
+import { Modal } from "sheets.slint";
+
+// T1 shell: a scrim with an empty panel; Escape calls `cancel`. The task that builds this file
+// replaces it.
+component Shell inherits Rectangle {
+    in property <length> panel-width: 440px;
+    in property <length> panel-height: 200px;
+    // The panel's top edge; below 0 centres it.
+    in property <length> panel-y: -1px;
+    callback cancel();
+
+    init => { keys.focus(); }
+
+    Modal {
+        cancel => { root.cancel(); }
+
+        keys := FocusScope {
+            width: 0px;
+            height: 0px;
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: root.panel-y < 0px ? (parent.height - self.height) / 2 : root.panel-y;
+            width: min(root.panel-width, parent.width - 32px);
+            height: min(root.panel-height, parent.height - 32px);
+            background: Theme.sheet;
+            border-radius: Theme.radius-lg;
+        }
+    }
+}
+
+export component CommandPalette inherits Rectangle {
+    in property <[PaletteItem]> items;
+    in-out property <string> query;
+    callback query-changed(string);
+    // The item (index into `items`) was chosen.
+    callback run(int);
+    callback close();
+
+    Shell {
+        panel-width: 600px;
+        panel-height: 360px;
+        panel-y: 90px;
+        cancel => { root.close(); }
+    }
+}

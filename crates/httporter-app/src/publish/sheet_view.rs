@@ -247,6 +247,9 @@ impl Sheet {
                 size: format_size(bytes).into(),
                 checked: all,
                 header: true,
+                depth: 0,
+                folder: false,
+                expanded: false,
             });
             self.rows.push(RowRef::Header(group));
             for i in members {
@@ -266,6 +269,9 @@ impl Sheet {
                     size: format_size(item.size).into(),
                     checked: item.include,
                     header: false,
+                    depth: 0,
+                    folder: false,
+                    expanded: false,
                 });
                 self.rows.push(RowRef::Item(i));
             }

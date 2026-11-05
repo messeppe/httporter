@@ -14,3 +14,16 @@ pub fn purge_failed(failed: usize, total: usize, error: &str) -> String {
 
 /// A purge found no pull zone to purge.
 pub const NO_PULL_ZONE: &str = "No pull zone serves this storage zone.";
+
+/// The provider can't copy a file on the server (I4 moves then download and upload again).
+pub const NO_COPY: &str = "This storage can't copy files on the server.";
+
+/// The provider can't make a pre-signed link.
+pub const NO_PRESIGN: &str = "This storage can't make pre-signed links.";
+
+/// A file given to Import Sites is not a sites file (I4, T4).
+pub const SITES_WRONG_FORMAT: &str = "This file isn't an HTTPorter sites file.";
+
+/// A sites file written by a newer HTTPorter (I4, T4).
+pub const SITES_NEWER_VERSION: &str =
+    "This sites file is from a newer version of HTTPorter. Update HTTPorter to import it.";

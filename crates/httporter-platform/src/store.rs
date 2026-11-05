@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use httporter_core::{
-    AccountId, CdnLink, CdnZone, DeleteGuard, FileAction, FileOutcome, HISTORY_KEEP, HistoryFile,
-    HistoryRecord, ProfileId, ProfileRecord, ProviderKind, PublishResult, PurgeMode, PurgeResult,
-    RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
+    AccountId, CdnLink, CdnZone, DeleteGuard, Favorite, FileAction, FileOutcome, HISTORY_KEEP,
+    HistoryFile, HistoryRecord, ProfileId, ProfileRecord, ProviderKind, PublishResult, PurgeMode,
+    PurgeResult, RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
@@ -134,6 +134,11 @@ pub const SETTINGS_TRANSFERS: &str = "transfers";
 pub fn site_conflicts_key(id: &SiteId, upload: bool) -> String {
     let direction = if upload { "upload" } else { "download" };
     format!("conflicts/{direction}/{id}")
+}
+
+/// The settings key of a site's [`httporter_core::SiteExtras`]: `site_extras:<id>`.
+pub fn site_extras_key(id: &SiteId) -> String {
+    format!("site_extras:{id}")
 }
 
 /// Database failure.
@@ -768,6 +773,8 @@ impl RawProfile {
                 Some(text) => Some(parse_stamp(&text).ok()?),
                 None => None,
             },
+            // T4: the v4 `profiles.cache_control` column.
+            cache_control: None,
         })
     }
 }
@@ -1253,6 +1260,63 @@ fn migrate_with(conn: &mut Connection, mut at: impl FnMut(MigrateStage)) -> Resu
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", found + 1)?;
         tx.commit()?;
+    }
+}
+
+/// Schema v4 (T4): the persistent hash cache and the sidebar's favorites.
+#[allow(unused_variables)]
+impl Store {
+    /// The digests kept for `path` at this size and modification time (and marks them used).
+    #[allow(clippy::type_complexity)]
+    pub fn hash_get(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime_ns: u64,
+    ) -> Result<Option<([u8; 32], [u8; 16])>, StoreError> {
+        todo!("T4")
+    }
+
+    /// Keeps the digests of `path` at this size and modification time.
+    pub fn hash_put(
+        &self,
+        path: &Path,
+        size: u64,
+        mtime_ns: u64,
+        sha256: &[u8; 32],
+        md5: &[u8; 16],
+    ) -> Result<(), StoreError> {
+        todo!("T4")
+    }
+
+    /// Forgets the digests not used since `unused_since`; how many.
+    pub fn hash_prune(&self, unused_since: DateTime<Utc>) -> Result<u64, StoreError> {
+        todo!("T4")
+    }
+
+    /// How many files' digests are kept.
+    pub fn hash_count(&self) -> Result<u64, StoreError> {
+        todo!("T4")
+    }
+
+    /// Forgets every kept digest.
+    pub fn hash_clear(&self) -> Result<(), StoreError> {
+        todo!("T4")
+    }
+
+    /// The sidebar's favorites, in the order they were added.
+    pub fn favorites(&self) -> Result<Vec<Favorite>, StoreError> {
+        todo!("T4")
+    }
+
+    /// Stores `f` (its `id` is ignored); the new id.
+    pub fn add_favorite(&self, f: &Favorite) -> Result<i64, StoreError> {
+        todo!("T4")
+    }
+
+    /// Removing an id that is not stored is not an error.
+    pub fn remove_favorite(&self, id: i64) -> Result<(), StoreError> {
+        todo!("T4")
     }
 }
 

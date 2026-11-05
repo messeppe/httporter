@@ -57,12 +57,15 @@ use crate::site_hub::SiteHub;
 use crate::sort::SortKey;
 
 mod local;
+mod places;
 mod profiles;
 mod remote;
 mod sites;
 mod store;
 
 pub use local::LocalView;
+#[allow(unused_imports)] // T4 and T8 use it.
+pub use places::ImportReport;
 pub use remote::{RemotePlace, RemoteView};
 pub use sites::{SiteItemData, SiteProvider, TestResult, endpoint_preview, hub_error_text};
 

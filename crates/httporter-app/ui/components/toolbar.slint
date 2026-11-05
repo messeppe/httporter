@@ -1,5 +1,6 @@
 // Toolbar row under the standard Windows title bar (mockup `.titlebar`, without the caption buttons).
 
+import { LineEdit } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { ToolButton, CapsuleButton } from "buttons.slint";
@@ -42,6 +43,37 @@ export component Toolbar inherits Rectangle {
     callback download();
     callback new-folder();
     callback delete();
+
+    // ---- Manage+ (I4) ----
+    // The view (0 two panes, 1 single pane with the inspector) and, in the inspector view, the
+    // grid layout. The buttons (T5) only call `set-view` and `set-grid`; the app sets these.
+    in property <int> view-mode: 0;
+    in property <bool> grid: false;
+    // Purge from CDN may be pressed (T5).
+    in property <bool> can-purge: false;
+    // Synchronized browsing is on (T5's button, T7's behaviour).
+    in property <bool> sync-browsing: false;
+    callback set-view(int);
+    callback set-grid(bool);
+    callback purge();
+    callback toggle-sync();
+    // The inspector view's Refresh (T5).
+    callback refresh();
+    // The search field ("Search {site}"): shown once the app has wired search (T7). Return
+    // searches; Escape, or clearing it, ends the search.
+    in property <bool> search-available: false;
+    in property <string> search-placeholder;
+    in-out property <string> search-text;
+    in property <bool> searching: false;
+    callback search-submitted(string);
+    callback search-cancel();
+
+    // Ctrl+F.
+    public function focus-search() {
+        if (root.search-available && !root.profile-page) {
+            search-edit.focus();
+        }
+    }
 
     height: Theme.toolbar-height;
     background: Theme.chrome;
@@ -121,6 +153,45 @@ export component Toolbar inherits Rectangle {
         }
 
         Rectangle { horizontal-stretch: 1; }
+
+        // Search the open site (mockup "Search {site}").
+        VCenter {
+            visible: root.search-available && !root.profile-page;
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                VCenter {
+                    Image {
+                        source: Icons.search;
+                        colorize: Theme.label2;
+                        width: 14px;
+                        height: 14px;
+                        accessible-role: none;
+                    }
+                }
+                search-edit := LineEdit {
+                    width: 200px;
+                    enabled: root.search-available && !root.profile-page;
+                    placeholder-text: root.search-placeholder;
+                    text <=> root.search-text;
+                    accepted(text) => { root.search-submitted(text); }
+                    edited(text) => {
+                        if (text == "") {
+                            root.search-cancel();
+                        }
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            self.text = "";
+                            root.search-cancel();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                }
+            }
+        }
 
         // Compare the panes (mockup `.tgroup` "View": the layout toggles beside it arrive later).
         if !root.profile-page: VCenter {

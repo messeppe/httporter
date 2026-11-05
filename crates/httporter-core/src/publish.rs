@@ -84,6 +84,8 @@ pub struct ProfileRecord {
     pub guard: DeleteGuard,
     pub created_at: DateTime<Utc>,
     pub last_published_at: Option<DateTime<Utc>>,
+    /// The `Cache-Control` the profile's uploads are sent with (S3), if any.
+    pub cache_control: Option<String>,
 }
 
 /// How a file on one side compares with the other side.

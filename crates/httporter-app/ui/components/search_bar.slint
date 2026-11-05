@@ -1,0 +1,17 @@
+// The search filter bar (T7), under the toolbar while searching: Whole site | This folder, Kind,
+// Size and Modified.
+//
+// T1 shell: the properties and an empty bar.
+
+import { Theme } from "../theme.slint";
+import { SearchFilters } from "../types.slint";
+
+export component SearchFilterBar inherits Rectangle {
+    in-out property <SearchFilters> filters;
+    callback changed(SearchFilters);
+    // The bar's close button: the search ends.
+    callback cancelled();
+
+    height: 36px;
+    background: Theme.chrome;
+}

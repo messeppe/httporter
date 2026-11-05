@@ -465,6 +465,24 @@ export component Pane inherits Rectangle {
     in property <bool> can-download: false;
     in property <bool> can-new-folder: false;
     in property <bool> can-delete: false;
+    // ---- Manage+ (I4) ----
+    // The open site takes writes (not read-only): Rename…, Move To… and the other I4 writes.
+    in property <bool> can-write: false;
+    // The site can make pre-signed links: the menu offers Copy Presigned Link….
+    in property <bool> presign-available: false;
+    // Purge from CDN may be chosen.
+    in property <bool> can-purge: false;
+    // The rows as a grid of thumbnails (T5) rather than a list.
+    in property <bool> grid: false;
+    callback quick-look();
+    callback rename-start();
+    callback move-start();
+    callback copy-link();
+    callback copy-path();
+    callback copy-presigned();
+    // Add to Favorites, for the folder row given.
+    callback add-favorite(int);
+    callback purge();
     // Index into `rows` of the row the keyboard is on (the focus), or -1 for none. Which rows are
     // selected is in each row's `selected`.
     in-out property <int> selected: -1;
@@ -527,6 +545,7 @@ export component Pane inherits Rectangle {
     property <bool> show-loading: false;
     // The row the open context menu is for, or -1.
     property <int> context-row: -1;
+    property <bool> context-folder: root.context-row >= 0 && root.context-row < root.rows.length && root.rows[root.context-row].folder;
     // A drag out of a row may start: This PC can upload and the cloud pane can download, which the
     // toolbar's rules (`can-upload`, `can-download`) already say.
     property <bool> can-drag: root.cloud ? root.can-download : root.can-upload;
@@ -748,6 +767,17 @@ export component Pane inherits Rectangle {
             enabled: false;
             Menu {
                 MenuItem {
+                    title: @tr("Quick Look");
+                    enabled: root.context-row >= 0;
+                    activated => { root.quick-look(); }
+                }
+                MenuItem {
+                    title: @tr("Open");
+                    enabled: root.context-row >= 0;
+                    activated => { root.open(root.context-row); }
+                }
+                MenuSeparator { }
+                MenuItem {
                     title: @tr("Download");
                     enabled: root.can-download;
                     activated => { root.download(); }
@@ -764,9 +794,45 @@ export component Pane inherits Rectangle {
                     activated => { root.new-folder(); }
                 }
                 MenuItem {
+                    title: @tr("Rename…");
+                    enabled: root.can-write && root.context-row >= 0;
+                    activated => { root.rename-start(); }
+                }
+                MenuItem {
+                    title: @tr("Move To…");
+                    enabled: root.can-write && root.context-row >= 0;
+                    activated => { root.move-start(); }
+                }
+                MenuItem {
                     title: @tr("Delete…");
                     enabled: root.can-delete;
                     activated => { root.delete(); }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: @tr("Copy Public Link");
+                    enabled: root.context-row >= 0;
+                    activated => { root.copy-link(); }
+                }
+                MenuItem {
+                    title: @tr("Copy Path");
+                    enabled: root.context-row >= 0;
+                    activated => { root.copy-path(); }
+                }
+                if root.presign-available: MenuItem {
+                    title: @tr("Copy Presigned Link…");
+                    enabled: root.context-row >= 0;
+                    activated => { root.copy-presigned(); }
+                }
+                MenuItem {
+                    title: @tr("Add to Favorites");
+                    enabled: root.context-folder;
+                    activated => { root.add-favorite(root.context-row); }
+                }
+                MenuItem {
+                    title: @tr("Purge from CDN");
+                    enabled: root.can-purge;
+                    activated => { root.purge(); }
                 }
                 MenuSeparator { }
                 MenuItem {
@@ -778,6 +844,12 @@ export component Pane inherits Rectangle {
         local-menu := ContextMenuArea {
             enabled: false;
             Menu {
+                MenuItem {
+                    title: @tr("Quick Look");
+                    enabled: root.context-row >= 0;
+                    activated => { root.quick-look(); }
+                }
+                MenuSeparator { }
                 MenuItem {
                     title: @tr("Upload");
                     enabled: root.can-upload;
@@ -793,6 +865,11 @@ export component Pane inherits Rectangle {
                     title: @tr("Show in Explorer");
                     enabled: root.context-row >= 0;
                     activated => { root.show-in-explorer(root.context-row); }
+                }
+                MenuItem {
+                    title: @tr("Add to Favorites");
+                    enabled: root.context-folder;
+                    activated => { root.add-favorite(root.context-row); }
                 }
                 MenuSeparator { }
                 MenuItem {

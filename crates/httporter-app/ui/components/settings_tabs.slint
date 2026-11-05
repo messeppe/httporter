@@ -1,0 +1,60 @@
+// Settings › General, Sites and Advanced (T8; mockup `Settings.dc.html`).
+//
+// T1 shells: the properties, and the note the other unbuilt tabs show.
+
+import { Theme } from "../theme.slint";
+import { SiteSettingsData, SiteSettingsRow } from "../types.slint";
+
+// The note of a tab that is not built yet.
+component LaterNote inherits Rectangle {
+    Text {
+        text: @tr("These settings arrive in a later version.");
+        color: Theme.label2;
+        font-size: Theme.font-body;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Appearance, the start view, Restore tabs, Ask before previewing big files, the preview cache.
+export component GeneralTab inherits Rectangle {
+    // 0 system, 1 light, 2 dark.
+    in-out property <int> appearance;
+    // 0 two panes, 1 single pane.
+    in-out property <int> start-view;
+    in-out property <bool> restore-tabs;
+    in-out property <bool> ask-big-preview;
+    in property <string> preview-cache-text;
+    callback clear-preview-cache();
+    callback edited();
+
+    LaterNote { }
+}
+
+// The sites (master-detail): read-only, public base URL, CDN, pre-signed expiry, the remembered
+// conflict choices; Export Sites… and Import Sites….
+export component SitesTab inherits Rectangle {
+    in property <[SiteSettingsRow]> rows;
+    in-out property <int> current: -1;
+    in-out property <SiteSettingsData> form;
+    // A site row was chosen: the app fills `form`.
+    callback chosen(int);
+    callback save(SiteSettingsData);
+    // Forget the remembered choice for uploads (true) or downloads.
+    callback forget-choice(bool);
+    callback export-sites();
+    callback import-sites();
+    in property <string> message;
+
+    LaterNote { }
+}
+
+// Show Activity Log…, Open Log Folder, the checksum cache.
+export component AdvancedTab inherits Rectangle {
+    in property <string> hash-cache-text;
+    callback clear-hash-cache();
+    callback show-activity();
+    callback open-log-folder();
+
+    LaterNote { }
+}

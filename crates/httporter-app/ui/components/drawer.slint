@@ -410,6 +410,8 @@ export component TransferDrawer inherits Rectangle {
     callback move-to-top(int);
     callback pause-row(int);
     callback resume-row(int);
+    // M11 (T9): Retry Selected on the Failed tab, with the jobs' ids.
+    callback retry-selected([int]);
 
     property <[TransferRow]> shown-rows: root.tab == 0 ? root.active-rows : (root.tab == 1 ? root.queued-rows : (root.tab == 2 ? root.failed-rows : root.done-rows));
     // The list shows up to six rows and leaves room for one line when it is empty.

@@ -21,6 +21,15 @@ pub struct FileHashes {
     pub modified: SystemTime,
 }
 
+/// Where local digests are kept across restarts (the app's site database). The
+/// [`crate::HashCache`] asks it after its memory, and tells it what it hashed.
+pub trait HashStore: Send + Sync {
+    /// The digests kept for `path` at this size and modification time, if any.
+    fn load(&self, path: &Path, size: u64, modified: SystemTime) -> Option<FileHashes>;
+    /// Keeps `h` for `path`.
+    fn save(&self, path: &Path, h: &FileHashes);
+}
+
 /// Reads `path` once and computes its SHA-256 and MD5 together. Paths longer than Windows'
 /// classic limit are opened through the `\\?\` form.
 pub fn hash_file(path: &Path) -> io::Result<FileHashes> {

@@ -97,6 +97,14 @@ impl SkipRules {
     }
 }
 
+/// Whether `text` matches `pattern`, ignoring case: '*' is a run of characters without '/', '?'
+/// one character other than '/'.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let text: Vec<char> = text.to_lowercase().chars().collect();
+    glob(&pattern, &text)
+}
+
 /// Whether `text` matches `pattern`: '*' is a run of characters without '/', '?' one character
 /// other than '/'.
 fn glob(pattern: &[char], text: &[char]) -> bool {

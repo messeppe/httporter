@@ -11,11 +11,13 @@ mod lane;
 mod limiter;
 mod local;
 pub mod messages;
+mod moves;
 mod names;
 mod offline;
 mod plan;
 mod publish;
 mod rate;
+mod search;
 
 pub use bucket::TokenBucket;
 pub use compare::{
@@ -23,11 +25,13 @@ pub use compare::{
     compare_trees,
 };
 pub use engine::{
-    Batch, BatchOutcome, CHECK_AFTER, Engine, MAX_CHECKS, SiteInfo, SiteLookup, Unfinished, WINDOW,
+    Batch, BatchOutcome, CHECK_AFTER, Engine, JobEvent, JobEventOutcome, MAX_CHECKS, SiteInfo,
+    SiteLookup, Unfinished, WINDOW,
 };
-pub use hash::{FileHashes, hash_file};
+pub use hash::{FileHashes, HashStore, hash_file};
 pub use limiter::AdaptiveLimiter;
 pub use local::{DiskFiles, LocalFiles};
+pub use moves::{MoveItem, MoveOutcome, MovePhase, MovePlan, estimate_secs, plan_move, run_move};
 pub use names::{keep_both_name, safe_local_name};
 pub use plan::{
     DeletePlan, DownloadPlan, UploadPlan, plan_delete, plan_download, plan_upload,
@@ -35,3 +39,4 @@ pub use plan::{
 };
 pub use publish::{BatchTarget, PlanItem, PublishOutcome, PublishPhase, PublishPlan, run_publish};
 pub use rate::{RATE_WINDOW, RateWindow, eta};
+pub use search::{KindFilter, SEARCH_LIMIT, SearchProgress, SearchQuery, search};

@@ -24,6 +24,7 @@ mod drop_hook;
 mod format;
 mod import;
 mod local_fs;
+mod manage;
 mod publish;
 mod selection;
 mod session;
@@ -108,6 +109,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         .build()?;
     let session = open_session()?;
     let journal = open_journal(&session);
+    manage::activity_view::open_log(httporter_platform::default_log_dir());
+    // Cached previews, thumbnails and edits not touched for a week go, off the UI thread.
+    let _ = std::thread::Builder::new()
+        .name("prune-cache".into())
+        .spawn(|| httporter_platform::prune_cache(std::time::Duration::from_secs(7 * 24 * 3600)));
     let engine = Engine::new(
         rt.handle().clone(),
         journal.clone(),
@@ -123,6 +129,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
     install_drop(&ui, transfers.clone());
     ui.run()?;
+    // Edited files still waiting for their re-upload go first.
+    if let Some(manager) = manage::manager() {
+        manager.flush_edits();
+    }
     // The work in flight stops and the journal catches up (a few seconds at most), so what is
     // left resumes next time.
     transfers.finish();
@@ -398,6 +408,7 @@ mod tests {
             folder: true,
             selected: false,
             status: CompareStatus::None,
+            thumb: Default::default(),
         };
         assert!(site.healthy && row.folder);
         for provider in [

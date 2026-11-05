@@ -81,3 +81,9 @@ pub fn clipboard_files() -> Vec<PathBuf> {
     }
     files
 }
+
+/// Puts `text` on the clipboard (T4).
+#[allow(unused_variables)]
+pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+    todo!("T4")
+}

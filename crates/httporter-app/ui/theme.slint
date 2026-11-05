@@ -5,7 +5,10 @@ import { Palette } from "std-widgets.slint";
 import { ProviderTile } from "types.slint";
 
 export global Theme {
-    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    // Settings › General › Appearance (I4): 0 follows the system, 1 light, 2 dark. A global is
+    // per window: the app sets it on the main window and the Settings window.
+    in-out property <int> appearance: 0;
+    out property <bool> dark: appearance == 2 || (appearance == 0 && Palette.color-scheme == ColorScheme.dark);
 
     // Accent. `accent` is for fills behind white text; `accent-text` is the accent used as text.
     out property <color> accent: #0071e3;
@@ -82,7 +85,8 @@ export global Theme {
 
     // Type.
     out property <string> font-family: "Inter";
-    out property <string> font-mono: "Cascadia Mono";
+    // The app sets it from what is installed (ledger 135).
+    in-out property <string> font-mono: "Cascadia Mono";
     out property <length> font-body: 13px;
     out property <length> font-small: 11px;
     out property <length> font-title: 15px;

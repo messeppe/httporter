@@ -78,6 +78,8 @@ pub struct TabState { pub site: Option<SiteId>, pub remote: Option<RemotePath>, 
 #[derive(Default)] pub struct UiState { pub tabs: Vec<TabState>, pub current: usize, pub sync: bool, pub view: ViewMode,
     pub grid: bool, pub appearance: u8 /*0 system 1 light 2 dark*/, pub restore_tabs: bool, pub ask_big_preview: bool }
 pub const UI_STATE_KEY: &str = "ui_state";        // the two bools: serde default true
+// T1 as built: UiState's Default is written by hand (restore_tabs, ask_big_preview = true) with a container
+//   #[serde(default)], not derived; TabState derives Default + serde. SiteId gains serde (transparent).
 // site.rs
 #[derive(Default)] pub struct SiteExtras { pub read_only: bool, pub public_base_url: Option<String>,
     pub presign_expiry_secs: u32 /*0 = 3600*/ }                 // #[serde(default)]
@@ -155,6 +157,8 @@ pub async fn search(provider: &dyn StorageProvider, root: &RemotePath, q: &Searc
 //   ALTER TABLE profiles ADD COLUMN cache_control TEXT;
 pub fn site_extras_key(id: &SiteId) -> String;            // "site_extras:<id>", next to site_conflicts_key
 impl Store {   // all Result<_, StoreError>; remove_site also drops the site's favorites, extras and conflict keys
+    // T1 as built: every return below is wrapped, e.g. hash_get -> Result<Option<([u8;32],[u8;16])>, StoreError>,
+    // hash_put/hash_clear/remove_favorite -> Result<(), StoreError>, favorites -> Result<Vec<Favorite>, StoreError>.
     pub fn hash_get(&self, path: &Path, size: u64, mtime_ns: u64) -> Option<([u8; 32], [u8; 16])>;  // touches used_at
     pub fn hash_put(&self, path: &Path, size: u64, mtime_ns: u64, sha256: &[u8; 32], md5: &[u8; 16]);
     pub fn hash_prune(&self, unused_since: DateTime<Utc>) -> u64;  pub fn hash_count(&self) -> u64;  pub fn hash_clear(&self);
@@ -207,10 +211,13 @@ impl Manager {
     /// asks unless ask_big_preview is off; reuses a cached copy with the same size + checksum. (T4)
     pub async fn fetch_to_cache(&self, site: &SiteRecord, entry: &Entry, kind: &str) -> Result<PathBuf, String>; }
 pub fn install(ui: &AppWindow, m: &Arc<Manager>);   // calls every view's install; sets the global MANAGER
+// T1 as built: MANAGER is a thread-local Weak<Manager> on the UI thread; `manage::manager() -> Option<Arc<Manager>>`.
+//   The window owns the Manager (binding's Ctx holds the Arc). Off the UI thread, capture the Arc instead.
 // Each view file has `pub fn install(ui: &AppWindow, m: &Arc<Manager>)`. Owners: T4 cache.rs · T5 inspector_view,
 //   thumbs, links · T6 quicklook_view, highlight, edit, places · T7 palette_view, search_view, tabs · T8 settings_tabs
 //   · T9 activity_view, move_view. Also: tabs::navigated(ui, Side) (binding.rs calls it after apply_local/apply_remote);
 //   activity_view::open_log(dir) (main.rs) and log(ActivityEvent) (no-op without a log); settings_tabs::wire(&SettingsWindow)
+//   T1 as built: open_log(dir: PathBuf), log(e: ActivityEvent), navigated(ui: &AppWindow, side: Side).
 //   (transfers.rs settings_window()). manage/copy.rs: one section per task, each header followed by 5 `//` lines.
 impl Publisher {   // publish/purge_now.rs (new; T5): waits for pending_checks_for(site) == 0 (Q55), then purges
     // purge_urls(files) + "https://{host}/{folder}/*" per folder; NeedKey → CDN key sheet; logs a Purge event.
@@ -317,6 +324,68 @@ export struct SiteSettingsData { id: string, read-only: bool, public-url: string
   `cargo fmt`, or the diff becomes the whole file.
 - **`publish/mod.rs`:** `HashCache::with_store(session.hash_store())`.
 - **Lint allows:** stubs carry `#![allow(unused_variables, dead_code)]`; drop them as you fill.
+
+### 0.6 T1 as built (commit on `feat/i4-manage`; read before you start)
+
+**Where the stubs are and who fills them** (each body says `todo!("T<n>")`; files start with
+`#![allow(unused_variables, dead_code)]`, drop it as you fill):
+- **Manager methods delegate to the owner's file**, so `manage/mod.rs` stays T1's: `read_only` →
+  `settings_tabs::read_only(m, site)` (T8, returns false), `open_file` → `edit::open_file` and `flush_edits` →
+  `edit::flush_edits` (T6, no-ops), `fetch_to_cache` → `cache::fetch_to_cache` (T4). Every `manage/*.rs` file
+  except `copy.rs` and `highlight.rs` has a no-op `install(ui, m)` that `manage::install` already calls.
+- **View states** are empty `#[derive(Default)]` structs in each owner's file (`InspectorState`, `QuickLookState`,
+  `Edits`, `PaletteState`, `TabsState`, `SearchState`, `MoveState`, `ActivityState`, `SettingsState`). Keep them
+  `Send` (the Manager is shared with tasks).
+- **Real in T1:** provider `stat` / `copy` / `presign` defaults (copy texts `NO_COPY`, `NO_PRESIGN` in core
+  `copy.rs`), `glob_match`, `HashCache::with_store` (the store is held, not yet read: T3), `site_extras_key`,
+  `default_log_dir`, `cache_dir`, `ActivityLog::dir`, `Session::hash_store` (a store that keeps nothing: T4
+  makes it read/write `hash_get`/`hash_put`). `prune_cache` returns 0 (T4). The app wrappers in `site_hub.rs`
+  (`Interactive`, `Counting`) forward `stat` / `copy` / `presign`.
+- **Core `copy.rs`** already has `SITES_WRONG_FORMAT` and `SITES_NEWER_VERSION` for T4.
+- **T4:** core needs `serde_json` as a dependency for `parse_sites_file` (T1 did not touch any Cargo.toml).
+
+**Wiring done in T1:**
+- `binding.rs`: `install_app` builds the Manager after the Publisher, calls `manage::install`, and keeps it in
+  `Ctx.manager`. `open-local` / `open-remote` on a file row call `Manager::open_file` (then the old path runs as
+  before). `refresh_toolbar` reads `read_only` for the selected site and sets `can-write = transfers ready && site
+  open && !read_only`. `apply_local` / `apply_remote` end with `tabs::navigated`.
+- `main.rs`: `open_log(default_log_dir())`, a `prune-cache` thread (7 days), `flush_edits` after `ui.run()` and
+  before `transfers.finish()`.
+- `transfers.rs` (CRLF) `settings_window()` calls `settings_tabs::wire(&window)`.
+- `publish/mod.rs`: `HashCache::with_store(session.hash_store())`. `publish/copy.rs` and `manage/copy.rs` have a
+  header per task: add below your own.
+
+**Slint, beyond §0.5:**
+- `search-available` (AppWindow and Toolbar, default false): the toolbar search field is hidden and disabled
+  until T7 sets it, so the Tab order (and the 40+ tab-count tests) does not change before T7.
+  `search-placeholder` defaults to `@tr("Search")`. Toolbar has `public function focus-search()`.
+- Pane menus as built, cloud: Quick Look, Open, ‒, Download, Download to…, ‒, New Folder…, Rename…, Move To…,
+  Delete…, ‒, Copy Public Link, Copy Path, (if `presign-available`) Copy Presigned Link…, Add to Favorites, Purge
+  from CDN, ‒, Refresh; local: Quick Look, ‒, Upload, ‒, New Folder…, Show in Explorer, Add to Favorites, ‒,
+  Refresh. "Open / Edit" is one "Open" item (`open(context-row)`; a remote file's open is the edit). Rename… and
+  Move To… need `can-write`; Add to Favorites a folder row; Purge `can-purge`. Pane callbacks: `quick-look()`,
+  `rename-start()`, `move-start()`, `copy-link()`, `copy-path()`, `copy-presigned()`, `add-favorite(int)`,
+  `purge()`; properties `can-write`, `presign-available`, `can-purge`, `grid` (bound to `view-mode == 1 && grid`).
+- In view-mode 1 the hidden pane is `visible: false` **and** 0 × 0 (drop hit-tests miss it); the shown pane is
+  `panes.width - 308px`; the Inspector sits at `panes.width - 300px`, 300 px wide.
+- Keys are guarded by `!TextInputInterface.text-input-focused`. Ctrl+K and `?` set `palette-query` ("" or "?"),
+  open the palette and call `palette-query-changed`. Ctrl+W and Ctrl+(Shift+)Tab act only with 2+ tabs; F2 only
+  with `can-write`. Same-pane drag calls `drag-within-remote(row)` only with `can-write` and on an unselected
+  folder row.
+- Overlay closing: the palette's `run` and the edit conflict's `choice`, and the move warning's `confirm`, close
+  the overlay before the callback; Rename, Move To… and Presign leave closing to the app (they show errors).
+  Escape closes every overlay (`*-open = false`; Quick Look also calls `ql-close`).
+- Component callback names: `TabStrip.new-tab()` (not `new`), `SearchFilterBar.cancelled()` → `search-cancel`,
+  `SitesTab.chosen(int)`, `TransferDrawer.retry-selected([int])`, `PublishSheet.plan-view/-filter-changed/-expand`,
+  Sidebar `favorites`, `edits` and their four callbacks.
+- `SettingsWindow` extras: `site-chosen(int)` (master-detail) and `tab-shown(int)` (called on every tab change).
+  The General / Sites / Advanced shells show "These settings arrive in a later version." until T8 builds them
+  (`settings_view_tests` counts that note).
+- Shell files have a private `Shell` component (scrim + empty panel + Escape); replace it as you build.
+- `profile_sheet.slint`'s `edited()` does not yet carry the three cache-control fields back (T9).
+
+**Tests changed on purpose:** the three context-menu tests (`lint_tests.rs`, `pane_tests.rs` ×2) list the new
+items.
 
 ---
 

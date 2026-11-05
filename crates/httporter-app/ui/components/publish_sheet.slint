@@ -229,6 +229,12 @@ export component PublishSheet inherits Rectangle {
     callback cancelled();
     // "Publish N Files", or "Review Deletions…" when `data.needs-review`.
     callback confirmed();
+    // ---- I4 (T9) ----
+    // Flat (0) or Tree (1); the filter as typed; a tree folder row (index into `rows`) opened or
+    // closed.
+    callback plan-view(int);
+    callback plan-filter-changed(string);
+    callback plan-expand(int);
 
     // As many rows as fit under the toolbar with the rest of the sheet (about 460 px), and at least
     // four.

@@ -24,12 +24,21 @@ import { CompareStatus, CompareSummary, HistoryDetail, HistoryRow, PlanGroup, Pl
 import { CdnKeySheet, PublishSheet, ReviewDeletionsSheet } from "components/publish_sheet.slint";
 import { ProfilePage } from "components/profile_page.slint";
 import { ProfileSheet } from "components/profile_sheet.slint";
+import { ActivityFilterData, ActivityRow, CodeLine, CodeSpan, EditConflictData, EditItem, InspectorData, MoveData, MoveWarningData, PaletteIcon, PaletteItem, PlaceItem, PresignData, QuickLookData, RenameData, SearchFilters, SiteSettingsData, SiteSettingsRow, TabItem } from "types.slint";
+import { Inspector } from "components/inspector.slint";
+import { EditConflictSheet, QuickLook } from "components/quicklook.slint";
+import { CommandPalette } from "components/palette.slint";
+import { TabStrip } from "components/tab_strip.slint";
+import { SearchFilterBar } from "components/search_bar.slint";
+import { MoveSheet, MoveWarningSheet, PresignSheet, RenameSheet } from "components/manage_sheets.slint";
+import { ActivitySheet } from "components/activity.slint";
 
 export { FileKind, FileRow, PaneBounds, ProviderTile, S3Errors, SiteDraft, SiteItem, Theme, ZoneChoice }
 export { TransferRow }
 export { ConflictContents, ConflictRow }
 export { SettingsWindow }
 export { CompareStatus, CompareSummary, HistoryDetail, HistoryRow, PlanGroup, PlanRow, ProfileDraft, ProfileItem, ProfileView, PublishSheetData }
+export { ActivityFilterData, ActivityRow, CodeLine, CodeSpan, EditConflictData, EditItem, InspectorData, MoveData, MoveWarningData, PaletteIcon, PaletteItem, PlaceItem, PresignData, QuickLookData, RenameData, SearchFilters, SiteSettingsData, SiteSettingsRow, TabItem }
 
 // Error message shown above the panes. When the open site's error is one editing the site fixes
 // (no password saved, a sign-in that failed), it offers Edit Site… and Remove Site….
@@ -483,6 +492,126 @@ export component AppWindow inherits Window {
     // The sidebar is shown. The toolbar button flips it; the app may set it too (to restore what
     // the user chose last time).
     in-out property <bool> sidebar-visible: true;
+
+    // ---- Manage+ (I4). Every hook is here (T1); the tasks fill in the components and the app ----
+
+    // The view: 0 two panes, 1 a single pane (`single-side`: 0 This PC, 1 the cloud pane) with
+    // the inspector at its right; in the inspector view the rows may be a grid. The toolbar's
+    // buttons only call `set-view` and `set-grid`; the app sets these (T5).
+    in-out property <int> view-mode: 0;
+    in-out property <int> single-side: 0;
+    in-out property <bool> grid: false;
+    callback set-view(int);
+    callback set-grid(bool);
+    in property <InspectorData> inspector;
+    in property <image> inspector-image;
+    callback inspector-quick-look();
+    callback inspector-download();
+    callback inspector-delete();
+    // 0 the public link, 1 the storage link.
+    callback inspector-copy(int);
+    callback inspector-purge();
+
+    // The toolbar: Purge from CDN (T5), synchronized browsing (T5, T7) and search (T7). The search
+    // field shows once the app sets `search-available`.
+    in property <bool> can-purge: false;
+    callback purge();
+    in-out property <bool> sync-browsing: false;
+    callback toggle-sync();
+    in property <bool> search-available: false;
+    in property <string> search-placeholder: @tr("Search");
+    in-out property <string> search-text;
+    in property <bool> searching: false;
+    in-out property <SearchFilters> search-filters;
+    callback search-submitted(string);
+    callback search-filters-changed(SearchFilters);
+    callback search-cancel();
+
+    // The panes' I4 commands (pane 0 This PC, 1 the cloud pane). `can-write`: the open site takes
+    // writes (it is open and not read-only).
+    in property <bool> can-write: false;
+    in property <bool> presign-available: false;
+    callback quick-look(int /* pane */);
+    callback rename-start();
+    callback move-start();
+    callback copy-link(int /* pane */);
+    callback copy-path(int /* pane */);
+    callback copy-presigned();
+    callback add-favorite(int /* pane */, int /* row */);
+    // The cloud selection was dragged onto folder row `row` of the cloud pane itself (a move).
+    callback drag-within-remote(int /* row */);
+
+    // Quick Look (T6). `ql-mode`: 0 the source, 1 the changes.
+    in-out property <bool> ql-open: false;
+    in property <QuickLookData> ql;
+    in property <[CodeLine]> ql-lines;
+    in property <image> ql-image;
+    in-out property <int> ql-mode: 0;
+    callback ql-set-mode(int);
+    // -1 the previous file, 1 the next.
+    callback ql-step(int);
+    callback ql-open-browser();
+    callback ql-open-with();
+    callback ql-close();
+    // A file being edited changed on the site meanwhile (T6): 0 overwrite, 1 save as a copy,
+    // 2 discard the edit.
+    in-out property <bool> edit-conflict-open: false;
+    in property <EditConflictData> edit-conflict;
+    callback edit-conflict-choice(int);
+
+    // The sidebar's Favorites and Editing (T6).
+    in property <[PlaceItem]> favorites;
+    callback favorite-selected(int);
+    callback favorite-remove(int);
+    in property <[EditItem]> edits;
+    callback edit-selected(int);
+    callback edit-stop(int);
+
+    // The command palette (T7): Ctrl+K, and `?` for the shortcuts. Choosing an item closes it.
+    in-out property <bool> palette-open: false;
+    in property <[PaletteItem]> palette-items;
+    in-out property <string> palette-query;
+    callback palette-query-changed(string);
+    callback palette-run(int);
+    // The tabs (T7): the strip shows while there are two or more.
+    in property <[TabItem]> tabs;
+    in-out property <int> current-tab: 0;
+    callback tab-selected(int);
+    callback tab-close(int);
+    callback tab-new();
+
+    // Rename, Move To…, the move warning and pre-signed links (T9). Rename, Move To… and the
+    // presign sheet are closed by the app; the warning closes itself.
+    in-out property <bool> rename-open: false;
+    in property <RenameData> rename-data;
+    callback rename-confirm(string);
+    in-out property <bool> move-open: false;
+    in property <MoveData> move-data;
+    callback move-confirm(string);
+    in-out property <bool> move-warning-open: false;
+    in property <MoveWarningData> move-warning;
+    callback move-warning-confirm();
+    in-out property <bool> presign-open: false;
+    in property <PresignData> presign-data;
+    callback presign-copy(int);
+
+    // The activity log (T9).
+    in-out property <bool> activity-open: false;
+    in property <[ActivityRow]> activity-rows;
+    in property <[string]> activity-sites;
+    in-out property <ActivityFilterData> activity-filter;
+    callback activity-filter-changed(ActivityFilterData);
+    callback activity-export();
+    callback activity-open-folder();
+
+    // The open site is read-only (T8): a banner like the others, while not empty.
+    in property <string> read-only-banner-text;
+    // M11 (T9): Retry Selected on the drawer's Failed tab.
+    callback transfers-retry-selected([int]);
+    // The Publish sheet's Flat (0) | Tree (1), its filter and a tree folder opened or closed (T9).
+    callback plan-view(int);
+    callback plan-filter-changed(string);
+    callback plan-expand(int);
     // Where each pane and its list are, in window coordinates and logical pixels, for telling what
     // a dragged file is over: the pane's rectangle (so a point over the toolbar, the status bar or
     // the gap between the panes is over neither; the panes sit side by side when the main area is
@@ -529,6 +658,12 @@ export component AppWindow inherits Window {
                 root.drag-to-remote(root.drag-row-remote);
             } else if (pane == 1 && root.drag-over-local) {
                 root.drag-to-local(root.drag-row-local);
+            } else if (pane == 1 && root.can-write && remote-pane.contains(point.x, point.y)) {
+                // Onto a folder of the cloud pane itself, not one being dragged: a move (T9).
+                let row = remote-pane.folder-at(point.y);
+                if (row >= 0 && !root.remote-rows[row].selected) {
+                    root.drag-within-remote(row);
+                }
             }
         }
         root.drag-from = -1;
@@ -569,6 +704,79 @@ export component AppWindow inherits Window {
                 root.drag-from = -1;
                 root.drag-aborted = true;
                 return accept;
+            }
+            // Manage+ (I4). None of these while a text field has the focus (the sheets and overlays
+            // sit outside this scope).
+            if (!TextInputInterface.text-input-focused) {
+                let bare = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta;
+                let ctrl = event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+                let active = root.local-pane-active ? 0 : 1;
+                // Space: Quick Look of the pane in use.
+                if (bare && !event.modifiers.shift && event.text == Key.Space) {
+                    if (!event.repeat) {
+                        root.quick-look(active);
+                    }
+                    return accept;
+                }
+                // Ctrl+K: the command palette; `?`: the palette with the shortcuts.
+                if ((ctrl && (event.text == "k" || event.text == "K")) || (bare && event.text == "?")) {
+                    if (!event.repeat) {
+                        root.palette-query = event.text == "?" ? "?" : "";
+                        root.palette-open = true;
+                        root.palette-query-changed(root.palette-query);
+                    }
+                    return accept;
+                }
+                // F2: rename.
+                if (bare && !event.modifiers.shift && event.text == Key.F2) {
+                    if (!event.repeat && root.can-write) {
+                        root.rename-start();
+                    }
+                    return accept;
+                }
+                // Ctrl+Shift+C: copy the public link of the pane in use's selection.
+                if (event.modifiers.control && event.modifiers.shift && !event.modifiers.alt && !event.modifiers.meta && (event.text == "c" || event.text == "C")) {
+                    if (!event.repeat) {
+                        root.copy-link(active);
+                    }
+                    return accept;
+                }
+                // Ctrl+F: the search field.
+                if (ctrl && (event.text == "f" || event.text == "F")) {
+                    toolbar.focus-search();
+                    return accept;
+                }
+                // Ctrl+1 and Ctrl+2: This PC and the cloud pane.
+                if (ctrl && event.text == "1") {
+                    local-pane.focus();
+                    return accept;
+                }
+                if (ctrl && event.text == "2") {
+                    remote-pane.focus();
+                    return accept;
+                }
+                // Ctrl+T: a new tab; Ctrl+W: close this one (never the last).
+                if (ctrl && (event.text == "t" || event.text == "T")) {
+                    if (!event.repeat) {
+                        root.tab-new();
+                    }
+                    return accept;
+                }
+                if (ctrl && (event.text == "w" || event.text == "W") && root.tabs.length > 1) {
+                    if (!event.repeat) {
+                        root.tab-close(root.current-tab);
+                    }
+                    return accept;
+                }
+                // Ctrl+Tab and Ctrl+Shift+Tab: the next and the previous tab.
+                if (event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && (event.text == Key.Tab || event.text == Key.Backtab) && root.tabs.length > 1) {
+                    if (event.modifiers.shift || event.text == Key.Backtab) {
+                        root.tab-selected(Math.mod(root.current-tab + root.tabs.length - 1, root.tabs.length));
+                    } else {
+                        root.tab-selected(Math.mod(root.current-tab + 1, root.tabs.length));
+                    }
+                    return accept;
+                }
             }
             // Ctrl+U uploads, Ctrl+Shift+N makes a folder and Del deletes, while the toolbar would.
             if (event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift && (event.text == "u" || event.text == "U")) {
@@ -614,7 +822,7 @@ export component AppWindow inherits Window {
         }
 
         VerticalLayout {
-            Toolbar {
+            toolbar := Toolbar {
                 title: root.on-profile ? root.profiles[root.selected-profile].name : (root.sites.length == 0 ? @tr("Welcome") : (root.has-selection ? root.sites[root.selected-site].name : @tr("HTTPorter")));
                 subtitle: root.on-profile ? @tr("Publish profile") : (root.sites.length == 0 ? @tr("No site connected") : root.endpoint-text);
                 connection-text: root.connection-text;
@@ -641,6 +849,35 @@ export component AppWindow inherits Window {
                 download => { root.download(); }
                 new-folder => { root.new-folder(); }
                 delete => { root.delete(); }
+                view-mode: root.view-mode;
+                grid: root.grid;
+                can-purge: root.can-purge;
+                sync-browsing: root.sync-browsing;
+                search-available: root.search-available;
+                search-placeholder: root.search-placeholder;
+                search-text <=> root.search-text;
+                searching: root.searching;
+                set-view(mode) => { root.set-view(mode); }
+                set-grid(on) => { root.set-grid(on); }
+                purge => { root.purge(); }
+                toggle-sync => { root.toggle-sync(); }
+                refresh => { root.refresh(); }
+                search-submitted(text) => { root.search-submitted(text); }
+                search-cancel => { root.search-cancel(); }
+            }
+
+            if root.tabs.length > 1: TabStrip {
+                tabs: root.tabs;
+                current <=> root.current-tab;
+                selected(index) => { root.tab-selected(index); }
+                close(index) => { root.tab-close(index); }
+                new-tab => { root.tab-new(); }
+            }
+
+            if root.searching: SearchFilterBar {
+                filters <=> root.search-filters;
+                changed(filters) => { root.search-filters-changed(filters); }
+                cancelled => { root.search-cancel(); }
             }
 
             HorizontalLayout {
@@ -676,6 +913,12 @@ export component AppWindow inherits Window {
                         root.add-site();
                     }
                     open-settings => { root.open-settings(); }
+                    favorites: root.favorites;
+                    edits: root.edits;
+                    favorite-selected(index) => { root.favorite-selected(index); }
+                    favorite-remove(index) => { root.favorite-remove(index); }
+                    edit-selected(index) => { root.edit-selected(index); }
+                    edit-stop(index) => { root.edit-stop(index); }
                 }
 
                 // Main area: the two file panes, or the Welcome screen while there is no site.
@@ -747,6 +990,12 @@ export component AppWindow inherits Window {
                                     clicked => { root.disk-banner-resume(); }
                                 }
                             }
+                            if root.read-only-banner-text != "": Banner {
+                                text: root.read-only-banner-text;
+                                icon: Icons.lock;
+                                fg: Theme.label2;
+                                bg: Theme.chip;
+                            }
                             if root.error-text != "": ErrorBanner {
                                 text: root.error-text;
                                 offer-edit: root.remote-offer-edit && root.sites-v2-ready && root.has-selection;
@@ -762,14 +1011,21 @@ export component AppWindow inherits Window {
 
                                 vertical-stretch: 1;
 
+                                // In the inspector view only the pane `single-side` names is shown,
+                                // beside the inspector; the other is hidden and takes no room.
                                 local-pane := Pane {
                                     x: 0px;
                                     y: 0px;
-                                    visible: !root.on-profile;
+                                    visible: !root.on-profile && (root.view-mode == 0 || root.single-side == 0);
                                     comparing: root.comparing;
                                     compare: root.compare;
-                                    width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
-                                    height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
+                                    width: root.view-mode == 1 ? (root.single-side == 0 ? panes.width - 308px : 0px) : (panes.side-by-side ? (panes.width - 8px) / 2 : panes.width);
+                                    height: root.view-mode == 1 ? (root.single-side == 0 ? panes.height : 0px) : (panes.side-by-side ? panes.height : (panes.height - 8px) / 2);
+                                    grid: root.view-mode == 1 && root.grid;
+                                    can-write: root.can-write;
+                                    can-purge: root.can-purge;
+                                    quick-look => { root.quick-look(0); }
+                                    add-favorite(row) => { root.add-favorite(0, row); }
                                     title: @tr("This PC");
                                     changed has-focus => {
                                         if (self.has-focus) {
@@ -813,13 +1069,25 @@ export component AppWindow inherits Window {
                                     drag-cancelled => { root.pane-drag-cancelled(); }
                                 }
                                 remote-pane := Pane {
-                                    visible: !root.on-profile;
+                                    visible: !root.on-profile && (root.view-mode == 0 || root.single-side == 1);
                                     comparing: root.comparing;
                                     compare: root.compare;
-                                    x: panes.side-by-side ? (panes.width + 8px) / 2 : 0px;
-                                    y: panes.side-by-side ? 0px : (panes.height + 8px) / 2;
-                                    width: panes.side-by-side ? (panes.width - 8px) / 2 : panes.width;
-                                    height: panes.side-by-side ? panes.height : (panes.height - 8px) / 2;
+                                    x: root.view-mode == 1 ? 0px : (panes.side-by-side ? (panes.width + 8px) / 2 : 0px);
+                                    y: root.view-mode == 1 ? 0px : (panes.side-by-side ? 0px : (panes.height + 8px) / 2);
+                                    width: root.view-mode == 1 ? (root.single-side == 1 ? panes.width - 308px : 0px) : (panes.side-by-side ? (panes.width - 8px) / 2 : panes.width);
+                                    height: root.view-mode == 1 ? (root.single-side == 1 ? panes.height : 0px) : (panes.side-by-side ? panes.height : (panes.height - 8px) / 2);
+                                    grid: root.view-mode == 1 && root.grid;
+                                    can-write: root.can-write;
+                                    presign-available: root.presign-available;
+                                    can-purge: root.can-purge;
+                                    quick-look => { root.quick-look(1); }
+                                    rename-start => { root.rename-start(); }
+                                    move-start => { root.move-start(); }
+                                    copy-link => { root.copy-link(1); }
+                                    copy-path => { root.copy-path(1); }
+                                    copy-presigned => { root.copy-presigned(); }
+                                    add-favorite(row) => { root.add-favorite(1, row); }
+                                    purge => { root.purge(); }
                                     title: root.has-selection ? root.sites[root.selected-site].name : @tr("No site selected");
                                     changed has-focus => {
                                         if (self.has-focus) {
@@ -864,6 +1132,20 @@ export component AppWindow inherits Window {
                                     drag-moved(point) => { root.pane-drag-moved(1, point); }
                                     drag-ended(point) => { root.pane-drag-ended(1, point); }
                                     drag-cancelled => { root.pane-drag-cancelled(); }
+                                }
+
+                                if root.view-mode == 1 && !root.on-profile: Inspector {
+                                    x: panes.width - 300px;
+                                    y: 0px;
+                                    width: 300px;
+                                    height: panes.height;
+                                    data: root.inspector;
+                                    image: root.inspector-image;
+                                    quick-look => { root.inspector-quick-look(); }
+                                    download => { root.inspector-download(); }
+                                    delete => { root.inspector-delete(); }
+                                    copy(which) => { root.inspector-copy(which); }
+                                    purge => { root.inspector-purge(); }
                                 }
 
                                 // A publish profile's page, in place of the two panes (which keep their state).
@@ -914,6 +1196,7 @@ export component AppWindow inherits Window {
                                 move-to-top(id) => { root.transfer-move-to-top(id); }
                                 pause-row(id) => { root.transfer-pause(id); }
                                 resume-row(id) => { root.transfer-resume(id); }
+                                retry-selected(ids) => { root.transfers-retry-selected(ids); }
                             }
                         }
                     }
@@ -1133,6 +1416,9 @@ export component AppWindow inherits Window {
         purge(mode) => { root.publish-purge(mode); }
         change-folder => { root.publish-change-folder(); }
         export-plan => { root.publish-export(); }
+        plan-view(view) => { root.plan-view(view); }
+        plan-filter-changed(text) => { root.plan-filter-changed(text); }
+        plan-expand(index) => { root.plan-expand(index); }
         cancelled => {
             root.publish-open = false;
             root.publish-cancel();
@@ -1185,5 +1471,103 @@ export component AppWindow inherits Window {
             root.cdn-key-open = false;
             root.cdn-key-cancel();
         }
+    }
+
+    // ---- Manage+ (I4) overlays. Escape closes each. ----
+    if root.rename-open: RenameSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        data: root.rename-data;
+        confirm(name) => { root.rename-confirm(name); }
+        cancelled => { root.rename-open = false; }
+    }
+    if root.move-open: MoveSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        data: root.move-data;
+        confirm(destination) => { root.move-confirm(destination); }
+        cancelled => { root.move-open = false; }
+    }
+    if root.move-warning-open: MoveWarningSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        data: root.move-warning;
+        confirm => {
+            root.move-warning-open = false;
+            root.move-warning-confirm();
+        }
+        cancelled => { root.move-warning-open = false; }
+    }
+    if root.presign-open: PresignSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        data: root.presign-data;
+        copy(expiry) => { root.presign-copy(expiry); }
+        cancelled => { root.presign-open = false; }
+    }
+    if root.activity-open: ActivitySheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        rows: root.activity-rows;
+        sites: root.activity-sites;
+        filter <=> root.activity-filter;
+        filter-changed(filter) => { root.activity-filter-changed(filter); }
+        export => { root.activity-export(); }
+        open-folder => { root.activity-open-folder(); }
+        cancelled => { root.activity-open = false; }
+    }
+    if root.ql-open: QuickLook {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        data: root.ql;
+        lines: root.ql-lines;
+        image: root.ql-image;
+        mode <=> root.ql-mode;
+        set-mode(mode) => { root.ql-set-mode(mode); }
+        step(by) => { root.ql-step(by); }
+        open-browser => { root.ql-open-browser(); }
+        open-with => { root.ql-open-with(); }
+        close => {
+            root.ql-open = false;
+            root.ql-close();
+        }
+    }
+    if root.edit-conflict-open: EditConflictSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        data: root.edit-conflict;
+        choice(choice) => {
+            root.edit-conflict-open = false;
+            root.edit-conflict-choice(choice);
+        }
+        cancelled => { root.edit-conflict-open = false; }
+    }
+    if root.palette-open: CommandPalette {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        items: root.palette-items;
+        query <=> root.palette-query;
+        query-changed(query) => { root.palette-query-changed(query); }
+        run(index) => {
+            root.palette-open = false;
+            root.palette-run(index);
+        }
+        close => { root.palette-open = false; }
     }
 }

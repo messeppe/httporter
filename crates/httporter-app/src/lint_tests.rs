@@ -673,10 +673,12 @@ fn menu_title_scanner_reads_titles_and_flags_plain_strings() {
     assert_eq!(menu_titles(source, "second"), ["Other"]);
 }
 
-/// Task 17: the context menus carry the entries the brief lists, cloud rows: Download, Download
-/// to…, New Folder…, Delete…, Refresh; This PC rows: Upload, New Folder…, Show in Explorer,
-/// Refresh, and every title goes through `@tr()` (the headless test in `pane_tests.rs` opens the
-/// menus and reads what they show).
+/// Task 17 and I4: the context menus carry the entries the brief lists, cloud rows: Quick Look,
+/// Open, Download, Download to…, New Folder…, Rename…, Move To…, Delete…, Copy Public Link, Copy
+/// Path, Copy Presigned Link… (where the site has them), Add to Favorites, Purge from CDN, Refresh;
+/// This PC rows: Quick Look, Upload, New Folder…, Show in Explorer, Add to Favorites, Refresh, and
+/// every title goes through `@tr()` (the headless test in `pane_tests.rs` opens the menus and reads
+/// what they show).
 #[test]
 fn context_menu_items_are_the_listed_ones_and_all_go_through_tr() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/components/pane.slint");
@@ -684,16 +686,32 @@ fn context_menu_items_are_the_listed_ones_and_all_go_through_tr() {
     assert_eq!(
         menu_titles(&source, "cloud-menu"),
         [
+            "Quick Look",
+            "Open",
             "Download",
             "Download to…",
             "New Folder…",
+            "Rename…",
+            "Move To…",
             "Delete…",
+            "Copy Public Link",
+            "Copy Path",
+            "Copy Presigned Link…",
+            "Add to Favorites",
+            "Purge from CDN",
             "Refresh"
         ]
     );
     assert_eq!(
         menu_titles(&source, "local-menu"),
-        ["Upload", "New Folder…", "Show in Explorer", "Refresh"]
+        [
+            "Quick Look",
+            "Upload",
+            "New Folder…",
+            "Show in Explorer",
+            "Add to Favorites",
+            "Refresh"
+        ]
     );
     // The sidebar's site menu is another context menu, and its titles go through `@tr()` too.
     let sidebar = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/components/sidebar.slint");

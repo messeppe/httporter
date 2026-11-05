@@ -3,7 +3,8 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 
 /// Stable identifier of a saved site (a random UUID, as text).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct SiteId(pub String);
 
 impl SiteId {
@@ -49,7 +50,8 @@ impl fmt::Display for AccountId {
 }
 
 /// The API a site is reached through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     Bunny,
     /// Any S3-compatible service; [`S3Site::preset`] says which.
@@ -57,7 +59,8 @@ pub enum ProviderKind {
 }
 
 /// The S3-compatible services the Add Site sheet offers by name, in the order it shows them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum S3Preset {
     AwsS3,
     CloudflareR2,
@@ -112,7 +115,7 @@ impl S3Preset {
 }
 
 /// What an S3 site needs beyond a Bunny site's fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct S3Site {
     pub preset: S3Preset,
     /// `scheme://host[:port]`, without the bucket.
@@ -134,6 +137,19 @@ pub struct SiteRecord {
     /// Set exactly when `provider` is [`ProviderKind::S3`].
     pub s3: Option<S3Site>,
     pub created_at: DateTime<Utc>,
+}
+
+/// What a site keeps beyond its [`SiteRecord`] (I4), as JSON in the settings under
+/// `site_extras:<id>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SiteExtras {
+    /// Every write to the site is off.
+    pub read_only: bool,
+    /// Where the site's files are served from (`https://…/`), when no pull zone says.
+    pub public_base_url: Option<String>,
+    /// How long a pre-signed link lasts by default, in seconds; 0 means 3600.
+    pub presign_expiry_secs: u32,
 }
 
 #[cfg(test)]

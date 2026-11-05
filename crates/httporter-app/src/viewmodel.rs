@@ -263,6 +263,7 @@ pub fn to_slint_rows(rows: &[RowData]) -> ModelRc<FileRow> {
             folder: r.folder,
             selected: false,
             status: CompareStatus::None,
+            thumb: Default::default(),
         })
         .collect();
     ModelRc::new(VecModel::from(rows))

@@ -1276,9 +1276,11 @@ fn record_commands(w: &AppWindow) -> Rc<RefCell<Vec<String>>> {
     log
 }
 
-/// Task 17: a right click on a cloud row opens Download, Download to…, New Folder…, Delete… and
-/// Refresh; on a This PC row Upload, New Folder…, Show in Explorer and Refresh. Each is on or off
-/// as the toolbar says, and a chosen one reaches the app.
+/// Task 17 and I4: a right click on a cloud row opens Quick Look, Open, Download, Download to…,
+/// New Folder…, Rename…, Move To…, Delete…, Copy Public Link, Copy Path, Add to Favorites, Purge
+/// from CDN and Refresh; on a This PC row Quick Look, Upload, New Folder…, Show in Explorer, Add to
+/// Favorites and Refresh. Each is on or off as the toolbar says (the I4 writes need `can-write`,
+/// Add to Favorites a folder row), and a chosen one reaches the app.
 #[test]
 fn context_menu_items_present_with_tr() {
     let w = window_with_panes(4, 4);
@@ -1295,10 +1297,18 @@ fn context_menu_items_present_with_tr() {
     assert_eq!(
         open_menu(&w),
         entries(&[
+            ("Quick Look", true),
+            ("Open", true),
             ("Download", true),
             ("Download to…", true),
             ("New Folder…", true),
+            ("Rename…", false),
+            ("Move To…", false),
             ("Delete…", false),
+            ("Copy Public Link", true),
+            ("Copy Path", true),
+            ("Add to Favorites", false),
+            ("Purge from CDN", false),
             ("Refresh", true),
         ])
     );
@@ -1359,9 +1369,11 @@ fn context_menu_items_present_with_tr() {
     assert_eq!(
         open_menu(&w),
         entries(&[
+            ("Quick Look", true),
             ("Upload", true),
             ("New Folder…", false),
             ("Show in Explorer", true),
+            ("Add to Favorites", false),
             ("Refresh", true),
         ])
     );
@@ -1400,7 +1412,14 @@ fn the_menu_key_and_shift_f10_open_the_context_menu() {
             .iter()
             .map(|(t, _)| t.as_str())
             .collect::<Vec<_>>(),
-        ["Upload", "New Folder…", "Show in Explorer", "Refresh"]
+        [
+            "Quick Look",
+            "Upload",
+            "New Folder…",
+            "Show in Explorer",
+            "Add to Favorites",
+            "Refresh"
+        ]
     );
     menu_entry(&w, "Show in Explorer").mock_single_click(PointerEventButton::Left);
     assert_eq!(
@@ -1419,10 +1438,18 @@ fn the_menu_key_and_shift_f10_open_the_context_menu() {
             .map(|(t, _)| t.as_str())
             .collect::<Vec<_>>(),
         [
+            "Quick Look",
+            "Open",
             "Download",
             "Download to…",
             "New Folder…",
+            "Rename…",
+            "Move To…",
             "Delete…",
+            "Copy Public Link",
+            "Copy Path",
+            "Add to Favorites",
+            "Purge from CDN",
             "Refresh"
         ]
     );

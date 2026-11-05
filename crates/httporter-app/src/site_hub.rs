@@ -16,13 +16,14 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use httporter_bunny::BunnyConfig;
 use httporter_core::{
-    ByteStream, Capabilities, Listing, ProviderError, ProviderKind, RemotePath, RetryPolicy,
-    S3Preset, SiteId, SiteRecord, StorageProvider, TransferSettings, UploadOptions, UploadSource,
-    with_retry,
+    ByteStream, Capabilities, Listing, ObjectInfo, ProviderError, ProviderKind, RemotePath,
+    RetryPolicy, S3Preset, SiteId, SiteRecord, StorageProvider, TransferSettings, UploadOptions,
+    UploadSource, with_retry,
 };
 use httporter_platform::{CredentialKey, CredentialStore, SiteSecret};
 use httporter_s3::{Credentials, Endpoint, S3Config, Url, part_size_for};
@@ -302,6 +303,18 @@ impl StorageProvider for Interactive {
     ) -> Result<(), ProviderError> {
         self.0.abort_multipart(path, upload_id).await
     }
+
+    async fn stat(&self, path: &RemotePath) -> Result<ObjectInfo, ProviderError> {
+        self.0.stat(path).await
+    }
+
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> Result<(), ProviderError> {
+        self.0.copy(from, to).await
+    }
+
+    fn presign(&self, path: &RemotePath, expires: Duration) -> Result<String, ProviderError> {
+        self.0.presign(path, expires)
+    }
 }
 
 /// [`Interactive`], counting the entries its listings find: how far a plan has got (review M4).
@@ -375,5 +388,17 @@ impl StorageProvider for Counting {
         upload_id: &str,
     ) -> Result<(), ProviderError> {
         self.inner.abort_multipart(path, upload_id).await
+    }
+
+    async fn stat(&self, path: &RemotePath) -> Result<ObjectInfo, ProviderError> {
+        self.inner.stat(path).await
+    }
+
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> Result<(), ProviderError> {
+        self.inner.copy(from, to).await
+    }
+
+    fn presign(&self, path: &RemotePath, expires: Duration) -> Result<String, ProviderError> {
+        self.inner.presign(path, expires)
     }
 }

@@ -15,6 +15,8 @@ export struct FileRow {
     // In the pane's selection: the row is drawn highlighted. The app keeps it up to date.
     selected: bool,
     status: CompareStatus,
+    // I4 (T5): the grid's thumbnail; empty for none.
+    thumb: image,
 }
 
 // The provider tile a site shows (mockup `providers`): Bunny, or an S3 service by preset. The
@@ -153,6 +155,10 @@ export struct PlanRow {
     size: string,
     checked: bool,
     header: bool,
+    // I4 (T9): the tree view's indent, and whether the row is a folder and shown open.
+    depth: int,
+    folder: bool,
+    expanded: bool,
 }
 
 // Everything the Publish sheet shows apart from the plan list. `purge`: 0 off, 1 changed files,
@@ -243,5 +249,186 @@ export struct ProfileDraft {
     guard-files: string,
     guard-percent: string,
     cdn-note: string,
+    error: string,
+    // I4 (T9): the Cache-Control header (S3 only), whether it can be set, and why not.
+    cache-control: string,
+    cache-control-enabled: bool,
+    cache-control-note: string,
+}
+
+// ---- Manage+ (I4) ----
+
+// The inspector beside the single pane (T5).
+export struct InspectorData {
+    shown: bool,
+    name: string,
+    kind-text: string,
+    is-image: bool,
+    multi: string,
+    modified: string,
+    created: string,
+    content-type: string,
+    regions: string,
+    checksum-label: string,
+    checksum: string,
+    matches: string,
+    public-url: string,
+    public-note: string,
+    storage-url: string,
+    storage-note: string,
+    can-purge: bool,
+    purge-note: string,
+    can-write: bool,
+    busy: bool,
+}
+
+// A run of highlighted text in Quick Look (T6). `style`: 0 plain, 1 tag, 2 attribute, 3 string,
+// 4 comment, 5 keyword, 6 number, 7 punctuation.
+export struct CodeSpan {
+    text: string,
+    style: int,
+}
+
+// One line of Quick Look's text (T6). `mark`: 0 none, 1 added, 2 removed.
+export struct CodeLine {
+    no: string,
+    spans: [CodeSpan],
+    mark: int,
+}
+
+// Quick Look's header and footer (T6). `kind`: 0 text, 1 image, 2 other.
+export struct QuickLookData {
+    title: string,
+    subtitle: string,
+    kind: int,
+    can-diff: bool,
+    diff-label: string,
+    diff-note: string,
+    footer-left: string,
+    footer-right: string,
+    busy: bool,
+    error: string,
+    can-browser: bool,
+}
+
+// The sheet for a file that changed on the site while it was being edited (T6).
+export struct EditConflictData {
+    name: string,
+    body: string,
+}
+
+// A row of the sidebar's Favorites (T6).
+export struct PlaceItem {
+    id: int,
+    name: string,
+    subtitle: string,
+    remote: bool,
+}
+
+// A row of the sidebar's Editing (T6).
+export struct EditItem {
+    id: int,
+    name: string,
+    state: string,
+    busy: bool,
+    failed: bool,
+}
+
+// The mark of a command palette row (T7).
+export enum PaletteIcon { action, publish, purge, upload, download, folder, site, profile, favorite, shortcut, settings }
+
+// A row of the command palette (T7): a section header (`header`) or an entry.
+export struct PaletteItem {
+    header: bool,
+    title: string,
+    subtitle: string,
+    icon: PaletteIcon,
+    keys: string,
+    enabled: bool,
+}
+
+// A tab of the main window (T7).
+export struct TabItem {
+    title: string,
+    subtitle: string,
+}
+
+// The search filter bar (T7). `scope`: 0 the whole site, 1 this folder; `kind`, `size` and
+// `modified` are positions in their pop-ups (0 any).
+export struct SearchFilters {
+    scope: int,
+    kind: int,
+    size: int,
+    modified: int,
+}
+
+// The Rename sheet (T9).
+export struct RenameData {
+    title: string,
+    name: string,
+    note: string,
+    error: string,
+    busy: bool,
+}
+
+// The Move To… sheet (T9).
+export struct MoveData {
+    title: string,
+    destination: string,
+    note: string,
+    error: string,
+    busy: bool,
+}
+
+// The warning before a move that downloads and uploads again (T9).
+export struct MoveWarningData {
+    title: string,
+    body: string,
+    button: string,
+}
+
+// The pre-signed link sheet (T9). `expiry`: 0 15 minutes, 1 1 hour, 2 1 day, 3 7 days.
+export struct PresignData {
+    title: string,
+    expiry: int,
+    error: string,
+}
+
+// A row of the activity sheet (T9).
+export struct ActivityRow {
+    when: string,
+    kind: string,
+    site: string,
+    path: string,
+    detail: string,
+    failed: bool,
+}
+
+// The activity sheet's filter (T9). `kind`: 0 all … 6 errors; `site`: -1 all, else a position in
+// the sites.
+export struct ActivityFilterData {
+    kind: int,
+    site: int,
+    text: string,
+}
+
+// A row of Settings › Sites (T8).
+export struct SiteSettingsRow {
+    id: string,
+    name: string,
+    subtitle: string,
+    read-only: bool,
+}
+
+// The form of Settings › Sites (T8).
+export struct SiteSettingsData {
+    id: string,
+    read-only: bool,
+    public-url: string,
+    presign: bool,
+    presign-expiry: int,
+    cdn: string,
+    upload-choice: string,
+    download-choice: string,
     error: string,
 }

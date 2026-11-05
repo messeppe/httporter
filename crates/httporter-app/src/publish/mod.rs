@@ -13,6 +13,7 @@ mod cdn;
 mod compare_view;
 mod copy;
 mod profile_view;
+mod purge_now;
 mod sheet_view;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -62,11 +63,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Publisher {
     pub fn new(session: Arc<Session>, transfers: Arc<Transfers>, link: Link) -> Arc<Self> {
+        let hashes = HashCache::with_store(session.hash_store());
         Arc::new(Self {
             session,
             transfers,
             link,
-            hashes: HashCache::default(),
+            hashes,
             state: Mutex::default(),
             compare: Mutex::default(),
             sheet: Mutex::default(),

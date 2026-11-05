@@ -4,7 +4,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { ProfileItem, SiteItem } from "../types.slint";
+import { EditItem, PlaceItem, ProfileItem, SiteItem } from "../types.slint";
 import { MonoTile, StatusDot } from "chips.slint";
 import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { VCenter } from "layout.slint";
@@ -210,6 +210,15 @@ export component Sidebar inherits Rectangle {
     callback edit-site(int);
     callback duplicate-site(int);
     callback remove-site(int);
+    // ---- Manage+ (I4, T6) ----
+    // The Favorites section: a click opens the place; its menu has Remove.
+    in property <[PlaceItem]> favorites;
+    callback favorite-selected(int);
+    callback favorite-remove(int);
+    // The Editing section: a row per file being edited; its menu has Stop.
+    in property <[EditItem]> edits;
+    callback edit-selected(int);
+    callback edit-stop(int);
 
     // The row the site menu was opened on.
     property <int> menu-site: -1;

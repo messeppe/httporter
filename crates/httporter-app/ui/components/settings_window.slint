@@ -14,7 +14,8 @@ import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { ErrorLine, Field, RegionPicker } from "form_controls.slint";
 import { Segmented } from "sheets.slint";
 import { VCenter } from "layout.slint";
-import { ProfileItem } from "../types.slint";
+import { ProfileItem, SiteSettingsData, SiteSettingsRow } from "../types.slint";
+import { AdvancedTab, GeneralTab, SitesTab } from "settings_tabs.slint";
 
 // One tab of the row under the title (mockup: a 82 px button with the icon over its name).
 // Reachable with Tab, activated with Space or Return.
@@ -628,10 +629,40 @@ export component SettingsWindow inherits Window {
     callback forget-key(string);
     callback publish-shown();
 
+    // ---- I4 (T8): General (0), Sites (1) and Advanced (5) ----
+    // General.
+    in-out property <int> appearance: 0;
+    in-out property <int> start-view: 0;
+    in-out property <bool> restore-tabs: true;
+    in-out property <bool> ask-big-preview: true;
+    in property <string> preview-cache-text;
+    callback clear-preview-cache();
+    callback general-edited();
+    // Sites.
+    in property <[SiteSettingsRow]> site-rows;
+    in-out property <int> site-current: -1;
+    in-out property <SiteSettingsData> site-form;
+    // A site row was chosen: the app fills `site-form`.
+    callback site-chosen(int);
+    callback site-form-save(SiteSettingsData);
+    // Forget the remembered choice for uploads (true) or downloads.
+    callback site-forget-choice(bool);
+    callback export-sites();
+    callback import-sites();
+    in property <string> sites-message;
+    // Advanced.
+    in property <string> hash-cache-text;
+    callback clear-hash-cache();
+    callback show-activity();
+    callback open-log-folder();
+    // A tab was opened (its number), for the app to refresh what it shows.
+    callback tab-shown(int);
+
     changed current-tab => {
         if (root.current-tab == 4) {
             root.publish-shown();
         }
+        root.tab-shown(root.current-tab);
     }
 
     title: root.tab-names[root.current-tab];
@@ -674,7 +705,7 @@ export component SettingsWindow inherits Window {
             }
         }
 
-        if root.current-tab != 2 && root.current-tab != 4: Rectangle {
+        if root.current-tab == 3: Rectangle {
             vertical-stretch: 1;
             accessible-role: tab-panel;
             accessible-label: root.tab-names[root.current-tab];
@@ -709,6 +740,44 @@ export component SettingsWindow inherits Window {
             proxy-error: root.proxy-error;
             edited => { root.changed(); }
             restore-defaults => { root.restore-defaults(); }
+        }
+
+        if root.current-tab == 0: GeneralTab {
+            vertical-stretch: 1;
+            accessible-role: tab-panel;
+            accessible-label: root.tab-names[0];
+            appearance <=> root.appearance;
+            start-view <=> root.start-view;
+            restore-tabs <=> root.restore-tabs;
+            ask-big-preview <=> root.ask-big-preview;
+            preview-cache-text: root.preview-cache-text;
+            clear-preview-cache => { root.clear-preview-cache(); }
+            edited => { root.general-edited(); }
+        }
+
+        if root.current-tab == 1: SitesTab {
+            vertical-stretch: 1;
+            accessible-role: tab-panel;
+            accessible-label: root.tab-names[1];
+            rows: root.site-rows;
+            current <=> root.site-current;
+            form <=> root.site-form;
+            message: root.sites-message;
+            chosen(index) => { root.site-chosen(index); }
+            save(form) => { root.site-form-save(form); }
+            forget-choice(upload) => { root.site-forget-choice(upload); }
+            export-sites => { root.export-sites(); }
+            import-sites => { root.import-sites(); }
+        }
+
+        if root.current-tab == 5: AdvancedTab {
+            vertical-stretch: 1;
+            accessible-role: tab-panel;
+            accessible-label: root.tab-names[5];
+            hash-cache-text: root.hash-cache-text;
+            clear-hash-cache => { root.clear-hash-cache(); }
+            show-activity => { root.show-activity(); }
+            open-log-folder => { root.open-log-folder(); }
         }
 
         if root.current-tab == 4: PublishTab {

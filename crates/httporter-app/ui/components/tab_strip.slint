@@ -1,0 +1,19 @@
+// The main window's tabs (T7), under the toolbar while there is more than one.
+//
+// T1 shell: the properties and an empty strip.
+
+import { Theme } from "../theme.slint";
+import { TabItem } from "../types.slint";
+
+export component TabStrip inherits Rectangle {
+    in property <[TabItem]> tabs;
+    in-out property <int> current: 0;
+    callback selected(int);
+    callback close(int);
+    callback new-tab();
+
+    height: 30px;
+    background: Theme.chrome;
+    accessible-role: tab-list;
+    accessible-label: @tr("Tabs");
+}

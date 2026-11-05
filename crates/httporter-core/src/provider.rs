@@ -6,9 +6,26 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use futures_util::stream::Stream;
 
 use crate::{Capabilities, Entry, ProviderError, RemotePath};
+
+/// The S3 object metadata (`x-amz-meta-…`) an upload records its content's SHA-256 under, as hex.
+pub const META_SHA256: &str = "httporter-sha256";
+/// The S3 object metadata a multipart upload records its part size under, in bytes.
+pub const META_PART_SIZE: &str = "httporter-part-size";
+
+/// What [`StorageProvider::stat`] knows about one file: its listing entry and what a listing
+/// leaves out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectInfo {
+    pub entry: Entry,
+    pub created: Option<DateTime<Utc>>,
+    pub content_type: Option<String>,
+    /// S3 `x-amz-meta-*` without the prefix, names in lower case.
+    pub metadata: Vec<(String, String)>,
+}
 
 /// A download body, delivered in chunks as it arrives.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, ProviderError>> + Send>>;
@@ -103,6 +120,8 @@ pub struct UploadOptions {
     pub meter: Option<Arc<dyn BodyMeter>>,
     /// Keeps a multipart upload's progress, for providers that use them.
     pub parts: Option<Arc<dyn PartJournal>>,
+    /// Sent as the object's `Cache-Control`, where the provider stores one (S3).
+    pub cache_control: Option<String>,
 }
 
 impl UploadOptions {
@@ -114,6 +133,7 @@ impl UploadOptions {
             md5: None,
             meter: None,
             parts: None,
+            cache_control: None,
         }
     }
 }
@@ -128,6 +148,7 @@ impl fmt::Debug for UploadOptions {
             .field("md5", &self.md5)
             .field("meter", &format_args!("{}", set(self.meter.is_some())))
             .field("parts", &format_args!("{}", set(self.parts.is_some())))
+            .field("cache_control", &self.cache_control)
             .finish()
     }
 }
@@ -148,6 +169,7 @@ impl PartialEq for UploadOptions {
             && self.md5 == other.md5
             && same(&self.meter, &other.meter)
             && same(&self.parts, &other.parts)
+            && self.cache_control == other.cache_control
     }
 }
 
@@ -260,6 +282,38 @@ pub trait StorageProvider: Send + Sync {
     ) -> Result<(), ProviderError> {
         let _ = (path, upload_id);
         Ok(())
+    }
+
+    /// What is known about the file at `path`, beyond a listing. A missing file is
+    /// [`ProviderError::NotFound`]. The default lists the parent folder and finds the file there.
+    async fn stat(&self, path: &RemotePath) -> Result<ObjectInfo, ProviderError> {
+        let parent = path.parent().ok_or(ProviderError::NotFound)?;
+        let listing = self.list(&parent).await?;
+        let entry = listing
+            .entries
+            .into_iter()
+            .find(|entry| entry.path == *path)
+            .ok_or(ProviderError::NotFound)?;
+        Ok(ObjectInfo {
+            content_type: entry.content_type.clone(),
+            entry,
+            created: None,
+            metadata: Vec::new(),
+        })
+    }
+
+    /// Copies the file at `from` to `to` on the server (S3 `CopyObject`). The default: the
+    /// provider can't, [`ProviderError::Permanent`].
+    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> Result<(), ProviderError> {
+        let _ = (from, to);
+        Err(ProviderError::Permanent(crate::copy::NO_COPY.to_owned()))
+    }
+
+    /// A link that downloads the file at `path` without credentials until `expires` from now.
+    /// The default: the provider can't, [`ProviderError::Permanent`].
+    fn presign(&self, path: &RemotePath, expires: Duration) -> Result<String, ProviderError> {
+        let _ = (path, expires);
+        Err(ProviderError::Permanent(crate::copy::NO_PRESIGN.to_owned()))
     }
 }
 

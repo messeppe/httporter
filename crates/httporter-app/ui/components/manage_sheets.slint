@@ -1,0 +1,91 @@
+// Rename, Move To…, the warning before a move that downloads and uploads again, and the
+// pre-signed link sheet (T9).
+//
+// T1 shells: the properties and an empty panel; Escape closes.
+
+import { Theme } from "../theme.slint";
+import { MoveData, MoveWarningData, PresignData, RenameData } from "../types.slint";
+import { Modal } from "sheets.slint";
+
+// T1 shell: a scrim with an empty panel; Escape calls `cancel`. The task that builds this file
+// replaces it.
+component Shell inherits Rectangle {
+    in property <length> panel-width: 440px;
+    in property <length> panel-height: 200px;
+    // The panel's top edge; below 0 centres it.
+    in property <length> panel-y: -1px;
+    callback cancel();
+
+    init => { keys.focus(); }
+
+    Modal {
+        cancel => { root.cancel(); }
+
+        keys := FocusScope {
+            width: 0px;
+            height: 0px;
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: root.panel-y < 0px ? (parent.height - self.height) / 2 : root.panel-y;
+            width: min(root.panel-width, parent.width - 32px);
+            height: min(root.panel-height, parent.height - 32px);
+            background: Theme.sheet;
+            border-radius: Theme.radius-lg;
+        }
+    }
+}
+
+// F2: the new name ("/" refused). The app closes it.
+export component RenameSheet inherits Rectangle {
+    in property <RenameData> data;
+    callback confirm(string);
+    callback cancelled();
+
+    Shell {
+        panel-y: Theme.toolbar-height;
+        panel-height: 180px;
+        cancel => { root.cancelled(); }
+    }
+}
+
+// Move To…: the destination folder (the current one to start with). The app closes it.
+export component MoveSheet inherits Rectangle {
+    in property <MoveData> data;
+    callback confirm(string);
+    callback cancelled();
+
+    Shell {
+        panel-y: Theme.toolbar-height;
+        panel-height: 180px;
+        cancel => { root.cancelled(); }
+    }
+}
+
+// Bunny can't copy on the server: the move downloads, uploads and then deletes.
+export component MoveWarningSheet inherits Rectangle {
+    in property <MoveWarningData> data;
+    callback confirm();
+    callback cancelled();
+
+    Shell {
+        panel-width: 360px;
+        panel-height: 220px;
+        cancel => { root.cancelled(); }
+    }
+}
+
+// Copy Presigned Link…: how long the link lasts (`PresignData.expiry`). The app closes it.
+export component PresignSheet inherits Rectangle {
+    in property <PresignData> data;
+    // The expiry chosen.
+    callback copy(int);
+    callback cancelled();
+
+    Shell {
+        panel-y: Theme.toolbar-height;
+        panel-height: 180px;
+        cancel => { root.cancelled(); }
+    }
+}
