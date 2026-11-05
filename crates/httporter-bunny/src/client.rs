@@ -633,6 +633,8 @@ fn client_builder(
     pool_size: usize,
     total_timeout: Option<Duration>,
 ) -> Result<reqwest::ClientBuilder, ProviderError> {
+    // reqwest brings no TLS crypto (`rustls-no-provider`): use ring's. Later calls are no-ops.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut builder = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .user_agent(USER_AGENT)

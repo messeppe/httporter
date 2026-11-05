@@ -29,6 +29,9 @@ reqwest = { version = "0.13.5", default-features = false }
 # Native file dialogs. Default features only add the Linux backends.
 rfd = { version = "0.17.2", default-features = false }
 rusqlite = "0.41.1"
+# TLS crypto: ring, not aws-lc-rs (S8: 0.9 MB smaller). reqwest uses `rustls-no-provider`, so
+# each HTTP client builder installs ring's provider first.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha2 = "0.11.1"
@@ -67,10 +70,7 @@ opt-level = 3
 [profile.release.package.md-5]
 opt-level = 3
 
-[profile.release.package.aws-lc-sys]
-opt-level = 3
-
-[profile.release.package.aws-lc-rs]
+[profile.release.package.ring]
 opt-level = 3
 
 [profile.release.package.i-slint-renderer-software]
@@ -81,3 +81,7 @@ opt-level = 3
 
 [profile.release.package.zeno]
 opt-level = 3
+
+# The app crate is mostly Slint-generated UI code: smallest wins there.
+[profile.release.package.httporter-app]
+opt-level = "z"

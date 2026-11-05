@@ -140,6 +140,8 @@ impl Live {
         let mut access_key = HeaderValue::from_str(&password)
             .unwrap_or_else(|_| panic!("the zone password cannot be sent as a header"));
         access_key.set_sensitive(true);
+        // This client comes before the provider's, which installs ring's TLS crypto too.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             // Long: a recursive folder DELETE answers only when the whole subtree is gone.
