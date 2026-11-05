@@ -1,39 +1,122 @@
-// Quick Look (T6; mockup `Main.dc.html` overlay `quicklook`, l.335–371): a 760 × 560 panel on a
-// scrim, with the file's text (highlighted, or its changes), image or kind; and the sheet for a
-// file edited here that changed on the site meanwhile.
+// Quick Look (mockups `QuickLook.dc.html`, `Main.dc.html` overlay `quicklook`, l.335–371): a
+// 760 × 560 panel on a scrim with a file's text (line numbers and syntax colours) or its changes
+// against the copy on the other side, its image, or its kind with a button to open it; and the
+// sheet for a file edited here that changed on the site meanwhile.
 //
-// T1 shells: the properties and an empty panel; Escape closes.
+// Space and Esc close Quick Look; ← and → step to the previous and next file.
 
+import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
 import { CodeLine, EditConflictData, QuickLookData } from "../types.slint";
-import { Modal } from "sheets.slint";
+import { CapsuleButton, ToolButton } from "buttons.slint";
+import { AlertCard, Modal } from "sheets.slint";
+import { VCenter } from "layout.slint";
 
-// T1 shell: a scrim with an empty panel; Escape calls `cancel`. The task that builds this file
-// replaces it.
-component Shell inherits Rectangle {
-    in property <length> panel-width: 440px;
-    in property <length> panel-height: 200px;
-    // The panel's top edge; below 0 centres it.
-    in property <length> panel-y: -1px;
-    callback cancel();
+// The colours of `CodeSpan.style` (mockup `.code`: tags, attributes, strings, comments), plus
+// keywords and numbers.
+global CodeColors {
+    pure public function of(style: int) -> color {
+        return style == 1 ? (Theme.dark ? #ff9f73 : #9a3412)
+            : style == 2 ? (Theme.dark ? #7cc4ff : #0f6ab4)
+            : style == 3 ? (Theme.dark ? #7ee08a : #1d7a35)
+            : style == 4 ? Theme.label2
+            : style == 5 ? Theme.purple
+            : style == 6 ? (Theme.dark ? #66d9e8 : #0b7285)
+            : Theme.label;
+    }
+}
 
-    init => { keys.focus(); }
+// Source | Changes vs Bunny (mockup `.seg`). The second is off when there is nothing to compare;
+// `hovering-off` says the pointer is on it then, so the footer can say why. Pointer only: ← and →
+// step through the files.
+component ModeSwitch inherits Rectangle {
+    in property <string> second;
+    in property <bool> second-enabled;
+    // Why the second is off.
+    in property <string> note;
+    in-out property <int> current: 0;
+    out property <bool> hovering-off: off-area.has-hover && !root.second-enabled;
+    callback selected(int);
 
-    Modal {
-        cancel => { root.cancel(); }
+    function choose(index: int) {
+        if (index != root.current && (index == 0 || root.second-enabled)) {
+            root.current = index;
+            root.selected(index);
+        }
+    }
 
-        keys := FocusScope {
-            width: 0px;
-            height: 0px;
+    height: 28px;
+    background: Theme.chip;
+    border-radius: 8px;
+    accessible-role: radio-group;
+    accessible-label: @tr("Compare view");
+
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+
+        Rectangle {
+            border-radius: 6px;
+            background: root.current == 0 ? Theme.control : transparent;
+            border-width: root.current == 0 ? 0.5px : 0px;
+            border-color: Theme.control-border;
+            accessible-role: radio-button;
+            accessible-checkable: true;
+            accessible-checked: root.current == 0;
+            accessible-label: @tr("Source");
+            accessible-action-default => { root.choose(0); }
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+
+                Text {
+                    text: @tr("Source");
+                    color: Theme.label;
+                    font-size: Theme.font-body;
+                    font-weight: root.current == 0 ? Theme.weight-semibold : 400;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+
+            TouchArea {
+                clicked => { root.choose(0); }
+            }
         }
 
         Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: root.panel-y < 0px ? (parent.height - self.height) / 2 : root.panel-y;
-            width: min(root.panel-width, parent.width - 32px);
-            height: min(root.panel-height, parent.height - 32px);
-            background: Theme.sheet;
-            border-radius: Theme.radius-lg;
+            border-radius: 6px;
+            background: root.current == 1 ? Theme.control : transparent;
+            border-width: root.current == 1 ? 0.5px : 0px;
+            border-color: Theme.control-border;
+            opacity: root.second-enabled ? 1 : 0.45;
+            accessible-role: radio-button;
+            accessible-checkable: true;
+            accessible-checked: root.current == 1;
+            accessible-enabled: root.second-enabled;
+            accessible-label: root.second;
+            accessible-description: root.second-enabled ? "" : root.note;
+            accessible-action-default => { root.choose(1); }
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+
+                Text {
+                    text: root.second;
+                    color: Theme.label;
+                    font-size: Theme.font-body;
+                    font-weight: root.current == 1 ? Theme.weight-semibold : 400;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+
+            off-area := TouchArea {
+                clicked => { root.choose(1); }
+            }
         }
     }
 }
@@ -42,7 +125,8 @@ export component QuickLook inherits Rectangle {
     in property <QuickLookData> data;
     in property <[CodeLine]> lines;
     in property <image> image;
-    // 0 the source, 1 the changes.
+    // 0 the source, 1 the changes. `set-mode(2)` is not a view: it is the "Open in Default App"
+    // button of a file that can't be shown.
     in-out property <int> mode: 0;
     callback set-mode(int);
     // -1 the previous file, 1 the next.
@@ -51,23 +135,315 @@ export component QuickLook inherits Rectangle {
     callback open-with();
     callback close();
 
-    Shell {
-        panel-width: 760px;
-        panel-height: 560px;
+    init => { keys.focus(); }
+
+    Modal {
+        at-first-stop: close-button.has-focus;
+        at-last-stop: with-button.has-focus;
         cancel => { root.close(); }
+        focus-first => { close-button.focus(); }
+        focus-last => { with-button.focus(); }
+
+        keys := FocusScope {
+            width: 0px;
+            height: 0px;
+            key-pressed(event) => {
+                if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                    return reject;
+                }
+                if (event.text == Key.Space) {
+                    if (!event.repeat) {
+                        root.close();
+                    }
+                    return accept;
+                }
+                if (event.text == Key.LeftArrow) {
+                    root.step(-1);
+                    return accept;
+                }
+                if (event.text == Key.RightArrow) {
+                    root.step(1);
+                    return accept;
+                }
+                return reject;
+            }
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(760px, parent.width - 32px);
+            height: min(560px, parent.height - 32px);
+            background: Theme.sheet;
+            border-radius: 16px;
+            border-width: 0.5px;
+            border-color: Theme.sep-strong;
+            drop-shadow-blur: 64px;
+            drop-shadow-offset-y: 24px;
+            drop-shadow-color: Theme.shadow-sheet;
+            clip: true;
+            accessible-role: groupbox;
+            accessible-label: @tr("Quick Look: {}", root.data.title);
+
+            // A click on the panel gives the arrow keys back to it.
+            TouchArea {
+                clicked => { keys.focus(); }
+            }
+
+            VerticalLayout {
+                // Header: close, the file, the views and the ways to open it.
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    spacing: 10px;
+
+                    VCenter {
+                        close-button := ToolButton {
+                            icon: Icons.x;
+                            label: @tr("Close Quick Look");
+                            clicked => { root.close(); }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        min-width: 80px;
+
+                        Text {
+                            text: root.data.title;
+                            color: Theme.label;
+                            font-size: Theme.font-body;
+                            font-weight: Theme.weight-bold;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.data.subtitle;
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            overflow: elide;
+                        }
+                    }
+                    VCenter {
+                        switch := ModeSwitch {
+                            second: root.data.diff-label;
+                            second-enabled: root.data.can-diff;
+                            note: root.data.diff-note;
+                            current <=> root.mode;
+                            selected(mode) => {
+                                root.set-mode(mode);
+                                keys.focus();
+                            }
+                        }
+                    }
+                    VCenter {
+                        CapsuleButton {
+                            text: @tr("Open in Browser");
+                            icon: Icons.globe;
+                            enabled: root.data.can-browser;
+                            clicked => {
+                                root.open-browser();
+                                keys.focus();
+                            }
+                        }
+                    }
+                    VCenter {
+                        with-button := CapsuleButton {
+                            text: @tr("Open With…");
+                            icon: Icons.open;
+                            clicked => {
+                                root.open-with();
+                                keys.focus();
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.sep;
+                }
+
+                // Body: the text, the image, or the kind of file.
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.content;
+
+                    if root.data.kind == 0 && root.data.error == "": VerticalLayout {
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+
+                        ListView {
+                            for line in root.lines: Rectangle {
+                                height: 19px;
+                                background: line.mark == 1 ? Theme.green-soft : (line.mark == 2 ? Theme.red-soft : transparent);
+
+                                HorizontalLayout {
+                                    alignment: start;
+
+                                    Text {
+                                        width: 44px;
+                                        text: line.no;
+                                        color: Theme.label2;
+                                        font-family: Theme.font-mono;
+                                        font-size: 12px;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle {
+                                        width: 14px;
+                                    }
+                                    for span in line.spans: Text {
+                                        min-width: self.preferred-width;
+                                        text: span.text;
+                                        color: CodeColors.of(span.style);
+                                        font-family: Theme.font-mono;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.data.kind == 1 && root.data.error == "": Image {
+                        x: 16px;
+                        y: 16px;
+                        width: parent.width - 32px;
+                        height: parent.height - 32px;
+                        source: root.image;
+                        image-fit: contain;
+                    }
+
+                    if root.data.kind == 2 && !root.data.busy && root.data.error == "": VerticalLayout {
+                        alignment: center;
+                        spacing: 16px;
+
+                        HorizontalLayout {
+                            alignment: center;
+
+                            Image {
+                                source: Icons.doc;
+                                colorize: Theme.label3;
+                                width: 72px;
+                                height: 72px;
+                                accessible-role: none;
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+
+                            CapsuleButton {
+                                text: @tr("Open in Default App");
+                                clicked => {
+                                    root.set-mode(2);
+                                    keys.focus();
+                                }
+                            }
+                        }
+                    }
+
+                    if root.data.busy && root.data.error == "": Text {
+                        text: @tr("Loading…");
+                        color: Theme.label2;
+                        font-size: Theme.font-body;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    if root.data.error != "": Text {
+                        x: 24px;
+                        width: parent.width - 48px;
+                        text: root.data.error;
+                        color: Theme.label2;
+                        font-size: Theme.font-body;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Footer (mockup `.statusbar`): the keys, and what the text is.
+                Rectangle {
+                    height: Theme.statusbar-height;
+                    background: Theme.chrome;
+
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        background: Theme.sep;
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 14px;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: switch.hovering-off ? root.data.diff-note : root.data.footer-left;
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.data.footer-right;
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-// "index.html changed on Bunny since you opened it": Overwrite, Save as Copy, Discard My Edit.
+// A file being edited changed on its site since it was opened: Save as Copy (the default),
+// Overwrite, or Discard My Edit. `data.name` is the file, `data.body` says what happened.
 export component EditConflictSheet inherits Rectangle {
     in property <EditConflictData> data;
     // 0 overwrite, 1 save as a copy, 2 discard the edit.
     callback choice(int);
     callback cancelled();
 
-    Shell {
-        panel-width: 420px;
-        panel-height: 220px;
+    init => { copy-button.focus(); }
+
+    Modal {
+        at-first-stop: copy-button.has-focus;
+        at-last-stop: discard-button.has-focus;
         cancel => { root.cancelled(); }
+        confirm => { root.choice(1); }
+        focus-first => { copy-button.focus(); }
+        focus-last => { discard-button.focus(); }
+
+        AlertCard {
+            icon: Icons.warn;
+            tint: Theme.orange;
+            tint-soft: Theme.orange-soft;
+            title: root.data.name;
+            body: root.data.body;
+
+            VerticalLayout {
+                spacing: 8px;
+
+                copy-button := CapsuleButton {
+                    text: @tr("Save as Copy");
+                    primary: true;
+                    clicked => { root.choice(1); }
+                }
+                CapsuleButton {
+                    text: @tr("Overwrite");
+                    destructive: true;
+                    clicked => { root.choice(0); }
+                }
+                discard-button := CapsuleButton {
+                    text: @tr("Discard My Edit");
+                    clicked => { root.choice(2); }
+                }
+            }
+        }
     }
 }

@@ -1,5 +1,5 @@
-// Left sidebar (mockup `.sidebar`): the site list, the publish profiles and the Add Site / Settings
-// footer.
+// Left sidebar (mockup `.sidebar`): the site list, the publish profiles, the favorites, the files
+// being edited and the Add Site / Settings footer.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
@@ -187,6 +187,102 @@ component ProfileRow inherits Rectangle {
     }
 }
 
+// A favorite or a file being edited (mockup `.sb-item` in Favorites and Editing): an icon, the
+// name and, at the right, a short note (the site or the folder it is in; the edit's state).
+// Reachable with Tab, opened with Space or Return; a right click, the Menu key or Shift+F10 asks
+// for its menu, at a point of the window.
+component ItemRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> meta;
+    in property <color> meta-color: Theme.label2;
+    // What assistive technology reads for the row.
+    in property <string> label;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+    callback context-pressed(Point);
+
+    height: Theme.sidebar-item-height;
+    border-radius: Theme.radius-sm;
+    background: area.has-hover ? Theme.hover : transparent;
+    forward-focus: key-focus;
+    accessible-role: list-item;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        VCenter {
+            Image {
+                source: root.icon;
+                colorize: Theme.label2;
+                width: 16px;
+                height: 16px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.title;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        if root.meta != "": Text {
+            max-width: 104px;
+            text: root.meta;
+            color: root.meta-color;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+    }
+
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event)) {
+                root.clicked();
+                return accept;
+            }
+            if (event.text == Key.Menu || (event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && event.text == Key.F10)) {
+                root.context-pressed({
+                    x: root.absolute-position.x + 32px,
+                    y: root.absolute-position.y + root.height / 2,
+                });
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                root.context-pressed({
+                    x: self.absolute-position.x + self.mouse-x,
+                    y: self.absolute-position.y + self.mouse-y,
+                });
+            }
+        }
+    }
+}
+
 export component Sidebar inherits Rectangle {
     in property <[SiteItem]> sites;
     in property <int> selected-site: -1;
@@ -222,11 +318,24 @@ export component Sidebar inherits Rectangle {
 
     // The row the site menu was opened on.
     property <int> menu-site: -1;
+    // The Favorites and Editing rows their menus were opened on.
+    property <int> menu-favorite: -1;
+    property <int> menu-edit: -1;
 
     // Opens the site menu of row `index` at `point`, a point of the window.
     function show-site-menu(index: int, point: Point) {
         root.menu-site = index;
         site-menu.show({ x: point.x - root.absolute-position.x, y: point.y - root.absolute-position.y });
+    }
+
+    function show-favorite-menu(index: int, point: Point) {
+        root.menu-favorite = index;
+        favorite-menu.show({ x: point.x - root.absolute-position.x, y: point.y - root.absolute-position.y });
+    }
+
+    function show-edit-menu(index: int, point: Point) {
+        root.menu-edit = index;
+        edit-menu.show({ x: point.x - root.absolute-position.x, y: point.y - root.absolute-position.y });
     }
 
     background: Theme.sidebar;
@@ -260,6 +369,26 @@ export component Sidebar inherits Rectangle {
                 title: @tr("Remove…");
                 enabled: root.site-menu-available;
                 activated => { root.remove-site(root.menu-site); }
+            }
+        }
+    }
+
+    favorite-menu := ContextMenuArea {
+        enabled: false;
+        Menu {
+            MenuItem {
+                title: @tr("Remove from Favorites");
+                activated => { root.favorite-remove(root.menu-favorite); }
+            }
+        }
+    }
+
+    edit-menu := ContextMenuArea {
+        enabled: false;
+        Menu {
+            MenuItem {
+                title: @tr("Stop Editing");
+                activated => { root.edit-stop(root.menu-edit); }
             }
         }
     }
@@ -320,6 +449,27 @@ export component Sidebar inherits Rectangle {
                         font-size: 12px;
                         wrap: word-wrap;
                     }
+                }
+                // Favorites: a site's folder has the star, one of this PC the PC.
+                if root.favorites.length > 0: SectionTitle { text: @tr("Favorites"); }
+                for place[i] in root.favorites: ItemRow {
+                    icon: place.remote ? Icons.star : Icons.pc;
+                    title: place.name;
+                    meta: place.subtitle;
+                    label: @tr("{}, {}", place.name, place.subtitle);
+                    clicked => { root.favorite-selected(i); }
+                    context-pressed(point) => { root.show-favorite-menu(i, point); }
+                }
+                // Editing: the site's files open in another program, uploaded again when saved.
+                if root.edits.length > 0: SectionTitle { text: @tr("Editing"); }
+                for item[i] in root.edits: ItemRow {
+                    icon: Icons.pencil;
+                    title: item.name;
+                    meta: item.state;
+                    meta-color: item.failed ? Theme.red : Theme.label2;
+                    label: @tr("{}, {}", item.name, item.state);
+                    clicked => { root.edit-selected(i); }
+                    context-pressed(point) => { root.show-edit-menu(i, point); }
                 }
             }
         }
