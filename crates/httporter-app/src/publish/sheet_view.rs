@@ -7,13 +7,15 @@
 //! first when the purge needs it, the drawer shows the batches, the status line the phase, and the
 //! run ends in the history.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use httporter_core::{
-    CdnZone, CompareStatus as Status, FileOutcome, HistoryFile, PURGE_URL_LIMIT, ProfileId,
-    ProfileRecord, ProviderKind, PurgeMode, PurgeResult, SiteRecord, SkipRules, purge_urls,
+    ActivityKind, CdnZone, CompareStatus as Status, FileOutcome, HistoryFile, PURGE_URL_LIMIT,
+    ProfileId, ProfileRecord, ProviderKind, PublishResult, PurgeMode, PurgeResult, SiteRecord,
+    SkipRules, purge_urls,
 };
 use httporter_platform::win;
 use httporter_transfer::{
@@ -38,6 +40,9 @@ const AGO_EVERY: Duration = Duration::from_secs(60);
 /// How often the toolbar's Publish looks whether a profile page is shown.
 const PAGE_POLL: Duration = Duration::from_millis(250);
 
+/// The plan filter waits this long after the last key before it applies.
+const FILTER_WAIT: Duration = Duration::from_millis(200);
+
 /// What the sheet remembers between callbacks.
 #[derive(Default)]
 pub(super) struct SheetState {
@@ -50,6 +55,8 @@ pub(super) struct SheetState {
     comparing: Option<AbortHandle>,
     /// A folder or file picker of the sheet is open (they have no owner window).
     picking: bool,
+    /// Goes up with every key typed in the plan filter; a wait that finds it moved is dropped.
+    filter_typed: u64,
 }
 
 /// The sheet on screen.
@@ -74,6 +81,15 @@ struct Sheet {
     zone_because: Option<usize>,
     /// What each row of the plan list stands for.
     rows: Vec<RowRef>,
+    /// The plan list as folders (Tree) rather than paths (Flat).
+    tree: bool,
+    /// Only the paths that hold this (any case) are listed.
+    filter: String,
+    /// The tree's folders closed, as `<group>/<folder>/`.
+    collapsed: HashSet<String>,
+    /// The tree's folder rows, which [`RowRef::Folder`] points into: the group and the folder's
+    /// path with its trailing `/`.
+    folders: Vec<(Group, String)>,
 }
 
 /// A group of the plan list.
@@ -97,11 +113,26 @@ impl Group {
     }
 }
 
-/// What a row of the plan list stands for: a group header, or the plan item at that index.
+/// What a row of the plan list stands for: a group header, the plan item at that index, or a
+/// folder of the tree (an index into `Sheet::folders`).
 #[derive(Debug, Clone, Copy)]
 enum RowRef {
     Header(Group),
     Item(usize),
+    Folder(usize),
+}
+
+/// The key of a tree folder in `Sheet::collapsed`.
+fn folder_key(group: Group, prefix: &str) -> String {
+    format!("{group:?}/{prefix}")
+}
+
+/// What a tree folder holds: files, how many are ticked, and their bytes.
+#[derive(Default, Clone, Copy)]
+struct FolderCount {
+    files: u64,
+    included: u64,
+    bytes: u64,
 }
 
 /// What the site is called next to "only on": Bunny, or an S3 site's own name.
@@ -137,8 +168,118 @@ impl Sheet {
             purge,
             zone_because: None,
             rows: Vec::new(),
+            tree: false,
+            filter: String::new(),
+            collapsed: HashSet::new(),
+            folders: Vec::new(),
             profile,
             site,
+        }
+    }
+
+    /// The plan items of `group` the filter lets through, in plan order.
+    fn members(&self, plan: &PublishPlan, group: Group) -> Vec<usize> {
+        let filter = self.filter.trim().to_lowercase();
+        (0..plan.items.len())
+            .filter(|&i| Group::of(plan.items[i].status) == Some(group))
+            .filter(|&i| filter.is_empty() || plan.items[i].rel.to_lowercase().contains(&filter))
+            .collect()
+    }
+
+    /// The plan list row of item `i` of `group`: its path (Flat) or name (Tree) at `depth`.
+    fn item_row(plan: &PublishPlan, i: usize, group: Group, depth: i32, tree: bool) -> PlanRow {
+        let item = &plan.items[i];
+        let (group, label) = match group {
+            Group::Changed => (PlanGroup::Changed, copy::ITEM_CHANGED),
+            Group::New => (PlanGroup::New, copy::ITEM_NEW),
+            Group::Remote if item.include => (PlanGroup::Deleted, copy::WILL_BE_DELETED),
+            Group::Remote => (PlanGroup::Kept, copy::WILL_BE_KEPT),
+        };
+        let name = item.rel.rsplit('/').next().unwrap_or(&item.rel);
+        PlanRow {
+            path: if tree { name } else { item.rel.as_str() }.into(),
+            kind: slint_kind(kind_for(name, false)),
+            group,
+            label: label.into(),
+            size: format_size(item.size).into(),
+            checked: item.include,
+            header: false,
+            depth,
+            folder: false,
+            expanded: false,
+        }
+    }
+
+    /// The tree rows of `members` of `group`: each folder (with what it holds) before what is in
+    /// it, the contents of closed folders left out. Appends to `rows` and `self.rows`.
+    fn tree_rows(
+        &mut self,
+        plan: &PublishPlan,
+        group: Group,
+        header_group: PlanGroup,
+        members: &[usize],
+        rows: &mut Vec<PlanRow>,
+    ) {
+        let mut sorted = members.to_vec();
+        sorted.sort_by(|&a, &b| plan.items[a].rel.cmp(&plan.items[b].rel));
+        // Every folder's totals, by its path with a trailing `/`.
+        let mut counts: BTreeMap<String, FolderCount> = BTreeMap::new();
+        for &i in &sorted {
+            let item = &plan.items[i];
+            let mut at = 0;
+            while let Some(slash) = item.rel[at..].find('/') {
+                at += slash + 1;
+                let count = counts.entry(item.rel[..at].to_owned()).or_default();
+                count.files += 1;
+                count.included += u64::from(item.include);
+                count.bytes += item.size;
+            }
+        }
+        // The folders of the item before, outermost first.
+        let mut open: Vec<String> = Vec::new();
+        for &i in &sorted {
+            let rel = plan.items[i].rel.clone();
+            let dirs: Vec<String> = rel
+                .match_indices('/')
+                .map(|(at, _)| rel[..=at].to_owned())
+                .collect();
+            let same = open.iter().zip(&dirs).take_while(|(a, b)| a == b).count();
+            open.truncate(same);
+            for dir in &dirs[same..] {
+                open.push(dir.clone());
+                let depth = open.len() as i32;
+                // Inside a closed folder: not shown.
+                let hidden = open[..open.len() - 1]
+                    .iter()
+                    .any(|outer| self.collapsed.contains(&folder_key(group, outer)));
+                if hidden {
+                    continue;
+                }
+                let count = counts.get(dir).copied().unwrap_or_default();
+                let name = dir.trim_end_matches('/').rsplit('/').next().unwrap_or(dir);
+                let expanded = !self.collapsed.contains(&folder_key(group, dir));
+                rows.push(PlanRow {
+                    path: name.into(),
+                    kind: FileKind::Folder,
+                    group: header_group,
+                    label: copy::group_count(count.included, count.files).into(),
+                    size: format_size(count.bytes).into(),
+                    checked: count.included == count.files,
+                    header: false,
+                    depth,
+                    folder: true,
+                    expanded,
+                });
+                self.folders.push((group, dir.clone()));
+                self.rows.push(RowRef::Folder(self.folders.len() - 1));
+            }
+            let hidden = open
+                .iter()
+                .any(|outer| self.collapsed.contains(&folder_key(group, outer)));
+            if !hidden {
+                rows.push(Self::item_row(plan, i, group, open.len() as i32 + 1, true));
+                self.rows.push(RowRef::Item(i));
+            }
         }
     }
 
@@ -187,7 +328,7 @@ impl Sheet {
 
     /// What the sheet shows, and the plan list's rows (remembering what each stands for).
     fn render(&mut self) -> (PublishSheetData, Vec<PlanRow>) {
-        let service = service(&self.site);
+        let service = service(&self.site).to_owned();
         let mut data = PublishSheetData {
             title: copy::sheet_title(&self.site.name).into(),
             subtitle: self.subtitle.as_str().into(),
@@ -198,8 +339,8 @@ impl Sheet {
             progress: self.progress.as_str().into(),
             error: self.error.as_str().into(),
             remove_extras: self.remove_extras,
-            remove_label: copy::remove_label(service).into(),
-            remote_label: copy::sheet_remote_label(service).into(),
+            remove_label: copy::remove_label(&service).into(),
+            remote_label: copy::sheet_remote_label(&service).into(),
             purge: match self.purge {
                 PurgeMode::Off => 0,
                 PurgeMode::Changed => 1,
@@ -212,11 +353,24 @@ impl Sheet {
             ..Default::default()
         };
         self.rows.clear();
+        self.folders.clear();
         let mut rows = Vec::new();
-        let Some(plan) = &self.plan else {
+        let Some(plan) = self.plan.take() else {
             return (data, rows);
         };
+        self.render_plan(&plan, &service, &mut data, &mut rows);
+        self.plan = Some(plan);
+        (data, rows)
+    }
 
+    /// [`Self::render`] once there is a plan.
+    fn render_plan(
+        &mut self,
+        plan: &PublishPlan,
+        service: &str,
+        data: &mut PublishSheetData,
+        rows: &mut Vec<PlanRow>,
+    ) {
         let count = |status: Status| plan.items.iter().filter(|i| i.status == status).count();
         data.changed = int(count(Status::Changed) as u64);
         data.new = int(count(Status::New) as u64);
@@ -224,9 +378,7 @@ impl Sheet {
         data.same = int(plan.same);
 
         for group in Group::ALL {
-            let members: Vec<usize> = (0..plan.items.len())
-                .filter(|&i| Group::of(plan.items[i].status) == Some(group))
-                .collect();
+            let members = self.members(plan, group);
             if members.is_empty() {
                 continue;
             }
@@ -252,28 +404,13 @@ impl Sheet {
                 expanded: false,
             });
             self.rows.push(RowRef::Header(group));
-            for i in members {
-                let item = &plan.items[i];
-                let (group, label) = match group {
-                    Group::Changed => (PlanGroup::Changed, copy::ITEM_CHANGED),
-                    Group::New => (PlanGroup::New, copy::ITEM_NEW),
-                    Group::Remote if item.include => (PlanGroup::Deleted, copy::WILL_BE_DELETED),
-                    Group::Remote => (PlanGroup::Kept, copy::WILL_BE_KEPT),
-                };
-                let name = item.rel.rsplit('/').next().unwrap_or(&item.rel);
-                rows.push(PlanRow {
-                    path: item.rel.as_str().into(),
-                    kind: slint_kind(kind_for(name, false)),
-                    group,
-                    label: label.into(),
-                    size: format_size(item.size).into(),
-                    checked: item.include,
-                    header: false,
-                    depth: 0,
-                    folder: false,
-                    expanded: false,
-                });
-                self.rows.push(RowRef::Item(i));
+            if self.tree {
+                self.tree_rows(plan, group, header_group, &members, rows);
+            } else {
+                for i in members {
+                    rows.push(Self::item_row(plan, i, group, 0, false));
+                    self.rows.push(RowRef::Item(i));
+                }
             }
         }
 
@@ -305,7 +442,6 @@ impl Sheet {
         if !uploaded.is_empty() {
             data.warning = copy::secrets_warning(&uploaded).into();
         }
-        (data, rows)
     }
 }
 
@@ -524,13 +660,39 @@ impl Publisher {
                     }
                 }
                 Some(RowRef::Header(group)) => {
+                    let filter = sheet.filter.trim().to_lowercase();
+                    let shown = |item: &httporter_transfer::PlanItem| {
+                        Group::of(item.status) == Some(group)
+                            && (filter.is_empty() || item.rel.to_lowercase().contains(&filter))
+                    };
                     let all = plan
                         .items
                         .iter()
-                        .filter(|item| Group::of(item.status) == Some(group))
+                        .filter(|item| shown(item))
                         .all(|item| item.include);
                     for item in &mut plan.items {
-                        if Group::of(item.status) == Some(group) {
+                        if shown(item) {
+                            item.include = !all;
+                        }
+                    }
+                }
+                Some(RowRef::Folder(index)) => {
+                    let Some((group, prefix)) = sheet.folders.get(index).cloned() else {
+                        return;
+                    };
+                    let filter = sheet.filter.trim().to_lowercase();
+                    let inside = |item: &httporter_transfer::PlanItem| {
+                        Group::of(item.status) == Some(group)
+                            && item.rel.starts_with(&prefix)
+                            && (filter.is_empty() || item.rel.to_lowercase().contains(&filter))
+                    };
+                    let all = plan
+                        .items
+                        .iter()
+                        .filter(|item| inside(item))
+                        .all(|item| item.include);
+                    for item in &mut plan.items {
+                        if inside(item) {
                             item.include = !all;
                         }
                     }
@@ -539,6 +701,62 @@ impl Publisher {
             }
         }
         self.redraw(ui);
+    }
+
+    /// Flat (0) or Tree (1).
+    fn set_view(&self, ui: &AppWindow, view: i32) {
+        if let Some(sheet) = lock(&self.sheet).open.as_mut() {
+            sheet.tree = view == 1;
+        }
+        self.redraw(ui);
+    }
+
+    /// A tree folder's disclosure triangle: opens or closes it.
+    fn expand(&self, ui: &AppWindow, row: usize) {
+        {
+            let mut state = lock(&self.sheet);
+            let Some(sheet) = state.open.as_mut() else {
+                return;
+            };
+            let Some(RowRef::Folder(index)) = sheet.rows.get(row).copied() else {
+                return;
+            };
+            let Some((group, prefix)) = sheet.folders.get(index) else {
+                return;
+            };
+            let key = folder_key(*group, prefix);
+            if !sheet.collapsed.remove(&key) {
+                sheet.collapsed.insert(key);
+            }
+        }
+        self.redraw(ui);
+    }
+
+    /// The plan filter as typed: applied once typing pauses for [`FILTER_WAIT`].
+    fn filter_typed(self: &Arc<Self>, text: String) {
+        let typed = {
+            let mut state = lock(&self.sheet);
+            state.filter_typed += 1;
+            state.filter_typed
+        };
+        let this = self.clone();
+        self.link.rt().spawn(async move {
+            tokio::time::sleep(FILTER_WAIT).await;
+            let ui = this.link.ui().clone();
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                {
+                    let mut state = lock(&this.sheet);
+                    if state.filter_typed != typed {
+                        return;
+                    }
+                    let Some(sheet) = state.open.as_mut() else {
+                        return;
+                    };
+                    sheet.filter = text;
+                }
+                this.redraw(&ui);
+            });
+        });
     }
 
     fn set_remove_extras(&self, ui: &AppWindow, on: bool) {
@@ -711,6 +929,15 @@ impl Publisher {
         purge: PurgeMode,
         retry: bool,
     ) {
+        // Uploads under the profile's folder carry its Cache-Control (S3; Bunny sets caching in
+        // the pull zone).
+        if site.provider == ProviderKind::S3 {
+            self.transfers.engine().set_cache_control(
+                &site.id,
+                &profile.remote_dir,
+                profile.cache_control.clone(),
+            );
+        }
         let (purger, unavailable) = if purge == PurgeMode::Off {
             (None, None)
         } else {
@@ -760,7 +987,16 @@ impl Publisher {
             }
         }
         let message = copy::published(&site.name, &record);
+        let (ok, bytes) = (record.result == PublishResult::Ok, record.bytes);
         let saved = self.session.add_history(record).await;
+        crate::manage::activity_view::event(
+            ActivityKind::Publish,
+            &site.name,
+            &format!("/{}", profile.remote_dir.as_str()),
+            ok,
+            message.clone(),
+            bytes,
+        );
         self.link.refresh_remote_at(&site.id, &profile.remote_dir);
         super::profile_view::refresh(&self);
         self.link.status(match saved {
@@ -903,6 +1139,26 @@ pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
                 p.toggle(&ui, row);
             }
         }
+    });
+    ui.on_plan_view({
+        let (p, ui) = (p.clone(), ui.as_weak());
+        move |view| {
+            if let Some(ui) = ui.upgrade() {
+                p.set_view(&ui, view);
+            }
+        }
+    });
+    ui.on_plan_expand({
+        let (p, ui) = (p.clone(), ui.as_weak());
+        move |row| {
+            if let (Some(ui), Ok(row)) = (ui.upgrade(), usize::try_from(row)) {
+                p.expand(&ui, row);
+            }
+        }
+    });
+    ui.on_plan_filter_changed({
+        let p = p.clone();
+        move |text| p.filter_typed(text.to_string())
     });
     ui.on_publish_remove_extras({
         let (p, ui) = (p.clone(), ui.as_weak());

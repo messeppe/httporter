@@ -214,22 +214,38 @@ component TransferItem inherits Rectangle {
     in property <int> tab;
     in property <int> index;
     in property <int> count;
+    // M11: the row is in the Failed tab's selection.
+    in property <bool> chosen;
     callback cancel();
     callback retry();
     callback move-to-top();
     callback pause();
     callback resume();
+    // M11: a click on a Failed row, with Ctrl and Shift.
+    callback row-clicked(bool, bool);
 
     property <int> percent: Math.round(root.item.percent);
 
     height: 30px;
+    background: root.chosen ? Theme.accent-soft : transparent;
     accessible-role: list-item;
+    accessible-item-selected: root.chosen;
     accessible-label: root.tab == 0 ? @tr("{}, {}, {} percent", root.item.name, root.item.size, root.percent)
         : root.tab == 1 ? (root.item.paused ? @tr("{}, {}, paused", root.item.name, root.item.size) : @tr("{}, {}, waiting", root.item.name, root.item.size))
         : root.tab == 2 ? @tr("{}, {}, failed: {}", root.item.name, root.item.size, root.item.detail)
         : @tr("{}, {}, done", root.item.name, root.item.size);
     accessible-item-index: root.index;
     accessible-item-count: root.count;
+
+    // M11: Failed rows are picked with a click, Ctrl+click and Shift+click (the buttons on the row
+    // sit above this and keep their clicks).
+    if root.tab == 2: TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.row-clicked(event.modifiers.control, event.modifiers.shift);
+            }
+        }
+    }
 
     ContextMenuArea {
         enabled: root.tab == 1;
@@ -410,8 +426,18 @@ export component TransferDrawer inherits Rectangle {
     callback move-to-top(int);
     callback pause-row(int);
     callback resume-row(int);
-    // M11 (T9): Retry Selected on the Failed tab, with the jobs' ids.
+    // M11: Retry Selected on the Failed tab. The selection is the rows from the first to the
+    // second number (indexes into the Failed rows; none when the first is below 0), each flipped
+    // when its `selected` equals the third (Ctrl+click); the app works the ids out from that.
     callback retry-selected([int]);
+
+    // M11: the Failed tab's selection (see `retry-selected`). `sel-gen` goes up to clear the
+    // Ctrl+clicks.
+    property <int> sel-gen: 1;
+    property <int> sel-lo: -1;
+    property <int> sel-hi: -1;
+    property <int> sel-anchor: -1;
+    property <bool> has-selection: false;
 
     property <[TransferRow]> shown-rows: root.tab == 0 ? root.active-rows : (root.tab == 1 ? root.queued-rows : (root.tab == 2 ? root.failed-rows : root.done-rows));
     // The list shows up to six rows and leaves room for one line when it is empty.
@@ -567,6 +593,17 @@ export component TransferDrawer inherits Rectangle {
                     icon: Icons.refresh;
                     clicked => { root.retry-failed(); }
                 }
+                if root.tab == 2 && root.failed-rows.length > 0 && root.has-selection: CapsuleButton {
+                    text: @tr("Retry Selected");
+                    clicked => {
+                        root.retry-selected([root.sel-lo, root.sel-hi, root.sel-gen]);
+                        root.sel-gen += 1;
+                        root.sel-lo = -1;
+                        root.sel-hi = -1;
+                        root.sel-anchor = -1;
+                        root.has-selection = false;
+                    }
+                }
                 Rectangle { horizontal-stretch: 1; }
                 // The tabs (mockup `.tabs`): a capsule tray with the chosen tab raised.
                 Rectangle {
@@ -640,6 +677,23 @@ export component TransferDrawer inherits Rectangle {
                         tab: root.tab;
                         index: i;
                         count: root.shown-rows.length;
+                        chosen: root.tab == 2 && ((i >= root.sel-lo && i <= root.sel-hi) != (entry.selected == root.sel-gen));
+                        row-clicked(ctrl, shift) => {
+                            root.has-selection = true;
+                            if (shift && root.sel-anchor >= 0) {
+                                root.sel-gen += 1;
+                                root.sel-lo = min(root.sel-anchor, i);
+                                root.sel-hi = max(root.sel-anchor, i);
+                            } else if (ctrl) {
+                                entry.selected = entry.selected == root.sel-gen ? 0 : root.sel-gen;
+                                root.sel-anchor = i;
+                            } else {
+                                root.sel-gen += 1;
+                                root.sel-lo = i;
+                                root.sel-hi = i;
+                                root.sel-anchor = i;
+                            }
+                        }
                         cancel => { root.cancel(entry.id); }
                         retry => { root.retry(entry.id); }
                         move-to-top => { root.move-to-top(entry.id); }

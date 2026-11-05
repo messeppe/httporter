@@ -1,40 +1,39 @@
-// Rename, Move To…, the warning before a move that downloads and uploads again, and the
-// pre-signed link sheet (T9).
+// Rename, Move To…, the warning before a move that downloads and uploads again (it also asks
+// before a big file is fetched for a preview), and the pre-signed link sheet.
 //
-// T1 shells: the properties and an empty panel; Escape closes.
+// Rename, Move To… and the presign sheet hang from the toolbar like New Folder; the app checks
+// what was typed and either shows `error` or closes the sheet. The warning is an alert whose
+// confirm closes it (app.slint). Escape cancels each.
 
 import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
 import { MoveData, MoveWarningData, PresignData, RenameData } from "../types.slint";
-import { Modal } from "sheets.slint";
+import { CapsuleButton } from "buttons.slint";
+import { ErrorLine, Field, FormRow, RadioList } from "form_controls.slint";
+import { AlertCard, AttachedSheet, Modal } from "sheets.slint";
 
-// T1 shell: a scrim with an empty panel; Escape calls `cancel`. The task that builds this file
-// replaces it.
-component Shell inherits Rectangle {
-    in property <length> panel-width: 440px;
-    in property <length> panel-height: 200px;
-    // The panel's top edge; below 0 centres it.
-    in property <length> panel-y: -1px;
-    callback cancel();
+// The title line of a sheet.
+component SheetTitle inherits HorizontalLayout {
+    in property <string> text;
 
-    init => { keys.focus(); }
+    padding-left: 22px;
+    padding-right: 22px;
+    padding-top: 20px;
 
-    Modal {
-        cancel => { root.cancel(); }
-
-        keys := FocusScope {
-            width: 0px;
-            height: 0px;
-        }
-
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: root.panel-y < 0px ? (parent.height - self.height) / 2 : root.panel-y;
-            width: min(root.panel-width, parent.width - 32px);
-            height: min(root.panel-height, parent.height - 32px);
-            background: Theme.sheet;
-            border-radius: Theme.radius-lg;
-        }
+    Text {
+        text: root.text;
+        color: Theme.label;
+        font-size: 17px;
+        font-weight: Theme.weight-semibold;
+        overflow: elide;
+        accessible-role: none;
     }
+}
+
+// The line between a sheet's fields and its buttons.
+component FootRule inherits Rectangle {
+    height: 1px;
+    background: Theme.sep;
 }
 
 // F2: the new name ("/" refused). The app closes it.
@@ -43,10 +42,77 @@ export component RenameSheet inherits Rectangle {
     callback confirm(string);
     callback cancelled();
 
-    Shell {
-        panel-y: Theme.toolbar-height;
-        panel-height: 180px;
+    function submit() {
+        if (!root.data.busy) {
+            root.confirm(name-field.text);
+        }
+    }
+
+    init => {
+        name-field.text = root.data.name;
+        name-field.focus();
+        name-field.select-all();
+    }
+
+    Modal {
+        at-first-stop: name-field.has-focus;
+        at-last-stop: rename-button.has-focus;
         cancel => { root.cancelled(); }
+        confirm => { root.submit(); }
+        focus-first => { name-field.focus(); }
+        focus-last => { rename-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 440px;
+            label: root.data.title;
+
+            SheetTitle { text: root.data.title; }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 16px;
+                padding-bottom: 14px;
+                spacing: 6px;
+
+                FormRow {
+                    label: @tr("Name");
+
+                    name-field := Field {
+                        label: @tr("New name");
+                        error: root.data.error;
+                        enabled: !root.data.busy;
+                        accepted => { root.submit(); }
+                    }
+                    if root.data.error != "": ErrorLine { text: root.data.error; }
+                    if root.data.note != "": Text {
+                        text: root.data.note;
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            FootRule { }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+                alignment: end;
+
+                CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                rename-button := CapsuleButton {
+                    text: root.data.busy ? @tr("Renaming…") : @tr("Rename");
+                    primary: true;
+                    enabled: !root.data.busy;
+                    clicked => { root.submit(); }
+                }
+            }
+        }
     }
 }
 
@@ -56,23 +122,121 @@ export component MoveSheet inherits Rectangle {
     callback confirm(string);
     callback cancelled();
 
-    Shell {
-        panel-y: Theme.toolbar-height;
-        panel-height: 180px;
+    function submit() {
+        if (!root.data.busy) {
+            root.confirm(folder-field.text);
+        }
+    }
+
+    init => {
+        folder-field.text = root.data.destination;
+        folder-field.focus();
+        folder-field.select-all();
+    }
+
+    Modal {
+        at-first-stop: folder-field.has-focus;
+        at-last-stop: move-button.has-focus;
         cancel => { root.cancelled(); }
+        confirm => { root.submit(); }
+        focus-first => { folder-field.focus(); }
+        focus-last => { move-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 480px;
+            label: root.data.title;
+
+            SheetTitle { text: root.data.title; }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 16px;
+                padding-bottom: 14px;
+                spacing: 6px;
+
+                FormRow {
+                    label: @tr("To folder");
+
+                    folder-field := Field {
+                        label: @tr("Destination folder");
+                        placeholder: @tr("/ for the top of the site");
+                        error: root.data.error;
+                        enabled: !root.data.busy;
+                        accepted => { root.submit(); }
+                    }
+                    if root.data.error != "": ErrorLine { text: root.data.error; }
+                    if root.data.note != "": Text {
+                        text: root.data.note;
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            FootRule { }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+                alignment: end;
+
+                CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                move-button := CapsuleButton {
+                    text: root.data.busy ? @tr("Checking…") : @tr("Move");
+                    primary: true;
+                    enabled: !root.data.busy;
+                    clicked => { root.submit(); }
+                }
+            }
+        }
     }
 }
 
-// Bunny can't copy on the server: the move downloads, uploads and then deletes.
+// A warning that asks before going on: a move that downloads, uploads and then deletes (Bunny
+// can't copy on the server), or a big file fetched for a preview. Cancel is the default.
 export component MoveWarningSheet inherits Rectangle {
     in property <MoveWarningData> data;
     callback confirm();
     callback cancelled();
 
-    Shell {
-        panel-width: 360px;
-        panel-height: 220px;
+    init => { cancel-button.focus(); }
+
+    Modal {
+        at-first-stop: go-button.has-focus;
+        at-last-stop: cancel-button.has-focus;
         cancel => { root.cancelled(); }
+        confirm => { root.cancelled(); }
+        focus-first => { go-button.focus(); }
+        focus-last => { cancel-button.focus(); }
+
+        AlertCard {
+            icon: Icons.warn;
+            tint: Theme.orange;
+            tint-soft: Theme.orange-soft;
+            title: root.data.title;
+            body: root.data.body;
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                go-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: root.data.button;
+                    clicked => { root.confirm(); }
+                }
+                cancel-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: @tr("Cancel");
+                    primary: true;
+                    clicked => { root.cancelled(); }
+                }
+            }
+        }
     }
 }
 
@@ -83,9 +247,66 @@ export component PresignSheet inherits Rectangle {
     callback copy(int);
     callback cancelled();
 
-    Shell {
-        panel-y: Theme.toolbar-height;
-        panel-height: 180px;
+    init => {
+        expiry-list.current = root.data.expiry;
+        expiry-list.focus();
+    }
+
+    Modal {
+        at-first-stop: expiry-list.has-focus;
+        at-last-stop: copy-button.has-focus;
         cancel => { root.cancelled(); }
+        confirm => { root.copy(expiry-list.current); }
+        focus-first => { expiry-list.focus(); }
+        focus-last => { copy-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 420px;
+            label: root.data.title;
+
+            SheetTitle { text: root.data.title; }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 16px;
+                padding-bottom: 14px;
+                spacing: 8px;
+
+                FormRow {
+                    label: @tr("Link lasts");
+
+                    expiry-list := RadioList {
+                        label: @tr("How long the link lasts");
+                        options: [@tr("15 minutes"), @tr("1 hour"), @tr("1 day"), @tr("7 days")];
+                    }
+                }
+                Text {
+                    text: @tr("Anyone with the link can download the file until it expires.");
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                }
+                if root.data.error != "": ErrorLine { text: root.data.error; }
+            }
+            FootRule { }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+                alignment: end;
+
+                CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                copy-button := CapsuleButton {
+                    text: @tr("Copy Link");
+                    primary: true;
+                    clicked => { root.copy(expiry-list.current); }
+                }
+            }
+        }
     }
 }

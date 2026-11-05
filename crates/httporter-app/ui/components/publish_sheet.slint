@@ -133,6 +133,8 @@ component Tick inherits Rectangle {
 component PlanItem inherits Rectangle {
     in property <PlanRow> entry;
     callback toggled();
+    // A tree folder row's disclosure triangle.
+    callback expand();
 
     height: 30px;
     background: root.entry.header ? Theme.row-alt : (area.has-hover ? Theme.hover : transparent);
@@ -143,12 +145,40 @@ component PlanItem inherits Rectangle {
     accessible-checked: root.entry.checked;
     accessible-action-default => { root.toggled(); }
 
+    area := TouchArea {
+        clicked => { root.toggled(); }
+    }
+
     HorizontalLayout {
-        padding-left: 14px;
+        padding-left: 14px + root.entry.depth * 16px;
         padding-right: 14px;
         spacing: 8px;
 
         VCenter { Tick { checked: root.entry.checked; } }
+        // The tree's disclosure triangle (a folder row), or the room it takes (a file row in the
+        // tree), so that names line up.
+        if root.entry.folder: VCenter {
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                accessible-role: button;
+                accessible-label: root.entry.expanded ? @tr("Collapse {}", root.entry.path) : @tr("Expand {}", root.entry.path);
+                accessible-action-default => { root.expand(); }
+
+                Image {
+                    source: root.entry.expanded ? Icons.chev-d : Icons.chev-r;
+                    colorize: Theme.label2;
+                    width: 10px;
+                    height: 10px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    accessible-role: none;
+                }
+                TouchArea {
+                    clicked => { root.expand(); }
+                }
+            }
+        }
         if !root.entry.header: VCenter {
             Image {
                 source: KindStyle.icon(root.entry.kind);
@@ -209,10 +239,6 @@ component PlanItem inherits Rectangle {
         y: parent.height - 1px;
         height: 1px;
         background: Theme.sep;
-    }
-
-    area := TouchArea {
-        clicked => { root.toggled(); }
     }
 }
 
@@ -418,6 +444,26 @@ export component PublishSheet inherits Rectangle {
                     }
                 }
 
+                // Flat or Tree, and the filter (I4).
+                if root.has-plan: HorizontalLayout {
+                    spacing: 12px;
+
+                    VCenter {
+                        Segmented {
+                            options: [@tr("Flat"), @tr("Tree")];
+                            label: @tr("Show the files as a list or as folders");
+                            selected(index) => { root.plan-view(index); }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    filter-field := Field {
+                        width: 240px;
+                        label: @tr("Filter the files");
+                        placeholder: @tr("Filter by path");
+                        edited => { root.plan-filter-changed(self.text); }
+                    }
+                }
+
                 // The plan list; while comparing, how far it is; or what went wrong.
                 Rectangle {
                     height: root.list-height;
@@ -465,6 +511,7 @@ export component PublishSheet inherits Rectangle {
                         for row[i] in root.rows: PlanItem {
                             entry: row;
                             toggled => { root.toggle(i); }
+                            expand => { root.plan-expand(i); }
                         }
                     }
                 }

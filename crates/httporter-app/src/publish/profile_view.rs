@@ -690,10 +690,13 @@ fn draft_of(target: &SheetTarget, cdn_note: String) -> ProfileDraft {
         guard_percent: r.guard.percent.to_string().into(),
         cdn_note: cdn_note.into(),
         error: SharedString::new(),
-        // T9: the Cache-Control field.
         cache_control: r.cache_control.as_deref().unwrap_or_default().into(),
-        cache_control_enabled: false,
-        cache_control_note: SharedString::new(),
+        cache_control_enabled: target.site.provider == ProviderKind::S3,
+        cache_control_note: if target.site.provider == ProviderKind::S3 {
+            SharedString::new()
+        } else {
+            copy::CACHE_CONTROL_BUNNY.into()
+        },
     }
 }
 
@@ -753,6 +756,16 @@ fn checked(target: &SheetTarget, d: &ProfileDraft) -> Result<ProfileRecord, Stri
     } else {
         PurgeMode::Off
     };
+    // S3 only: Bunny sets caching in the pull zone.
+    let cache_control = if target.site.provider == ProviderKind::S3 {
+        let value = d.cache_control.trim();
+        if value.chars().any(|c| c.is_control() || !c.is_ascii()) {
+            return Err(copy::CACHE_CONTROL_INVALID.to_owned());
+        }
+        (!value.is_empty()).then(|| value.to_owned())
+    } else {
+        target.record.cache_control.clone()
+    };
     Ok(ProfileRecord {
         name: name.to_owned(),
         local_dir: PathBuf::from(folder),
@@ -761,6 +774,7 @@ fn checked(target: &SheetTarget, d: &ProfileDraft) -> Result<ProfileRecord, Stri
         remove_extras: d.remove_extras,
         purge,
         guard: DeleteGuard { files, percent },
+        cache_control,
         ..target.record.clone()
     })
 }
@@ -792,6 +806,21 @@ fn save(p: &Arc<Publisher>, ui: &AppWindow, draft: ProfileDraft) {
         } else {
             Err(copy::PROFILE_FOLDER_NOT_FOUND.to_owned())
         };
+        if saved.is_ok() && target.site.provider == ProviderKind::S3 {
+            // The engine's Cache-Control rule follows the profile (the old folder's goes).
+            let engine = p2.transfers.engine();
+            let old = &target.record;
+            if !target.new && old.remote_dir != record.remote_dir && old.cache_control.is_some() {
+                engine.set_cache_control(&record.site, &old.remote_dir, None);
+            }
+            if !target.new || record.cache_control.is_some() {
+                engine.set_cache_control(
+                    &record.site,
+                    &record.remote_dir,
+                    record.cache_control.clone(),
+                );
+            }
+        }
         let ui = p2.link.ui().clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
             sheet_saved(&p2, &ui, target.new, &record, saved, draft);

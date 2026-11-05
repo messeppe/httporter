@@ -642,9 +642,13 @@ impl Session {
         let service = SiteProvider::of(site).label();
         // The connections a transfer to the site may open at once.
         let ready = remote.provider.as_ref().map(|provider| {
-            self.hub
+            let setting = self
+                .hub
                 .settings()
-                .transfer_limit(provider.capabilities().transfer_concurrency_max)
+                .transfer_limit(provider.capabilities().transfer_concurrency_max);
+            // M8: the engine's slow-down for the site, when it is below the setting.
+            self.engine_limit(&site.id)
+                .map_or(setting, |limit| limit.min(setting))
         });
         let (connection, status_right) = match (&remote.info, &remote.error) {
             (Some(info), _) => (

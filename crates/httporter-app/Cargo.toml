@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 httporter-bunny = { path = "../httporter-bunny" }
 httporter-core = { path = "../httporter-core" }
 httporter-platform = { path = "../httporter-platform" }
@@ -19,8 +20,8 @@ httporter-transfer = { path = "../httporter-transfer" }
 # Not used directly: adds WebP and GIF to the png + jpeg that Slint's own image loading
 # decodes (`Image::load_from_path`). resvg already links both decoders.
 image = { version = "0.25.10", default-features = false, features = ["webp", "gif"] }
-slint ={ workspace = true, features = ["unstable-winit-030"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+slint = { workspace = true, features = ["unstable-winit-030"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]

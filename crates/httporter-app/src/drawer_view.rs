@@ -10,13 +10,16 @@
 //! [`install`] shows the idle drawer with callbacks that do nothing (the window's tests run
 //! without an engine); `transfers.rs` wires them to the engine and feeds the window.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use httporter_core::{EngineSnapshot, EngineState, JobKind, JobView};
-use slint::{Model, ModelRc, SharedString, VecModel};
+use httporter_core::{EngineSnapshot, EngineState, JobId, JobKind, JobView};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::format::{format_rate, format_size};
+use crate::transfers::Transfers;
 use crate::viewmodel::{FileKindData, kind_for, slint_kind};
 use crate::{AppWindow, TransferRow, copy};
 
@@ -225,8 +228,53 @@ fn slint_rows(rows: &[TransferRowData]) -> Vec<TransferRow> {
             percent: row.percent,
             detail: row.detail.as_str().into(),
             paused: row.paused,
+            selected: 0,
         })
         .collect()
+}
+
+/// The Failed rows for `rows`, each keeping the Ctrl+click mark the drawer gave it (M11).
+fn failed_rows(current: &ModelRc<TransferRow>, rows: &[TransferRowData]) -> Vec<TransferRow> {
+    let marks: HashMap<i32, i32> = current
+        .iter()
+        .filter(|row| row.selected != 0)
+        .map(|row| (row.id, row.selected))
+        .collect();
+    let mut rows = slint_rows(rows);
+    for row in &mut rows {
+        if let Some(&mark) = marks.get(&row.id) {
+            row.selected = mark;
+        }
+    }
+    rows
+}
+
+/// M11: Retry Selected on the Failed tab retries the jobs of the rows picked. The drawer hands
+/// over its selection as [first row, last row, Ctrl+click mark] (see `drawer.slint`).
+pub fn install_retry_selected(ui: &AppWindow, transfers: Arc<Transfers>) {
+    let weak = ui.as_weak();
+    ui.on_transfers_retry_selected(move |picked| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let picked: Vec<i32> = picked.iter().collect();
+        let [first, last, mark] = picked[..] else {
+            return;
+        };
+        let ids: Vec<JobId> = ui
+            .get_transfers_failed()
+            .iter()
+            .enumerate()
+            .filter(|(i, row)| {
+                let i = i32::try_from(*i).unwrap_or(i32::MAX);
+                (i >= first && i <= last) != (row.selected == mark)
+            })
+            .filter_map(|(_, row)| u64::try_from(row.id).ok().map(JobId))
+            .collect();
+        if !ids.is_empty() {
+            transfers.engine().retry(&ids);
+        }
+    });
 }
 
 /// Brings the model a window property holds up to `rows` row by row, so the list keeps its scroll
@@ -278,7 +326,8 @@ pub fn apply_drawer(ui: &AppWindow, view: &DrawerView) {
     if let Some(model) = synced(&ui.get_transfers_queued(), slint_rows(&view.queued)) {
         ui.set_transfers_queued(model);
     }
-    if let Some(model) = synced(&ui.get_transfers_failed(), slint_rows(&view.failed)) {
+    let failed = ui.get_transfers_failed();
+    if let Some(model) = synced(&failed, failed_rows(&failed, &view.failed)) {
         ui.set_transfers_failed(model);
     }
     if let Some(model) = synced(&ui.get_transfers_done(), slint_rows(&view.done)) {
@@ -298,6 +347,7 @@ pub fn install(ui: &AppWindow) {
     ui.on_transfer_cancel(|_id| {});
     ui.on_transfer_retry(|_id| {});
     ui.on_transfers_retry_failed(|| {});
+    ui.on_transfers_retry_selected(|_| {});
     ui.on_transfer_move_to_top(|_id| {});
     ui.on_transfer_pause(|_id| {});
     ui.on_transfer_resume(|_id| {});

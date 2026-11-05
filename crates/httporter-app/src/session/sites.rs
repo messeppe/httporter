@@ -416,6 +416,7 @@ impl Session {
     /// that is gone. Blocks: call it from a blocking thread. (Its transfers are the engine's to
     /// cancel, which the window does first.)
     pub fn remove_site(&self, id: &SiteId) -> Result<(), String> {
+        let name = self.site(id).map(|site| site.name);
         self.creds
             .delete(&CredentialKey::site(id))
             .map_err(copy::site_not_removed)?;
@@ -432,6 +433,10 @@ impl Session {
         let mut book = lock(&self.book);
         book.take(listed);
         book.sites.retain(|site| site.id != *id);
+        drop(book);
+        if let Some(name) = name {
+            crate::manage::activity_view::site_removed(&name);
+        }
         Ok(())
     }
 
@@ -761,6 +766,8 @@ fn save_to_stores(
     if !book.sites.iter().any(|site| site.id == record.id) {
         book.sites.push(record.clone());
     }
+    drop(book);
+    crate::manage::activity_view::site_added(&record.name);
     Ok(record)
 }
 

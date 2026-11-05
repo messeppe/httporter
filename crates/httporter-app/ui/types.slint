@@ -43,6 +43,9 @@ export struct TransferRow {
     percent: float,
     detail: string,
     paused: bool,
+    // M11: the Failed tab's selection generation the row was Ctrl+clicked in (the drawer's own
+    // bookkeeping; the app keeps it as it is).
+    selected: int,
 }
 
 // Whether the two files of a conflict hold the same contents (the conflict sheet's Contents column);

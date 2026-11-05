@@ -26,6 +26,9 @@ pub const COPY_TOO_LARGE: &str =
 /// The provider can't make a pre-signed link.
 pub const NO_PRESIGN: &str = "This storage can't make pre-signed links.";
 
+/// An export that would have carried a field named like a secret, refused (I4, T4).
+pub const SITES_SECRET_FIELD: &str = "The export was stopped: it would have included a secret.";
+
 /// A file given to Import Sites is not a sites file (I4, T4).
 pub const SITES_WRONG_FORMAT: &str = "This file isn't an HTTPorter sites file.";
 
