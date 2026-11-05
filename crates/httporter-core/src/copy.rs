@@ -18,6 +18,11 @@ pub const NO_PULL_ZONE: &str = "No pull zone serves this storage zone.";
 /// The provider can't copy a file on the server (I4 moves then download and upload again).
 pub const NO_COPY: &str = "This storage can't copy files on the server.";
 
+/// The service refused a server-side copy because the file is larger than one copy request may
+/// take (S3: 5 GiB).
+pub const COPY_TOO_LARGE: &str =
+    "This file is too large for the storage to copy on the server (the limit is 5 GB).";
+
 /// The provider can't make a pre-signed link.
 pub const NO_PRESIGN: &str = "This storage can't make pre-signed links.";
 

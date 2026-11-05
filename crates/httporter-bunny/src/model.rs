@@ -16,6 +16,9 @@ pub struct BunnyObject {
     pub content_type: Option<String>,
     /// Comma-separated region codes, for example `"LA,DE,BR"`.
     pub replicated_zones: Option<String>,
+    /// When the object was first stored, as raw as `LastChanged`; read only by `stat`.
+    #[serde(default)]
+    pub date_created: Option<String>,
 }
 
 /// Maps a listing element to an [`Entry`] inside the directory `dir`.
@@ -45,6 +48,13 @@ pub fn to_entry(obj: BunnyObject, dir: &RemotePath) -> Result<Entry, ProviderErr
             .map(str::to_owned)
             .collect(),
     })
+}
+
+/// `DateCreated`, when it is there and readable.
+pub fn created(obj: &BunnyObject) -> Option<DateTime<Utc>> {
+    obj.date_created
+        .as_deref()
+        .and_then(|value| parse_last_changed(value).ok())
 }
 
 fn parse_last_changed(value: &str) -> Result<DateTime<Utc>, ProviderError> {
@@ -92,6 +102,7 @@ mod tests {
             checksum: None,
             content_type: None,
             replicated_zones: None,
+            date_created: None,
         };
         let err = to_entry(obj, &RemotePath::root()).unwrap_err();
         assert!(matches!(err, ProviderError::Permanent(_)), "{err:?}");
@@ -111,6 +122,7 @@ mod edge_tests {
             checksum: None,
             content_type: None,
             replicated_zones: None,
+            date_created: None,
         }
     }
 

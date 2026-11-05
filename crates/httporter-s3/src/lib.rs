@@ -18,7 +18,8 @@ pub use presets::{
     object_url,
 };
 pub use sigv4::{
-    Credentials, EMPTY_PAYLOAD_SHA256, SignInput, UNSIGNED_PAYLOAD, canonical_uri, sha256_hex, sign,
+    Credentials, EMPTY_PAYLOAD_SHA256, PRESIGN_MAX_SECS, SignInput, UNSIGNED_PAYLOAD,
+    canonical_uri, presign_get, sha256_hex, sign,
 };
 pub use storage::{S3Config, S3Storage};
 /// Re-exported so callers of [`sign`] and [`endpoint`] need no `url` dependency of their own.

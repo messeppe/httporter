@@ -1,5 +1,5 @@
-//! AWS Signature Version 4 for S3 and S3-compatible services (header
-//! authorization only; presigned URLs arrive with I4).
+//! AWS Signature Version 4 for S3 and S3-compatible services: header authorization
+//! ([`sign`]) and pre-signed links ([`presign_get`]).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -112,6 +112,70 @@ pub fn sign(
         ),
     )];
     out.extend(added);
+    out
+}
+
+/// The longest a pre-signed link may stay valid: seven days, SigV4's limit.
+pub const PRESIGN_MAX_SECS: u64 = 604_800;
+
+/// A pre-signed `GET` link to `url` (an object's address, without a query): the signature
+/// travels in the query instead of in headers, so anyone with the link can download the object
+/// until `expires_secs` (1 s to [`PRESIGN_MAX_SECS`]) after `now`.
+///
+/// The query carries `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`,
+/// `X-Amz-SignedHeaders=host`, `X-Amz-Security-Token` for temporary credentials, and last
+/// `X-Amz-Signature`. Only `host` is signed and the payload is `UNSIGNED-PAYLOAD`, so the link
+/// works from any browser. The secret key never appears in it; the access key id does, as it
+/// must.
+pub fn presign_get(
+    url: &Url,
+    creds: &Credentials,
+    region: &str,
+    now: DateTime<Utc>,
+    expires_secs: u64,
+) -> Url {
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let day = now.format("%Y%m%d").to_string();
+    let scope = format!("{day}/{region}/s3/aws4_request");
+    let mut params = vec![
+        ("X-Amz-Algorithm", ALGORITHM.to_owned()),
+        (
+            "X-Amz-Credential",
+            format!("{}/{scope}", creds.access_key_id),
+        ),
+        ("X-Amz-Date", amz_date.clone()),
+        (
+            "X-Amz-Expires",
+            expires_secs.clamp(1, PRESIGN_MAX_SECS).to_string(),
+        ),
+        ("X-Amz-SignedHeaders", "host".to_owned()),
+    ];
+    if let Some(token) = &creds.session_token {
+        params.push(("X-Amz-Security-Token", token.clone()));
+    }
+    let query = params
+        .iter()
+        .map(|(name, value)| format!("{name}={}", percent_encode(value.as_bytes(), ENCODE)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let mut out = url.clone();
+    out.set_query(Some(&query));
+
+    let input = SignInput {
+        method: "GET",
+        url: &out,
+        headers: &[],
+        payload_sha256: UNSIGNED_PAYLOAD,
+    };
+    let headers = BTreeMap::from([("host".to_owned(), host_header(&out))]);
+    let (request, _) = canonical_request(&input, &headers);
+    let string_to_sign = format!(
+        "{ALGORITHM}\n{amz_date}\n{scope}\n{}",
+        sha256_hex(request.as_bytes())
+    );
+    let key = signing_key(&creds.secret_access_key, &day, region, "s3");
+    let signature = hex::encode(hmac_sha256(&key, string_to_sign.as_bytes()));
+    out.set_query(Some(&format!("{query}&X-Amz-Signature={signature}")));
     out
 }
 

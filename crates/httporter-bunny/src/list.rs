@@ -8,7 +8,9 @@
 //!   folder, or a folder under a missing parent. Bunny never answers 404 to a listing, so an
 //!   empty answer is checked against the parent (see [`BunnyStorage::list_dir`]).
 
-use httporter_core::{Entry, Listing, ProviderError, RemotePath, RequestInfo, with_retry};
+use httporter_core::{
+    Entry, Listing, ObjectInfo, ProviderError, RemotePath, RequestInfo, with_retry,
+};
 use reqwest::Version;
 use reqwest::header::ACCEPT;
 use tokio::time::Instant;
@@ -16,7 +18,7 @@ use tokio::time::Instant;
 use crate::client::{
     BunnyStorage, ERROR_BODY_MAX, Op, map_status, network_error, parse_retry_after, read_capped,
 };
-use crate::model::{BunnyObject, to_entry};
+use crate::model::{BunnyObject, created, to_entry};
 
 impl BunnyStorage {
     /// The direct children of `dir`, or [`ProviderError::NotFound`] when there is no such
@@ -52,6 +54,34 @@ impl BunnyStorage {
         Ok(siblings
             .iter()
             .any(|object| object.is_directory && object.object_name == name))
+    }
+
+    /// What the parent's listing says about `path`, with its `DateCreated`: Bunny has no
+    /// request for one object's details. A name the parent does not list is
+    /// [`ProviderError::NotFound`] (Bunny lists a missing parent as `[]`, so that is the answer
+    /// for it too).
+    pub(crate) async fn stat_path(&self, path: &RemotePath) -> Result<ObjectInfo, ProviderError> {
+        let (Some(parent), Some(name)) = (path.parent(), path.name()) else {
+            return Err(ProviderError::NotFound);
+        };
+        let url = self.dir_url(&parent);
+        let url = url.as_str();
+        let (objects, _) = with_retry(&self.list_retry, move |_| self.fetch_listing(url)).await?;
+        // A file and a folder may share a name on Bunny: the file is what is asked about.
+        let object = objects
+            .iter()
+            .filter(|object| object.object_name == name)
+            .min_by_key(|object| object.is_directory)
+            .cloned()
+            .ok_or(ProviderError::NotFound)?;
+        let created = created(&object);
+        let entry = to_entry(object, &parent)?;
+        Ok(ObjectInfo {
+            content_type: entry.content_type.clone(),
+            entry,
+            created,
+            metadata: Vec::new(),
+        })
     }
 
     /// One attempt at fetching and parsing a directory listing.
