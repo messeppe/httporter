@@ -32,7 +32,7 @@ for a public 1.0:
   - `src/system/` (security, reset, update, about).
 - **Each folder has its own `copy.rs`.**
 - **No new heavy dependencies:** `embed-resource` (build only), and `reqwest` (already linked) for the update check.
-- **Exe budget S8 stays ≤ 25 MB.** The trim left 24.48 MB, so any track that adds more than ~100 KB says so.
+- **No exe-size budget** (user, 2026-11-05: "if you're losing features or function then why make it less than 25 mb"). S8 is dropped; the earlier size trims that cost function are undone (patched parley without ICU4X dictionaries, opt-level "z", the Inter subset), and the GPU renderer comes back as an opt-in Advanced setting.
 
 **Speed mode (user rule: build everything first, test at the end):**
 - **No per-task tests or reviews.**
@@ -68,7 +68,7 @@ for a public 1.0:
 - **Agents never drive the user's desktop.** The 5 s start check is the only GUI run.
 
 ## Global constraints (verbatim from the spec)
-- S6 cold start ≤ 1 s; S7 idle ≤ 40 MB private; S8 `httporter.exe` ≤ 25 MB.
+- S6 cold start ≤ 1 s; S7 idle ≤ 40 MB private; S8 dropped by the user (no exe-size budget).
 - §9.1: "WCAG AA contrast, visible focus, full keyboard use, accessible names on icon buttons (AccessKit/UI
   Automation), follows Windows text scaling"; motion "150–250 ms … honors Windows 'reduce animations'".
 - §16: "opt-in check of the release feed at startup; shows 'HTTPorter 1.2 is available' with release notes and a
@@ -543,7 +543,7 @@ check.ps1}`, `installer/httporter.iss`, `README.md`, `CONTRIBUTING.md`, `CODE_OF
 - the normal and build dependency closure of `httporter-app`;
 - per crate: name, version, licence expression, repository, and the texts of `LICENSE*` / `COPYING*` / `NOTICE*` in
   its source folder (identical texts printed once with the crate list);
-- also Inter (OFL-1.1, from `ui/fonts`), the vendored `parley`, and the Slint royalty-free licence text;
+- also Inter (OFL-1.1, from `ui/fonts`), and the Slint royalty-free licence text;
 - writes `THIRD-PARTY-NOTICES.txt`; `--check` fails if a crate has no licence text.
 
 **`installer/httporter.iss`:**
@@ -559,7 +559,7 @@ check.ps1}`, `installer/httporter.iss`, `README.md`, `CONTRIBUTING.md`, `CODE_OF
 
 **`tools/package.ps1 [-TargetDir]`:**
 1. `cargo build --release --locked -p httporter-app`;
-2. stop if the exe is > 25 MB (S8);
+2. report the exe size (no budget);
 3. stage `dist\HTTPorter-<ver>\`;
 4. `sign.ps1` on the exe;
 5. `HTTPorter-<ver>-windows-x64-portable.zip`;
@@ -600,11 +600,7 @@ after the merge (T7), so the tracks don't conflict.
 1. **Merge into `feat/i5-polish`**, in this order: T1, then T6, T2, T3, T4, T5. Fix the compile after each merge.
 2. **Headers:** `python -I tools/spdx_headers.py`, then commit.
 3. **Checks:** release build in `D:\Temp\httporter-target\merge`; `third_party.py`; `package.ps1`.
-4. **Size:** S8 ≤ 25 MB. If it's over, a size pass, using the I4 size report's levers:
-   - restructure the duplicated ScrollViews and containers;
-   - dead code.
-
-   Screen-reader support stays (§9.1).
+4. **Size:** reported only; no budget.
 5. **Install** the exe the way it's installed today. The setup exe is left in `dist\` for the user to try. A launch
    smoke runs, and the ledger and memory are updated.
 
@@ -644,8 +640,7 @@ after the merge (T7), so the tracks don't conflict.
 - **I6:** the CLI and `httporter.com`, scheduled publish, the watch folder, creating zones and buckets, zone and bucket
   settings.
 - **Deviations, with reasons:**
-  - **GPU renderer setting (§6, §9.1):** left out. femtovg/OpenGL would add MBs over the 25 MB budget and 30+ MB of
-    memory against S7. The software renderer stays the only one.
+  - **GPU renderer setting (§6, §9.1):** added back as an opt-in Settings › Advanced choice (software stays the default for S7 memory); applies after a restart, falls back to software if the GPU renderer can't start.
   - **Text scaling:** applied live via `WM_SETTINGCHANGE`. Per-element reflow beyond the Theme sizes is best effort.
   - **Translations:** the code is ready for them, but no languages ship in 1.0.
 - **User actions at release:**

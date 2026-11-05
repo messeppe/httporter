@@ -74,5 +74,5 @@ exceptions = [
 multiple-versions = "warn"
 highlight = "simplest-path"
 wildcards = "deny"
-# Path dependencies (our crates, vendor/parley) carry no version requirement.
+# Path dependencies (our crates) carry no version requirement.
 allow-wildcard-paths = true

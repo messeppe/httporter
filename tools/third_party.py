@@ -13,7 +13,6 @@ What it lists:
   expression, source, and the texts of its LICENSE* / LICENCE* / COPYING* / NOTICE* /
   UNLICENSE* / COPYRIGHT* files and LICENSES/ folder. Identical texts are printed once,
   with the crates that use them;
-- the vendored, patched `parley` (vendor/parley);
 - the Inter font (OFL-1.1, crates/httporter-app/ui/fonts/OFL.txt);
 - for Slint, only the text of the licence HTTPorter takes (Slint Royalty-free 2.0).
 
@@ -50,14 +49,8 @@ LICENCE_DIRS = ("licenses", "license")  # compared lower-case
 SLINT_CHOSEN = "LicenseRef-Slint-Royalty-free-2.0"
 SLINT_NOT_TAKEN = ("GPL-3.0-only", "LicenseRef-Slint-Software-3.0")
 
-VENDORED = {
-    "parley": (
-        "Vendored in vendor/parley of the HTTPorter source and modified there (each change is "
-        'marked "HTTPorter patch"): the dictionary word and line segmenters moved behind a '
-        "feature nothing enables, and a deprecation lint allowed. Upstream: "
-        "https://github.com/linebender/parley"
-    ),
-}
+# Third-party crates vendored and modified in this repository (name -> note). None at present.
+VENDORED: dict[str, str] = {}
 
 # Crates whose published package ships no licence file. Each entry was checked against the
 # crate's upstream repository: the licence HTTPorter takes (from the crate's expression),

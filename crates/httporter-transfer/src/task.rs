@@ -1,6 +1,6 @@
 //! Spawning with each future or closure boxed first. tokio builds its task code once per task
 //! type, so unboxed every spawn site carries its own copy (~4 KB); boxed, the sites share one
-//! copy per result type (S8: exe size). The cost is one allocation per spawn.
+//! copy per result type (less generated code). The cost is one allocation per spawn.
 
 use std::future::Future;
 use std::pin::Pin;

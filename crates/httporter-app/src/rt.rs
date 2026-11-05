@@ -1,6 +1,6 @@
 //! Spawning on the tokio runtime with each future or closure boxed first. tokio builds its task
 //! code once per task type, so unboxed every spawn site would carry its own copy (~4 KB each);
-//! boxed, the sites share one copy per result type (S8: the exe stays under 25 MB). The cost is
+//! boxed, the sites share one copy per result type (less generated code). The cost is
 //! one allocation per spawn, which the window's tasks never notice.
 
 use std::future::Future;

@@ -76,9 +76,9 @@ only in a commit that says so. Never run a plain `cargo update`.
 - **Secrets** (passwords, API keys, S3 secrets) live only in Windows Credential Manager. They
   never go into SQLite, settings, exports, logs (`httporter_core::redact`), `Debug` output,
   error text or the UI.
-- **Size:** `httporter.exe` stays at or under 25 MB (`tools/package.ps1` refuses a bigger
-  one). Say how much a new dependency adds; prefer the standard library and what is already
-  linked.
+- **Dependencies:** prefer the standard library and what is already linked, and say what a new
+  dependency brings. Function and speed come before exe size: never drop a feature or patch a
+  dependency only to make the exe smaller.
 - **No `panic = "abort"`** and no exe packers: the app relies on unwinding.
 
 ## Commits

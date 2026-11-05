@@ -103,7 +103,7 @@ First release supports **Bunny Storage** and **S3-compatible storage** (AWS S3, 
 | S5 | Kill the process mid-publish, restart | Offers to resume; finishes without re-uploading completed files |
 | S6 | Cold start to usable window | ≤ 1 s |
 | S7 | Memory, software renderer | Idle ≤ 40 MB private; ≤ 120 MB private during a 14k-file publish |
-| S8 | Executable | `httporter.exe` ≤ 25 MB (spike: 13 MB); `httporter.com` console companion ≤ 1 MB |
+| S8 | Executable | ~~`httporter.exe` ≤ 25 MB~~, dropped by the user 2026-11-05: function and speed come before exe size. `httporter.com` console companion stays small (≤ 1 MB) |
 | S9 | Wrong credentials | Clear message within 2 s; no retry storm |
 | S10 | Same reference publish to an S3-compatible target (MinIO locally, R2 when available) | Correct content types, compare-by-checksum works, ≥ the Bunny throughput where the service allows |
 

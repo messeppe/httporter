@@ -3,7 +3,7 @@
 #
 # Steps:
 #   1. cargo build --release --locked -p httporter-app
-#   2. stop if httporter.exe is over 25 MB (S8)
+#   2. note the exe size (no budget: the user prefers function over a smaller exe)
 #   3. stage dist\HTTPorter-<version>\ (exe, LICENSE-MIT.txt, LICENSE-APACHE.txt,
 #      THIRD-PARTY-NOTICES.txt from tools/third_party.py, README.txt)
 #   4. tools/sign.ps1 on the staged exe
@@ -37,9 +37,6 @@ Set-StrictMode -Version 3
 
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
-
-# S8: httporter.exe stays at or under 25 MB (decimal, as the size reports measure it).
-$exeBudget = 25000000
 
 # rustup puts cargo in %USERPROFILE%\.cargo\bin; a bare shell may not have it on PATH.
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
@@ -145,11 +142,8 @@ if ($SkipBuild) {
 }
 if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) { throw "no exe at $builtExe" }
 
-# --- 2. Size budget (S8) --------------------------------------------------------------------
+# --- 2. Size (reported only) ----------------------------------------------------------------
 $exeSize = (Get-Item -LiteralPath $builtExe).Length
-if ($exeSize -gt $exeBudget) {
-    throw "httporter.exe is $(Format-Size $exeSize), over the 25 MB budget (S8)"
-}
 
 # --- 3. Stage -------------------------------------------------------------------------------
 if (-not $OutDir) { $OutDir = Join-Path $repo 'dist' }
@@ -263,7 +257,7 @@ $sumsPath = Join-Path $OutDir 'SHA256SUMS.txt'
 # --- 8. Sizes -------------------------------------------------------------------------------
 Write-Host ''
 Write-Host "HTTPorter $version packaged in $OutDir"
-Write-Host ("  httporter.exe   {0}  (budget 25 MB)" -f (Format-Size $exeSize))
+Write-Host ("  httporter.exe   {0}" -f (Format-Size $exeSize))
 Write-Host ("  portable zip    {0}" -f (Format-Size (Get-Item -LiteralPath $zipPath).Length))
 Write-Host ("  setup           {0}" -f (Format-Size (Get-Item -LiteralPath $setupPath).Length))
 Write-Host "  SHA256SUMS.txt"

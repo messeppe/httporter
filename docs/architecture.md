@@ -38,10 +38,6 @@ All in `crates/`, one workspace (`Cargo.toml` at the root), edition 2024.
 | `httporter-platform` | What touches the PC: the SQLite `Store` and `SqliteJournal`, the credential store (`KeyringStore` on Windows Credential Manager, `MemoryStore` for tests), the activity log files, the file cache, and `win/` (taskbar progress, toasts, file pickers, clipboard, shell open, folder watching). | core |
 | `httporter-app` | The program: `ui/` (`.slint` files, icons, the Inter font), compiled by `build.rs`; `main.rs` (start-up and shut-down); `binding.rs` (window ↔ session); `session/` (sites, panes, profiles, settings); `site_hub.rs` (one storage client per site); `transfers.rs` (engine ↔ window); `manage/` (inspector, Quick Look, edit, favorites, palette, search, tabs, moves, activity, Settings tabs); `publish/` (compare, Publish sheet, profiles, purge); `drop_hook.rs` (files from Explorer); `single_instance.rs`. User-facing words live in the `copy.rs` files. | all of the above |
 
-`vendor/parley` is a patched copy of Slint's text-layout crate (see the root `Cargo.toml`,
-`[patch.crates-io]`): its dictionary word breakers are switched off to keep ~3 MB of ICU4X data
-out of the exe. Each change is marked "HTTPorter patch".
-
 Only `httporter-app` and `httporter-platform` know they run on Windows. The provider crates
 and the engine see only core's traits, so they are tested without a window, a network or a
 credential store.
@@ -152,8 +148,8 @@ Exported sites (Settings › Sites) are a separate JSON file that never holds a 
 ## Building and releasing
 
 - `cargo build --release -p httporter-app` builds `httporter.exe`. The release profile is
-  tuned for size (S8: at most 25 MB): `opt-level = "z"`, fat LTO, one codegen unit, stripped,
-  with `opt-level = 3` kept for the hot code (hashing, TLS crypto, the software renderer).
+  built for speed: the default `opt-level = 3`, fat LTO, one codegen unit, stripped. There is
+  no exe-size budget.
   Never `panic = "abort"`: the app relies on unwinding.
 - `tools/check.ps1` is the local gate and `.github/workflows/ci.yml` its CI twin: format,
   clippy, tests, `cargo deny` (licences and bans, `deny.toml`), SPDX headers
