@@ -58,6 +58,38 @@ pub fn hash_file(path: &Path) -> io::Result<FileHashes> {
     })
 }
 
+/// The ETag S3 gives a file uploaded in parts of `part_size` bytes: the MD5 of the parts' MD5s,
+/// then `-` and the number of parts, in lower-case hex. Reads the file once.
+pub(crate) fn multipart_etag(path: &Path, part_size: u64) -> io::Result<String> {
+    let part_size = part_size.max(1);
+    let mut file = File::open(extended(path))?;
+    let mut digests: Vec<u8> = Vec::new();
+    let mut part = Md5::new();
+    let mut in_part = 0u64;
+    let mut buf = vec![0u8; READ_SIZE];
+    loop {
+        let want =
+            usize::try_from((part_size - in_part).min(READ_SIZE as u64)).unwrap_or(READ_SIZE);
+        let n = match file.read(&mut buf[..want]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        part.update(&buf[..n]);
+        in_part += n as u64;
+        if in_part == part_size {
+            digests.extend_from_slice(&part.finalize_reset());
+            in_part = 0;
+        }
+    }
+    if in_part > 0 || digests.is_empty() {
+        digests.extend_from_slice(&part.finalize());
+    }
+    let parts = digests.len() / 16;
+    Ok(format!("{}-{parts}", hex::encode(Md5::digest(&digests))))
+}
+
 /// Paths at least this long get the `\\?\` prefix (the classic limit is 260, and a folder's
 /// path must leave room for an 8.3 name).
 #[cfg(windows)]

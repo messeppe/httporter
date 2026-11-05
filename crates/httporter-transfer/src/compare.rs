@@ -4,6 +4,11 @@
 //! The local folder is walked on a blocking thread while the site's folder is walked; the skip
 //! rules apply on both sides. Files of equal size are hashed (8 at a time, off the runtime's
 //! workers) only when the site lists a digest the mode can check.
+//!
+//! An S3 file uploaded in parts lists an ETag that is no digest of its content. For one of equal
+//! size the object's metadata is asked for (`stat`, 8 at a time): the SHA-256 HTTPorter recorded
+//! is compared when there is one; else, with the part size recorded, the multipart ETag is
+//! recomputed from the local file; else the two are told apart by size and date, as before.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -17,11 +22,11 @@ use std::time::{Duration, SystemTime};
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
 use httporter_core::{
-    Checksum, ChecksumKind, CompareBy, CompareStatus, Entry, ProviderError, ProviderKind,
-    RemotePath, SkipRules, StorageProvider, looks_secret, walk,
+    Checksum, ChecksumKind, CompareBy, CompareStatus, Entry, META_PART_SIZE, META_SHA256,
+    ProviderError, ProviderKind, RemotePath, SkipRules, StorageProvider, looks_secret, walk,
 };
 
-use crate::hash::{FileHashes, HashStore, extended, hash_file};
+use crate::hash::{FileHashes, HashStore, extended, hash_file, multipart_etag};
 use crate::messages;
 
 /// How many local files are hashed at once.
@@ -81,7 +86,10 @@ impl CompareMode {
 #[derive(Default)]
 pub struct HashCache {
     hashes: Mutex<HashMap<(PathBuf, u64, SystemTime), FileHashes>>,
-    /// Where digests are kept across restarts (T3 reads and writes it).
+    /// Multipart ETags recomputed from local files, by path, size, modification time and part
+    /// size (memory only).
+    etags: Mutex<HashMap<(PathBuf, u64, SystemTime, u64), String>>,
+    /// Where digests are kept across restarts: asked after the memory, told every new digest.
     store: Option<Arc<dyn HashStore>>,
 }
 
@@ -107,24 +115,38 @@ impl HashCache {
     pub fn with_store(store: Arc<dyn HashStore>) -> Self {
         Self {
             hashes: Mutex::default(),
+            etags: Mutex::default(),
             store: Some(store),
         }
     }
 
-    /// `path`'s digests: the ones kept while its size and modification time are unchanged,
-    /// else read from the file (and kept).
+    /// `path`'s digests: the ones kept (in memory, then in the store) while its size and
+    /// modification time are unchanged, else read from the file (and kept in both). Blocks:
+    /// call it off the runtime's workers.
     pub fn get_or_hash(&self, path: &Path) -> io::Result<FileHashes> {
         let meta = fs::metadata(extended(path))?;
-        if let Ok(modified) = meta.modified()
-            && let Some(hashes) = self.cached(path, meta.len(), modified)
-        {
-            return Ok(hashes);
+        if let Ok(modified) = meta.modified() {
+            if let Some(hashes) = self.cached(path, meta.len(), modified) {
+                return Ok(hashes);
+            }
+            if let Some(hashes) = self
+                .store
+                .as_ref()
+                .and_then(|store| store.load(path, meta.len(), modified))
+            {
+                self.remember(path, &hashes);
+                return Ok(hashes);
+            }
         }
         let hashes = hash_file(path)?;
-        self.keep(path, &hashes);
+        if let Some(store) = &self.store {
+            store.save(path, &hashes);
+        }
+        self.remember(path, &hashes);
         Ok(hashes)
     }
 
+    /// The digests kept in memory.
     fn cached(&self, path: &Path, size: u64, modified: SystemTime) -> Option<FileHashes> {
         self.hashes
             .lock()
@@ -133,7 +155,8 @@ impl HashCache {
             .cloned()
     }
 
-    fn keep(&self, path: &Path, hashes: &FileHashes) {
+    /// Keeps `hashes` in memory.
+    fn remember(&self, path: &Path, hashes: &FileHashes) {
         self.hashes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -368,10 +391,10 @@ pub async fn compare_trees(
     };
 
     let mut items = Vec::with_capacity(local.files.len() + remote.files.len());
-    // Equal-size pairs to hash: the item, the local file and the digest to check.
+    // Equal-size pairs to hash or look up: the item, the local file and what to check.
     // Owned, so the hashing stream's closure has no borrowed argument (a `Send` future that
     // takes one fails rustc's higher-ranked lifetime check when spawned).
-    let mut to_hash: Vec<(usize, LocalFile, Checksum, CompareBy)> = Vec::new();
+    let mut to_hash: Vec<(usize, LocalFile, ToCheck)> = Vec::new();
     let mut remote_files = remote.files;
     for (rel, file) in &local.files {
         let Some(entry) = remote_files.remove(rel) else {
@@ -394,12 +417,26 @@ pub async fn compare_trees(
             by_date: false,
         };
         if file.size == entry.size {
+            let multipart = entry
+                .checksum
+                .as_ref()
+                .filter(|checksum| checksum.kind == ChecksumKind::MultipartEtag);
             if let Some((by, checksum)) = mode
                 .digest_for(entry.checksum.as_ref())
                 .zip(entry.checksum.clone())
             {
                 item.by = by;
-                to_hash.push((items.len(), file.clone(), checksum, by));
+                to_hash.push((items.len(), file.clone(), ToCheck::Digest(checksum, by)));
+            } else if let Some(etag) = multipart.filter(|_| mode.md5 || mode.sha256) {
+                to_hash.push((
+                    items.len(),
+                    file.clone(),
+                    ToCheck::Multipart {
+                        path: entry.path.clone(),
+                        etag: etag.hex.clone(),
+                        modified: entry.modified,
+                    },
+                ));
             } else if mode.mtime_fallback {
                 item.by_date = true;
                 if newer_or_same(entry.modified, file.modified) {
@@ -426,19 +463,35 @@ pub async fn compare_trees(
     progress(scan);
     let mut last = tokio::time::Instant::now();
     let mut hashed = stream::iter(to_hash)
-        .map(|(i, file, checksum, by)| async move {
-            let same = digest(hashes, &file).await.is_ok_and(|digests| {
-                let local = match by {
-                    CompareBy::Md5 => hex::encode(digests.md5),
-                    _ => hex::encode(digests.sha256),
-                };
-                checksum.hex.eq_ignore_ascii_case(&local)
-            });
-            (i, same)
+        .map(|(i, file, check)| async move {
+            let told = match check {
+                ToCheck::Digest(checksum, by) => Told {
+                    by,
+                    by_date: false,
+                    same: same_digest(hashes, &file, &checksum.hex, by).await,
+                },
+                ToCheck::Multipart {
+                    path,
+                    etag,
+                    modified,
+                } => match multipart_told(provider, hashes, &file, &path, &etag).await {
+                    Some(told) => told,
+                    // Nothing recorded to go by: size and date, as for any file without a
+                    // digest.
+                    None => Told {
+                        by: CompareBy::Size,
+                        by_date: mode.mtime_fallback,
+                        same: !mode.mtime_fallback || newer_or_same(modified, file.modified),
+                    },
+                },
+            };
+            (i, told)
         })
         .buffer_unordered(HASH_AT_ONCE);
-    while let Some((i, same)) = hashed.next().await {
-        if same {
+    while let Some((i, told)) = hashed.next().await {
+        items[i].by = told.by;
+        items[i].by_date = told.by_date;
+        if told.same {
             items[i].status = CompareStatus::Same;
         }
         scan.hashed += 1;
@@ -473,7 +526,107 @@ fn newer_or_same(remote: Option<DateTime<Utc>>, local: Option<SystemTime>) -> bo
     }
 }
 
-/// A local file's digests, from the cache or read on a blocking thread.
+/// What an equal-size pair is checked by, once the walks are done.
+enum ToCheck {
+    /// The digest the site listed, by the way the mode compares it.
+    Digest(Checksum, CompareBy),
+    /// An S3 multipart ETag: the object's metadata decides (see the module docs).
+    Multipart {
+        path: RemotePath,
+        etag: String,
+        modified: Option<DateTime<Utc>>,
+    },
+}
+
+/// How an equal-size pair was told apart, and whether it is the same.
+struct Told {
+    by: CompareBy,
+    by_date: bool,
+    same: bool,
+}
+
+/// Whether the local file's digest (`by`) is `expected`, in hex. A file that can't be read is
+/// not the same.
+async fn same_digest(cache: &HashCache, file: &LocalFile, expected: &str, by: CompareBy) -> bool {
+    digest(cache, file).await.is_ok_and(|digests| {
+        let local = match by {
+            CompareBy::Md5 => hex::encode(digests.md5),
+            _ => hex::encode(digests.sha256),
+        };
+        expected.eq_ignore_ascii_case(&local)
+    })
+}
+
+/// An S3 file uploaded in parts, by what its metadata recorded: the SHA-256 (compared with the
+/// local file's), else the part size (the multipart ETag recomputed from the local file).
+/// `None` when it recorded neither, or can't be asked.
+async fn multipart_told(
+    provider: &dyn StorageProvider,
+    cache: &HashCache,
+    file: &LocalFile,
+    path: &RemotePath,
+    etag: &str,
+) -> Option<Told> {
+    let info = provider.stat(path).await.ok()?;
+    let meta = |name: &str| {
+        info.metadata
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.trim().to_owned())
+    };
+    if let Some(sha256) = meta(META_SHA256)
+        .filter(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Some(Told {
+            by: CompareBy::Sha256,
+            by_date: false,
+            same: same_digest(cache, file, &sha256, CompareBy::Sha256).await,
+        });
+    }
+    let part_size = meta(META_PART_SIZE)?
+        .parse::<u64>()
+        .ok()
+        .filter(|&size| size > 0)?;
+    let local = local_etag(cache, file, part_size).await;
+    Some(Told {
+        by: CompareBy::Md5,
+        by_date: false,
+        same: local.is_ok_and(|local| local.eq_ignore_ascii_case(etag)),
+    })
+}
+
+/// The multipart ETag of the local file in parts of `part_size`, from memory or read on a
+/// blocking thread.
+async fn local_etag(cache: &HashCache, file: &LocalFile, part_size: u64) -> io::Result<String> {
+    let key = file
+        .modified
+        .map(|modified| (file.path.clone(), file.size, modified, part_size));
+    if let Some(key) = &key
+        && let Some(etag) = cache
+            .etags
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    {
+        return Ok(etag);
+    }
+    let path = file.path.clone();
+    let etag = tokio::task::spawn_blocking(move || multipart_etag(&path, part_size))
+        .await
+        .unwrap_or_else(|_| Err(io::Error::other(messages::HASHING_STOPPED)))?;
+    if let Some(key) = key {
+        cache
+            .etags
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, etag.clone());
+    }
+    Ok(etag)
+}
+
+/// A local file's digests: from memory, else from the store, else read; all of it on a
+/// blocking thread but the memory. New digests are kept in both.
 async fn digest(cache: &HashCache, file: &LocalFile) -> io::Result<FileHashes> {
     if let Some(hashes) = file
         .modified
@@ -481,11 +634,23 @@ async fn digest(cache: &HashCache, file: &LocalFile) -> io::Result<FileHashes> {
     {
         return Ok(hashes);
     }
-    let path = file.path.clone();
-    let hashes = tokio::task::spawn_blocking(move || hash_file(&path))
-        .await
-        .unwrap_or_else(|_| Err(io::Error::other(messages::HASHING_STOPPED)))?;
-    cache.keep(&file.path, &hashes);
+    let store = cache.store.clone();
+    let (path, size, modified) = (file.path.clone(), file.size, file.modified);
+    let hashes = tokio::task::spawn_blocking(move || {
+        if let (Some(store), Some(modified)) = (&store, modified)
+            && let Some(hashes) = store.load(&path, size, modified)
+        {
+            return Ok(hashes);
+        }
+        let hashes = hash_file(&path)?;
+        if let Some(store) = &store {
+            store.save(&path, &hashes);
+        }
+        Ok(hashes)
+    })
+    .await
+    .unwrap_or_else(|_| Err(io::Error::other(messages::HASHING_STOPPED)))?;
+    cache.remember(&file.path, &hashes);
     Ok(hashes)
 }
 

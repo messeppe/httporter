@@ -464,7 +464,7 @@ pub async fn run_publish(
 }
 
 /// Runs `jobs` as one tracked batch and waits for it, Q55 checks included. No jobs, no batch.
-async fn run_batch(
+pub(crate) async fn run_batch(
     engine: &Engine,
     target: &BatchTarget,
     jobs: Vec<Job>,
