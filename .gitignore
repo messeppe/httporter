@@ -3,3 +3,8 @@ target/
 .env.test
 .worktrees/
 .superpowers/
+# Release output of tools/package.ps1.
+dist/
+# Generated at package time by tools/third_party.py (CI runs it with --check).
+/THIRD-PARTY-NOTICES.txt
+__pycache__/

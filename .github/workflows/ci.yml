@@ -1,6 +1,9 @@
-# INERT for now: this repository has no git remote yet, so GitHub will not run
-# this workflow until it is pushed to one. It mirrors tools/check.ps1 step for
-# step; keep the two in sync.
+# Mirrors tools/check.ps1 step for step; keep the two in sync.
+# Inert until the repository is pushed to GitHub.
+#
+# Hardening: every action is pinned to a full commit SHA (the tag it was is in the comment;
+# update both together), the token is read-only, checkout keeps no credentials, and every
+# cargo command that resolves dependencies runs with --locked.
 name: CI
 
 on:
@@ -8,24 +11,41 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
   check:
-    runs-on: windows-latest
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust toolchain
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          cargo --version
 
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
 
       - name: Format
         run: cargo fmt --check
@@ -37,4 +57,10 @@ jobs:
         run: cargo test --locked --workspace
 
       - name: Licences and bans
-        run: cargo deny check licenses bans
+        run: cargo deny --locked check --hide-inclusion-graph licenses bans
+
+      - name: SPDX headers
+        run: python -I tools/spdx_headers.py --check
+
+      - name: Third-party notices
+        run: python -I tools/third_party.py --check
