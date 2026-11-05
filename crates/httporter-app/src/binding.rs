@@ -1569,6 +1569,11 @@ fn install_with(
     // The sheets, alerts and banners, likewise.
     crate::sheets_view::install(ui);
 
+    // Windows' text size and "Animation effects" followed from now on, and the list columns'
+    // widths as saved last time (I5, T5).
+    crate::settings_view::install_look(ui);
+    crate::viewmodel::install_columns(ui, &session);
+
     // With an engine: the drawer, the sheets, the banners, Settings and closing act on it.
     if let Some(transfers) = &transfers {
         crate::transfers::install(ui, transfers);

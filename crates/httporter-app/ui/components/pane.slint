@@ -35,6 +35,9 @@ import { Chip, StatusChip } from "chips.slint";
 import { VCenter } from "layout.slint";
 
 // Sizes shared by the column headers and the rows (mockup `.cols, .row`: padding 0 12px, gap 8px).
+// The Status, Size and Modified columns are as wide as the window says (`Pane.col-*-width`, the
+// user drags them, from `narrowest` to `widest`); these are their defaults, which a double click on a
+// column's handle restores.
 global Cols {
     out property <length> pad: 12px;
     out property <length> gap: 8px;
@@ -42,6 +45,14 @@ global Cols {
     out property <length> status: 96px;
     out property <length> size: 76px;
     out property <length> modified: 128px;
+    out property <length> narrowest: 60px;
+    out property <length> widest: 400px;
+    // The drag handle on a column's left edge.
+    out property <length> handle: 6px;
+
+    pure public function clamp(width: length) -> length {
+        return Math.max(narrowest, Math.min(widest, width));
+    }
 }
 
 // The thumbnail grid (I4: the inspector view's Thumbnails layout): 120 px tiles, as many to a line
@@ -55,8 +66,32 @@ global Grid {
     out property <length> thumb: 88px;
 }
 
+// The whole name of a breadcrumb cut short, shown when the pointer rests on it (ledger 202).
+component CrumbTip inherits Rectangle {
+    in property <string> text;
+
+    background: Theme.sheet;
+    border-radius: 6px;
+    border-width: 0.5px;
+    border-color: Theme.sep-strong;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+
+        Text {
+            text: root.text;
+            color: Theme.label;
+            font-size: Theme.font-caption;
+        }
+    }
+}
+
 // One breadcrumb that goes to its folder when pressed (mockup `.crumbs`), in the secondary text
-// colour. Reachable with Tab, activated with Space or Return.
+// colour. Reachable with Tab, activated with Space or Return. A name cut short shows whole in a
+// tooltip.
 component Crumb inherits Rectangle {
     in property <string> text;
     out property <bool> has-focus: key-focus.has-focus;
@@ -73,10 +108,10 @@ component Crumb inherits Rectangle {
         padding-left: 3px;
         padding-right: 3px;
 
-        Text {
+        label := Text {
             text: root.text;
             color: Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
@@ -87,7 +122,7 @@ component Crumb inherits Rectangle {
     Rectangle {
         border-radius: parent.border-radius;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -107,6 +142,75 @@ component Crumb inherits Rectangle {
     area := TouchArea {
         clicked => { root.clicked(); }
     }
+
+    if label.width < label.preferred-width: Tooltip {
+        CrumbTip { text: root.text; }
+    }
+}
+
+// The last breadcrumb: the folder shown, in plain text, keeping its name (up to 160 px) while
+// the crumbs before it shrink. A name cut short shows whole in a tooltip.
+component CurrentCrumb inherits Rectangle {
+    in property <string> text;
+
+    min-width: Math.min(label.preferred-width, 160px) + 6px;
+    preferred-width: label.preferred-width + 6px;
+
+    label := Text {
+        x: 3px;
+        width: parent.width - 6px;
+        height: parent.height;
+        text: root.text;
+        color: Theme.label;
+        font-size: Theme.font-caption;
+        font-weight: Theme.weight-medium;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    if label.width < label.preferred-width: Tooltip {
+        CrumbTip { text: root.text; }
+    }
+}
+
+// The drag handle on a column's left edge (§8.7.6): dragging it left widens the column, right
+// narrows it; a double click puts the default width back. The pointer only: the columns are not
+// keyboard controls.
+component ColumnHandle inherits Rectangle {
+    // The column's width as the drag began.
+    in property <length> start-width;
+    callback resized(length);
+    callback reset();
+
+    width: Cols.handle;
+
+    area := TouchArea {
+        property <length> press-x;
+        property <length> from;
+
+        mouse-cursor: col-resize;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                self.press-x = self.absolute-position.x + self.mouse-x;
+                self.from = root.start-width;
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.resized(Cols.clamp(self.from - (self.absolute-position.x + self.mouse-x - self.press-x)));
+            }
+        }
+        double-clicked => { root.reset(); }
+    }
+
+    // A hairline while the pointer is on it, so that the handle can be found.
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        width: 1px;
+        height: parent.height - 8px;
+        background: Theme.sep-strong;
+        visible: area.has-hover || area.pressed;
+    }
 }
 
 // One column title that sorts the list when pressed (mockup `.cols`). The sorted column is shown
@@ -118,8 +222,12 @@ component ColumnHeader inherits Rectangle {
     in property <bool> sorted;
     in property <bool> ascending: true;
     in property <bool> right-aligned: false;
+    // The column can be made wider or narrower from a handle on its left edge.
+    in property <bool> resizable: false;
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
+    callback resized(length);
+    callback reset();
 
     forward-focus: key-focus;
     accessible-role: button;
@@ -155,7 +263,7 @@ component ColumnHeader inherits Rectangle {
         width: parent.width + 8px;
         border-radius: 4px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -175,13 +283,22 @@ component ColumnHeader inherits Rectangle {
     TouchArea {
         clicked => { root.clicked(); }
     }
+
+    // In the gap before the column, over the sort area's edge.
+    if root.resizable: ColumnHandle {
+        x: -(Cols.gap + Cols.handle) / 2;
+        height: parent.height;
+        start-width: root.width;
+        resized(width) => { root.resized(width); }
+        reset => { root.reset(); }
+    }
 }
 
 // Shown in the pane's header while a listing for it is on its way (mockup `.chip`, neutral). The
 // rows below are still those of the folder shown until the answer arrives. A polite live region,
 // so assistive technology announces it.
 component LoadingMark inherits Rectangle {
-    height: 20px;
+    height: Theme.chip-height;
     background: Theme.chip;
     border-radius: self.height / 2;
     accessible-role: AccessibleRole.text;
@@ -219,7 +336,7 @@ component DropChip inherits Rectangle {
     in property <string> text;
     in property <image> icon;
 
-    height: 24px;
+    height: Theme.chip-height + 4px;
     background: Theme.accent;
     border-radius: self.height / 2;
 
@@ -264,6 +381,10 @@ component PaneRow inherits Rectangle {
     // Bunny" / "Only on {site}".
     in property <bool> comparing: false;
     in property <string> remote-label;
+    // The Status, Size and Modified columns' widths (the pane's `col-*-width`).
+    in property <length> status-width: Cols.status;
+    in property <length> size-width: Cols.size;
+    in property <length> modified-width: Cols.modified;
     // The left button went down on the row, with the Ctrl and Shift keys as they were.
     callback pressed(bool /* ctrl */, bool /* shift */);
     // The left button went down on a selected row, with neither Ctrl nor Shift: `pressed` waits
@@ -342,7 +463,7 @@ component PaneRow inherits Rectangle {
         }
         // Status (mockup: a chip at the start of the column).
         if root.comparing: Rectangle {
-            width: Cols.status;
+            width: root.status-width;
 
             StatusChip {
                 x: 0px;
@@ -355,9 +476,9 @@ component PaneRow inherits Rectangle {
         }
         Text {
             text: root.item.size;
-            width: Cols.size;
+            width: root.size-width;
             color: root.detail-color;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             horizontal-alignment: right;
             vertical-alignment: center;
             overflow: elide;
@@ -365,9 +486,9 @@ component PaneRow inherits Rectangle {
         }
         Text {
             text: root.item.modified;
-            width: Cols.modified;
+            width: root.modified-width;
             color: root.detail-color;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
@@ -527,7 +648,7 @@ component PaneTile inherits Rectangle {
             height: parent.height - 2px;
             text: root.item.name;
             color: root.lit ? Theme.sel-text : Theme.label;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             horizontal-alignment: center;
             vertical-alignment: top;
             wrap: char-wrap;
@@ -650,6 +771,13 @@ export component Pane inherits Rectangle {
     in property <bool> can-purge: false;
     // The rows as a grid of thumbnails (T5) rather than a list.
     in property <bool> grid: false;
+    // The Status, Size and Modified columns' widths (§8.7.6: both panes share them, and the app
+    // keeps them between runs). Dragging a column's handle changes them here and then calls
+    // `columns-resized`.
+    in-out property <length> col-status-width: Cols.status;
+    in-out property <length> col-size-width: Cols.size;
+    in-out property <length> col-modified-width: Cols.modified;
+    callback columns-resized();
     callback quick-look();
     callback rename-start();
     callback move-start();
@@ -1143,7 +1271,7 @@ export component Pane inherits Rectangle {
             VerticalLayout {
                 // Header (mockup `.pane-head`).
                 Rectangle {
-                    height: 37px;
+                    height: 37px + Theme.grow;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -1200,21 +1328,8 @@ export component Pane inherits Rectangle {
                                         // A crumb holds the focus only when the keyboard put it there.
                                         clicked => { root.go-to-crumb(i, self.has-focus); }
                                     }
-                                    if i == root.crumbs.length - 1: HorizontalLayout {
-                                        padding-left: 3px;
-                                        padding-right: 3px;
-
-                                        Text {
-                                            text: crumb;
-                                            // The current folder keeps its name (up to 160 px) while the
-                                            // crumbs before it shrink.
-                                            min-width: Math.min(self.preferred-width, 160px);
-                                            color: Theme.label;
-                                            font-size: 12px;
-                                            font-weight: Theme.weight-medium;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
+                                    if i == root.crumbs.length - 1: CurrentCrumb {
+                                        text: crumb;
                                     }
                                 }
                             }
@@ -1233,7 +1348,7 @@ export component Pane inherits Rectangle {
                         }
                         if root.header-chip != "": VCenter {
                             Rectangle {
-                                height: 20px;
+                                height: Theme.chip-height;
                                 background: Theme.chip;
                                 border-radius: self.height / 2;
 
@@ -1273,7 +1388,7 @@ export component Pane inherits Rectangle {
 
                 // Column headers (mockup `.cols`); the grid has none (it keeps the list's order).
                 if !root.grid: Rectangle {
-                    height: 26px;
+                    height: 26px + Theme.grow-small;
 
                     HorizontalLayout {
                         padding-left: Cols.pad;
@@ -1288,28 +1403,66 @@ export component Pane inherits Rectangle {
                             clicked => { root.sort-by(0); }
                         }
                         // Not a sort key: the rows keep the order of the column sorted.
-                        if root.comparing: Text {
-                            width: Cols.status;
-                            text: @tr("Status");
-                            color: Theme.label2;
-                            font-size: Theme.font-small;
-                            font-weight: Theme.weight-semibold;
-                            vertical-alignment: center;
+                        if root.comparing: Rectangle {
+                            width: root.col-status-width;
+
+                            Text {
+                                x: 0px;
+                                width: parent.width;
+                                height: parent.height;
+                                text: @tr("Status");
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            ColumnHandle {
+                                x: -(Cols.gap + Cols.handle) / 2;
+                                height: parent.height;
+                                start-width: parent.width;
+                                resized(width) => {
+                                    root.col-status-width = width;
+                                    root.columns-resized();
+                                }
+                                reset => {
+                                    root.col-status-width = Cols.status;
+                                    root.columns-resized();
+                                }
+                            }
                         }
                         ColumnHeader {
-                            width: Cols.size;
+                            width: root.col-size-width;
                             text: @tr("Size");
                             right-aligned: true;
+                            resizable: true;
                             sorted: root.sort-column == 1;
                             ascending: root.sort-ascending;
                             clicked => { root.sort-by(1); }
+                            resized(width) => {
+                                root.col-size-width = width;
+                                root.columns-resized();
+                            }
+                            reset => {
+                                root.col-size-width = Cols.size;
+                                root.columns-resized();
+                            }
                         }
                         ColumnHeader {
-                            width: Cols.modified;
+                            width: root.col-modified-width;
                             text: @tr("Modified");
+                            resizable: true;
                             sorted: root.sort-column == 2;
                             ascending: root.sort-ascending;
                             clicked => { root.sort-by(2); }
+                            resized(width) => {
+                                root.col-modified-width = width;
+                                root.columns-resized();
+                            }
+                            reset => {
+                                root.col-modified-width = Cols.modified;
+                                root.columns-resized();
+                            }
                         }
                     }
 
@@ -1344,6 +1497,9 @@ export component Pane inherits Rectangle {
                             drag-ok: root.can-drag;
                             comparing: root.comparing;
                             remote-label: root.compare.remote-label;
+                            status-width: root.col-status-width;
+                            size-width: root.col-size-width;
+                            modified-width: root.col-modified-width;
                             pressed(ctrl, shift) => { root.pick(i, ctrl, shift); }
                             held => {
                                 // The selection stays until the button comes up (it may be a drag),
@@ -1509,7 +1665,7 @@ export component Pane inherits Rectangle {
         Rectangle {
             border-radius: card.border-radius;
             border-width: 2px;
-            border-color: Theme.accent;
+            border-color: Theme.focus-ring;
             visible: root.focus-visible;
         }
     }

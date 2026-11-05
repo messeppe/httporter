@@ -1,4 +1,5 @@
-//! Turns directory listings (local and cloud) into the rows and breadcrumbs the file panes show.
+//! Turns directory listings (local and cloud) into the rows and breadcrumbs the file panes show,
+//! and keeps the list columns' widths between runs ([`install_columns`]).
 
 use crate::format::{format_date, format_size};
 use crate::local_fs::LocalEntry;
@@ -9,6 +10,15 @@ use httporter_core::{Entry, RemotePath};
 use slint::{ModelRc, VecModel};
 use std::ffi::OsStr;
 use std::path::{Component, Path};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
+
+use httporter_core::ColumnWidths;
+use slint::{ComponentHandle, Timer, TimerMode};
+
+use crate::AppWindow;
+use crate::session::Session;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileKindData {
@@ -66,8 +76,8 @@ impl<T: Sortable + ?Sized> Sortable for &T {
     }
 }
 
-/// Shown in place of a folder's size and of a time that is not known (an em dash).
-const NONE: &str = "\u{2014}";
+/// Shown in place of a folder's size and of a time that is not known (`copy.rs`'s em dash).
+const NONE: &str = crate::copy::NO_VALUE;
 
 const CODE: [&str; 8] = ["html", "htm", "css", "js", "mjs", "json", "xml", "xsl"];
 const IMAGE: [&str; 8] = ["png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "ico"];
@@ -269,10 +279,79 @@ pub fn to_slint_rows(rows: &[RowData]) -> ModelRc<FileRow> {
     ModelRc::new(VecModel::from(rows))
 }
 
+// ---- The list columns' widths (§8.7.6) ----
+
+/// The Size, Modified and Status columns' widths when none is saved (`Cols` in pane.slint), and
+/// how narrow and wide they may be, in logical pixels.
+const SIZE_WIDTH: f32 = 76.0;
+const MODIFIED_WIDTH: f32 = 128.0;
+const STATUS_WIDTH: f32 = 96.0;
+const MIN_WIDTH: f32 = 60.0;
+const MAX_WIDTH: f32 = 400.0;
+/// A drag of a column's handle is saved once it has rested this long.
+const SAVE_COLUMNS_AFTER: Duration = Duration::from_millis(500);
+
+/// A saved width (0 for the default) as the window takes it: within the limits.
+pub fn column_width(saved: u16, default: f32) -> f32 {
+    if saved == 0 {
+        default
+    } else {
+        f32::from(saved).clamp(MIN_WIDTH, MAX_WIDTH)
+    }
+}
+
+/// A window's width as it is saved: within the limits, whole pixels, and 0 for the default.
+pub fn saved_width(width: f32, default: f32) -> u16 {
+    if !width.is_finite() {
+        return 0;
+    }
+    let width = width.clamp(MIN_WIDTH, MAX_WIDTH).round();
+    if (width - default).abs() < 0.5 {
+        0
+    } else {
+        // Within 60..=400, so it fits.
+        width as u16
+    }
+}
+
+/// The columns' widths as the window has them now.
+fn columns_of(ui: &AppWindow) -> ColumnWidths {
+    ColumnWidths {
+        size: saved_width(ui.get_col_size_width(), SIZE_WIDTH),
+        modified: saved_width(ui.get_col_modified_width(), MODIFIED_WIDTH),
+        status: saved_width(ui.get_col_status_width(), STATUS_WIDTH),
+    }
+}
+
+/// Gives the panes the columns' widths saved last time, and saves them (in the UI state) half a
+/// second after the user last dragged a column's handle.
+pub fn install_columns(ui: &AppWindow, session: &Arc<Session>) {
+    let saved = session.ui_state().columns;
+    ui.set_col_size_width(column_width(saved.size, SIZE_WIDTH));
+    ui.set_col_modified_width(column_width(saved.modified, MODIFIED_WIDTH));
+    ui.set_col_status_width(column_width(saved.status, STATUS_WIDTH));
+    let timer = Rc::new(Timer::default());
+    let (weak, session) = (ui.as_weak(), session.clone());
+    ui.on_columns_resized(move || {
+        let (weak, session) = (weak.clone(), session.clone());
+        // Each drag step starts the wait again: only the width it ends on is saved.
+        timer.start(TimerMode::SingleShot, SAVE_COLUMNS_AFTER, move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let columns = columns_of(&ui);
+            let mut state = session.ui_state();
+            if state.columns != columns {
+                state.columns = columns;
+                session.save_ui_state(&state);
+            }
+        });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AppWindow;
     use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
     use slint::Model;
     use std::time::{Duration, Instant};

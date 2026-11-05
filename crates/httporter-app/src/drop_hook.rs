@@ -389,6 +389,18 @@ pub fn install_drop_hook(
                 hook.end_hover();
             }
             WindowEvent::DroppedFile(path) => hook.drop_file(window, path),
+            // Windows' text size or "Animation effects" may have changed (I5): a change of DPI
+            // or of the light or dark theme comes with a settings change, and the window coming
+            // back to the front is when the user returns from Windows Settings. Read once the
+            // event has been handled.
+            WindowEvent::ScaleFactorChanged { .. }
+            | WindowEvent::ThemeChanged(_)
+            | WindowEvent::Focused(true) => {
+                slint::Timer::single_shot(
+                    std::time::Duration::ZERO,
+                    crate::settings_view::system_settings_changed,
+                );
+            }
             _ => {}
         }
         EventResult::Propagate

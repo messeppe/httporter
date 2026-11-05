@@ -1108,6 +1108,11 @@ export component AppWindow inherits Window {
                                     width: root.view-mode == 1 ? (root.single-side == 0 ? panes.width - 308px : 0px) : (panes.side-by-side ? (panes.width - 8px) / 2 : panes.width);
                                     height: root.view-mode == 1 ? (root.single-side == 0 ? panes.height : 0px) : (panes.side-by-side ? panes.height : (panes.height - 8px) / 2);
                                     grid: root.view-mode == 1 && root.grid;
+                                    // Both panes share the columns' widths (T5).
+                                    col-status-width <=> root.col-status-width;
+                                    col-size-width <=> root.col-size-width;
+                                    col-modified-width <=> root.col-modified-width;
+                                    columns-resized => { root.columns-resized(); }
                                     can-write: root.can-write;
                                     can-purge: root.can-purge;
                                     quick-look => { root.quick-look(0); }
@@ -1163,6 +1168,11 @@ export component AppWindow inherits Window {
                                     width: root.view-mode == 1 ? (root.single-side == 1 ? panes.width - 308px : 0px) : (panes.side-by-side ? (panes.width - 8px) / 2 : panes.width);
                                     height: root.view-mode == 1 ? (root.single-side == 1 ? panes.height : 0px) : (panes.side-by-side ? panes.height : (panes.height - 8px) / 2);
                                     grid: root.view-mode == 1 && root.grid;
+                                    // Both panes share the columns' widths (T5).
+                                    col-status-width <=> root.col-status-width;
+                                    col-size-width <=> root.col-size-width;
+                                    col-modified-width <=> root.col-modified-width;
+                                    columns-resized => { root.columns-resized(); }
                                     can-write: root.can-write;
                                     presign-available: root.presign-available;
                                     can-purge: root.can-purge;

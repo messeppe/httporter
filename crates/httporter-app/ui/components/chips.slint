@@ -12,7 +12,7 @@ export component Chip inherits Rectangle {
     in property <color> fg: Theme.label2;
     in property <color> bg: Theme.chip;
 
-    height: 20px;
+    height: Theme.chip-height;
     background: root.bg;
     border-radius: self.height / 2;
 
@@ -54,7 +54,7 @@ export component StatusChip inherits Rectangle {
     property <color> tint: root.status == CompareStatus.changed ? Theme.orange : root.status == CompareStatus.new ? Theme.green : root.status == CompareStatus.remote-only ? Theme.purple : Theme.label2;
     property <color> wash: root.status == CompareStatus.changed ? Theme.orange-soft : root.status == CompareStatus.new ? Theme.green-soft : Theme.purple-soft;
 
-    height: 20px;
+    height: Theme.chip-height;
     visible: root.status != CompareStatus.none;
     background: root.plain ? transparent : (root.lit ? #ffffff38 : root.wash);
     border-radius: self.height / 2;
@@ -80,7 +80,7 @@ export component StatusChip inherits Rectangle {
 export component ConnectionPill inherits Chip {
     in property <bool> ok: true;
 
-    height: 24px;
+    height: Theme.chip-height + 4px;
     icon: root.ok ? Icons.lock : Icons.warn;
     fg: root.ok ? Theme.green : Theme.orange;
     bg: root.ok ? Theme.green-soft : Theme.orange-soft;
@@ -96,20 +96,48 @@ export component StatusDot inherits Rectangle {
     background: root.tint;
 }
 
+// A site's health in the sidebar (ledger 130): the green dot while its last request worked, and
+// an orange warning triangle once one failed, so that the shape says it as well as the colour.
+// The row's label says it in words; the mark itself is not read out.
+export component HealthMark inherits Rectangle {
+    in property <bool> ok: true;
+
+    width: 12px;
+    height: 12px;
+    accessible-role: none;
+
+    if root.ok: StatusDot {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        tint: Theme.green;
+    }
+    if !root.ok: Image {
+        width: 12px;
+        height: 12px;
+        source: Icons.warn;
+        colorize: Theme.orange;
+        accessible-role: none;
+    }
+}
+
 // 18 px provider tile with one or two letters (mockup `.monotile`), filled with the provider's colour.
+// The tile grows with Windows' text size, as its letters do. The letters are white, at least
+// 4.8:1 on every provider's colour (ledger 128). The name beside the tile says the same, so the
+// tile is not read out.
 export component MonoTile inherits Rectangle {
     in property <string> mono;
     in property <color> tint: Theme.accent;
 
-    width: 18px;
-    height: 18px;
+    width: Theme.tile-size;
+    height: Theme.tile-size;
     border-radius: 5px;
     background: root.tint;
+    accessible-role: none;
 
     Text {
         text: root.mono;
-        color: Theme.on-accent;
-        font-size: 9px;
+        color: Theme.tile-text;
+        font-size: Theme.font-tile;
         font-weight: Theme.weight-bold;
         horizontal-alignment: center;
         vertical-alignment: center;

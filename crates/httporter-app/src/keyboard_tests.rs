@@ -93,8 +93,13 @@ fn enter_on_a_site_row_selects_it() {
         move |i| picked.set(i)
     });
     // Tab order: sidebar toggle, the toolbar's Two panes, Single pane and Synchronized browsing,
-    // row 0, row 1 (Back, Forward, Compare and Publish are disabled).
-    tab(&w, 6);
+    // then the site list, one stop (ledger 155: Down moves along it). Back, Forward, Compare and
+    // Publish are disabled.
+    tab(&w, 5);
+    tap(w.window(), Key::DownArrow);
+    // The row the keyboard moves to takes the focus in a change handler, which the event loop
+    // runs between events.
+    slint::platform::update_timers_and_animations();
     tap(w.window(), Key::Return);
     assert_eq!(picked.get(), 1);
     assert_eq!(w.get_selected_site(), 1);
@@ -116,7 +121,8 @@ fn add_site_works_from_the_keyboard() {
         let added = added.clone();
         move || added.set(added.get() + 1)
     });
-    tab(&w, 7);
+    // Past the site list, one Tab stop however many sites (ledger 155).
+    tab(&w, 6);
     tap(w.window(), Key::Return);
     assert_eq!(added.get(), 1);
     // Add Site opens a modal sheet; closing it puts the focus back on the button.
@@ -149,7 +155,7 @@ fn settings_is_turned_off_until_it_exists_and_says_so() {
     );
     // Not a Tab stop: after Add Site comes the This PC list.
     assert!(!w.get_local_pane_active());
-    tab(&w, 8);
+    tab(&w, 7);
     assert!(
         w.get_local_pane_active(),
         "the focus is in the This PC list"

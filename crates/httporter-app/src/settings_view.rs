@@ -17,6 +17,9 @@
 //! The keys belong to Publish, which hands this module a [`KeyKeeper`] when the window is wired
 //! ([`set_key_keeper`]); the tab asks it for the list whenever it is opened. No key ever reaches
 //! the window: only the account's name and id.
+//!
+//! Both windows' `Theme` follow Windows' text size and "Animation effects" ([`Look`]): read at
+//! start, and again whenever Windows may have changed them ([`system_settings_changed`]).
 
 use std::cell::RefCell;
 use std::fmt;
@@ -25,7 +28,7 @@ use std::rc::Rc;
 use httporter_core::{ConflictPolicy, HttpProtocol, ProxyMode, TransferSettings};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::{ProfileItem, SettingsWindow, copy};
+use crate::{AppWindow, ProfileItem, SettingsWindow, Theme, copy};
 
 /// The name of the field a refused form is refused for ([`from_form`]'s error).
 pub const FIELD_BANDWIDTH: &str = "bandwidth";
@@ -256,6 +259,7 @@ pub fn from_form(f: &SettingsFormData) -> Result<TransferSettings, (String, Stri
 /// Puts `settings` in the window's form and clears the messages under its fields; and lists the
 /// account keys again if the Publish tab is the one shown.
 pub fn show(window: &SettingsWindow, settings: &TransferSettings) {
+    follow_look(window);
     show_form(window, &to_form(settings));
     if window.get_current_tab() == PUBLISH_TAB {
         keep_keys(window, None);
@@ -394,6 +398,96 @@ fn wire_publish(window: &SettingsWindow) {
     window.on_forget_key(move |id| {
         if let Some(window) = weak.upgrade() {
             keep_keys(&window, Some(id.to_string()));
+        }
+    });
+}
+
+// ---- Windows' text size and "Animation effects" (§9.1) ----
+
+/// What a window's `Theme` follows from Windows: the text size (Settings › Accessibility › Text
+/// size, 1.0 to 2.25) and whether to animate ("Animation effects").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    pub text_scale: f32,
+    pub motion: bool,
+}
+
+impl Look {
+    /// What `Theme` assumes when told nothing: 100 %, with animations.
+    pub const PLAIN: Look = Look {
+        text_scale: 1.0,
+        motion: true,
+    };
+
+    /// As Windows has them now. The tests' windows keep [`Look::PLAIN`], whatever the PC that
+    /// runs them is set to, so that their sizes are the same everywhere.
+    pub fn now() -> Self {
+        if cfg!(test) {
+            Self::PLAIN
+        } else {
+            Self {
+                text_scale: httporter_platform::win::text_scale(),
+                motion: httporter_platform::win::animations_enabled(),
+            }
+        }
+    }
+
+    fn put(self, theme: Theme<'_>) {
+        theme.set_text_scale(self.text_scale);
+        theme.set_motion(self.motion);
+    }
+}
+
+/// The windows that follow the [`Look`], and the one they were last given.
+#[derive(Default)]
+struct Looks {
+    shown: Option<Look>,
+    main: Option<slint::Weak<AppWindow>>,
+    settings: Option<slint::Weak<SettingsWindow>>,
+}
+
+thread_local! {
+    // The UI thread's: the windows live there.
+    static LOOKS: RefCell<Looks> = RefCell::default();
+}
+
+/// Makes the main window follow Windows' text size and "Animation effects" from now on.
+pub fn install_look(ui: &AppWindow) {
+    let look = Look::now();
+    look.put(ui.global::<Theme>());
+    LOOKS.with(|looks| {
+        let mut looks = looks.borrow_mut();
+        looks.shown = Some(look);
+        looks.main = Some(ui.as_weak());
+    });
+}
+
+/// The Settings window follows the same [`Look`] as the main window (its `Theme` is its own).
+fn follow_look(window: &SettingsWindow) {
+    let look = LOOKS.with(|looks| {
+        let mut looks = looks.borrow_mut();
+        looks.settings = Some(window.as_weak());
+        looks.shown
+    });
+    look.unwrap_or_else(Look::now).put(window.global::<Theme>());
+}
+
+/// Windows may have changed its text size or "Animation effects" (its settings changed, or the
+/// window came back to the front): both are read again, and if either changed, every window's
+/// `Theme` gets them.
+pub fn system_settings_changed() {
+    let look = Look::now();
+    LOOKS.with(|looks| {
+        let mut looks = looks.borrow_mut();
+        if looks.shown == Some(look) {
+            return;
+        }
+        looks.shown = Some(look);
+        if let Some(ui) = looks.main.as_ref().and_then(slint::Weak::upgrade) {
+            look.put(ui.global::<Theme>());
+        }
+        if let Some(window) = looks.settings.as_ref().and_then(slint::Weak::upgrade) {
+            look.put(window.global::<Theme>());
         }
     });
 }

@@ -11,13 +11,20 @@ export global Theme {
     out property <bool> dark: appearance == 2 || (appearance == 0 && Palette.color-scheme == ColorScheme.dark);
 
     // Windows' text size (Settings › Accessibility › Text size, 1.0 to 2.25) and "Animation
-    // effects": the app sets both at start from `win::text_scale()` / `win::animations_enabled()`.
+    // effects": the app sets both at start from `win::text_scale()` / `win::animations_enabled()`,
+    // and again when Windows' settings change (src/settings_view.rs). Every `animate` is
+    // `duration: Theme.motion ? Nms : 0ms`, so that turning animations off in Windows stops them.
     in property <float> text-scale: 1.0;
     in property <bool> motion: true;
 
     // Accent. `accent` is for fills behind white text; `accent-text` is the accent used as text.
     out property <color> accent: #0071e3;
     out property <color> accent-text: dark ? #5aa9ff : #0066cc;
+    // Keyboard focus rings. At least 3:1, with room to spare, against every surface a ring is
+    // drawn on (ledger 154): light 4.6:1 on the sidebar (its darkest), 5.6:1 on white; dark 5.8:1
+    // on the sidebar, 4.6:1 on a control's face. The accent itself is only 3.05:1 on the dark
+    // sidebar.
+    out property <color> focus-ring: dark ? #5aa9ff : #0066cc;
     out property <color> on-accent: #ffffff;
     out property <color> accent-soft: dark ? #0a84ff33 : #0071e31f;
 
@@ -33,15 +40,21 @@ export global Theme {
     out property <color> folder: dark ? #5aa9ff : #2f8fe8;
 
     // Provider brand colours behind the tiles (mockup `providers`): the same in light and dark.
-    out property <color> provider-bunny: #e8590c;
-    out property <color> provider-s3: #3a7bd5;
+    // The tile's letters are white on them, at least 4.8:1 each (ledger 128: Bunny's #e8590c and
+    // S3's #3a7bd5 were darkened a little for that).
+    out property <color> provider-bunny: #c04f0a;
+    out property <color> provider-s3: #3070c8;
     out property <color> provider-r2: #c2410c;
     out property <color> provider-b2: #b42318;
     out property <color> provider-wasabi: #1f7a3a;
     out property <color> provider-do: #1d4ed8;
     out property <color> provider-minio: #b91c1c;
     out property <color> provider-other: #5c5c62;
-    // The tile colour for a site's provider (`SiteItem.provider`).
+    // The tile's letters.
+    out property <color> tile-text: #ffffff;
+    // The tile colour for a site's provider (`SiteItem.provider`). Every tile is named, `other`
+    // too, so that a tile added to `ProviderTile` and not mapped here shows in the accent rather
+    // than passing for "Other" unnoticed (ledger 123).
     pure public function provider-tint(provider: ProviderTile) -> color {
         return provider == ProviderTile.bunny ? provider-bunny
             : provider == ProviderTile.s3 ? provider-s3
@@ -50,13 +63,17 @@ export global Theme {
             : provider == ProviderTile.wasabi ? provider-wasabi
             : provider == ProviderTile.digital-ocean ? provider-do
             : provider == ProviderTile.minio ? provider-minio
-            : provider-other;
+            : provider == ProviderTile.other ? provider-other
+            : accent;
     }
 
     // Text.
     out property <color> label: dark ? #f5f5f7 : #1d1d1f;
     out property <color> label2: dark ? #a8a8ad : #5c5c62;
-    out property <color> label3: dark ? #6e6e73 : #8e8e93;
+    // Tertiary: chevrons, marks and turned-off text. At least 3.5:1 on every surface (the
+    // sidebar is the darkest light one and the lightest dark one), as marks that say something
+    // need 3:1 (WCAG 1.4.11).
+    out property <color> label3: dark ? #808086 : #7a7a80;
 
     // Surfaces.
     out property <color> win: dark ? #1b1b1d : #f2f2f5;
@@ -83,27 +100,45 @@ export global Theme {
     out property <color> control: dark ? #3a3a3d : #ffffff;
     out property <color> control-border: dark ? #ffffff1a : #00000021;
     out property <color> field: dark ? #2c2c2f : #ffffff;
-    // Outline of text fields and pickers: at least 3:1 against the surface behind (WCAG 1.4.11),
-    // which the hairline `control-border` is not.
-    out property <color> field-border: dark ? #ffffff5c : #0000006b;
+    // Outline of text fields, pickers and plain buttons: at least 3:1 against the surface behind
+    // (WCAG 1.4.11), which the hairline `control-border` is not. With margin (ledger 219): light
+    // 3.6:1 on the sidebar, 3.7:1 on white; dark 3.6:1 on the sidebar, 3.8:1 on the content.
+    out property <color> field-border: dark ? #ffffff66 : #0000007a;
     out property <color> chip: dark ? #ffffff14 : #0000000d;
 
-    // Type.
+    // Type. Every size follows Windows' text size (`text-scale`); so do the heights that hold a
+    // line of text (`grow` is how much taller a line of body text is than at 100 %).
     out property <string> font-family: "Inter";
     // The app sets it from what is installed (ledger 135).
     in-out property <string> font-mono: "Cascadia Mono";
-    out property <length> font-body: 13px;
-    out property <length> font-small: 11px;
-    out property <length> font-title: 15px;
+    out property <length> font-tile: 9px * text-scale;
+    out property <length> font-mini: 10px * text-scale;
+    out property <length> font-small: 11px * text-scale;
+    out property <length> font-caption: 12px * text-scale;
+    out property <length> font-body: 13px * text-scale;
+    out property <length> font-callout: 14px * text-scale;
+    out property <length> font-title: 15px * text-scale;
+    out property <length> font-headline: 17px * text-scale;
+    out property <length> font-large: 20px * text-scale;
+    out property <length> font-display: 34px * text-scale;
+    out property <int> weight-regular: 400;
     out property <int> weight-medium: 500;
     out property <int> weight-semibold: 600;
     out property <int> weight-bold: 700;
+    out property <length> grow: font-body - 13px;
+    out property <length> grow-small: font-small - 11px;
 
     // Metrics. Capsule controls are fully rounded: use `self.height / 2` for their radius.
-    out property <length> row-height: 28px;
-    out property <length> sidebar-item-height: 28px;
-    out property <length> toolbar-height: 52px;
-    out property <length> statusbar-height: 28px;
+    out property <length> row-height: 28px + grow;
+    out property <length> sidebar-item-height: 28px + grow;
+    out property <length> toolbar-height: 52px + grow;
+    out property <length> statusbar-height: 28px + grow-small;
+    // A capsule button, a tab of a segmented control, a chip, the provider tile.
+    out property <length> control-height: 28px + grow;
+    out property <length> control-small-height: 22px + grow-small;
+    out property <length> tab-height: 24px + grow;
+    out property <length> chip-height: 20px + grow-small;
+    out property <length> tile-size: 2 * font-tile;
     out property <length> radius-sm: 8px;
     out property <length> radius-md: 12px;
     out property <length> radius-lg: 14px;
