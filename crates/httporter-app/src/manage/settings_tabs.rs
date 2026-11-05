@@ -40,6 +40,8 @@ pub const STORED_EXTRAS_READY: bool = true;
 /// The tabs this file draws, by their place in the window's row of tabs.
 const GENERAL_TAB: i32 = 0;
 const SITES_TAB: i32 = 1;
+/// Drawn by `system/` (I5, T4).
+const SECURITY_TAB: i32 = 3;
 const ADVANCED_TAB: i32 = 5;
 
 /// How long a pre-signed link lasts, by the place of the choice in Settings › Sites' drop-down:
@@ -204,6 +206,7 @@ fn show_tab(window: &SettingsWindow, m: &Arc<Manager>, tab: i32) {
     match tab {
         GENERAL_TAB => show_general(window, m),
         SITES_TAB => show_sites(window, m),
+        SECURITY_TAB => crate::system::show_security(window, m),
         ADVANCED_TAB => show_advanced(window, m),
         _ => {}
     }
@@ -220,11 +223,15 @@ fn show_general(window: &SettingsWindow, m: &Arc<Manager>) {
     });
     window.set_restore_tabs(state.restore_tabs);
     window.set_ask_big_preview(state.ask_big_preview);
+    // I5 (T4): the tray, the update check and About.
+    window.set_tray(state.tray);
+    window.set_check_updates(state.check_updates);
+    crate::system::show_general(window);
     show_preview_cache(window, m, None);
 }
 
 /// An edit on General: kept in the saved [`UiState`] at once; the appearance applies to both
-/// windows at once, the rest at the next start or preview.
+/// windows at once, the rest at the next start, preview or close (the tray).
 fn general_edited(window: &SettingsWindow, m: &Arc<Manager>) {
     let appearance = u8::try_from(window.get_appearance().clamp(0, 2)).unwrap_or(0);
     let state = UiState {
@@ -236,6 +243,8 @@ fn general_edited(window: &SettingsWindow, m: &Arc<Manager>) {
         },
         restore_tabs: window.get_restore_tabs(),
         ask_big_preview: window.get_ask_big_preview(),
+        tray: window.get_tray(),
+        check_updates: window.get_check_updates(),
         ..m.session.ui_state()
     };
     m.session.save_ui_state(&state);

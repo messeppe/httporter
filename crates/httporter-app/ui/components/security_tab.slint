@@ -1,27 +1,85 @@
-// Settings › Security (I5; T4 finishes it): the passwords and keys HTTPorter saved in Windows
-// Credential Manager, and Reset HTTPorter (§11). Like the other tabs it only draws its properties
-// and reports each press; the app (`src/system/`) counts, removes and resets.
+// Settings › Security (I5): the passwords and keys HTTPorter saved in Windows Credential Manager,
+// and Reset HTTPorter (§11). Like the other tabs it only draws its properties and reports each
+// press; the app (`src/system/`) counts, removes and resets.
 
 import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
 import { CapsuleButton } from "buttons.slint";
+import { AlertCard, Modal } from "sheets.slint";
 import { Group, GroupRow, Note, Section, TabColumn } from "settings_tabs.slint";
 
+// The alert before a reset (mockup `.alert`, like the delete alert): nothing of it can be undone,
+// so Cancel is the default (Return and Escape press it) and Reset HTTPorter, in the destructive
+// style, never is.
+component ResetAlert inherits Rectangle {
+    callback confirmed();
+    callback cancelled();
+
+    init => { cancel-button.focus(); }
+
+    Modal {
+        at-first-stop: reset-button.has-focus;
+        at-last-stop: cancel-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.cancelled(); }
+        focus-first => { reset-button.focus(); }
+        focus-last => { cancel-button.focus(); }
+
+        AlertCard {
+            icon: Icons.warn;
+            tint: Theme.red;
+            tint-soft: Theme.red-soft;
+            title: @tr("Reset HTTPorter?");
+            body: @tr("This removes all sites, publish profiles, history, settings, logs and cached previews, and the passwords and keys HTTPorter saved on this PC. Files on your sites are not touched.");
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                reset-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: @tr("Reset HTTPorter");
+                    destructive: true;
+                    clicked => { root.confirmed(); }
+                }
+                cancel-button := CapsuleButton {
+                    horizontal-stretch: 1;
+                    text: @tr("Cancel");
+                    primary: true;
+                    clicked => { root.cancelled(); }
+                }
+            }
+        }
+    }
+}
+
 export component SecurityTab inherits Rectangle {
-    // What Credential Manager holds for HTTPorter: site secrets, account keys, and keys whose site
-    // or account no longer exists.
+    // What Credential Manager holds for HTTPorter: site secrets and account keys still in use,
+    // and keys whose site or account no longer exists.
     in property <int> site-keys;
     in property <int> account-keys;
     in property <int> unused-keys;
-    // The result of Remove Unused Keys, empty for none.
+    // The result of Remove Unused Keys (or why no key can be called unused), empty for none.
     in property <string> security-message;
     // Reset may be pressed (no transfers or edits pending); `reset-note` says why not.
     in property <bool> reset-allowed;
     in property <string> reset-note;
     callback remove-unused-keys();
     callback open-credential-manager();
-    // Reset HTTPorter… was pressed (the app asks first), and the reset was confirmed.
+    // Reset HTTPorter… was pressed (the app checks again whether a reset may start; the alert
+    // shows while it may), and the alert's Reset HTTPorter was pressed.
     callback reset-requested();
     callback reset-confirmed();
+
+    // The alert is up.
+    property <bool> confirming: false;
+
+    // Work that starts while the alert is up takes it away for good, not until the work ends.
+    changed reset-allowed => {
+        if (!self.reset-allowed) {
+            self.confirming = false;
+        }
+    }
 
     ScrollView {
         TabColumn {
@@ -30,23 +88,23 @@ export component SecurityTab inherits Rectangle {
 
                 Group {
                     GroupRow {
-                        title: @tr("{n} site" | "{n} sites" % root.site-keys);
+                        title: @tr("{} · {}", @tr("{n} site" | "{n} sites" % root.site-keys), @tr("{n} account key" | "{n} account keys" % root.account-keys));
                         help: @tr("Stored in Windows Credential Manager, never in HTTPorter's files.");
-                        error: root.security-message;
+
+                        CapsuleButton {
+                            text: @tr("Open Credential Manager");
+                            clicked => { root.open-credential-manager(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Unused keys");
+                        help: root.security-message != "" ? root.security-message : (root.unused-keys == 0 ? @tr("None: every key belongs to a saved site or account.") : @tr("{n} key whose site or account was removed" | "{n} keys whose site or account was removed" % root.unused-keys));
+                        last: true;
 
                         CapsuleButton {
                             text: @tr("Remove Unused Keys");
                             enabled: root.unused-keys > 0;
                             clicked => { root.remove-unused-keys(); }
-                        }
-                    }
-                    GroupRow {
-                        title: @tr("{n} account key" | "{n} account keys" % root.account-keys);
-                        last: true;
-
-                        CapsuleButton {
-                            text: @tr("Open Credential Manager");
-                            clicked => { root.open-credential-manager(); }
                         }
                     }
                 }
@@ -58,14 +116,17 @@ export component SecurityTab inherits Rectangle {
                 Group {
                     GroupRow {
                         title: @tr("Reset HTTPorter");
-                        help: root.reset-allowed ? @tr("Removes all sites, settings and history from this PC.") : root.reset-note;
+                        help: root.reset-allowed ? @tr("Removes everything HTTPorter keeps on this PC, then starts it again as new.") : root.reset-note;
                         last: true;
 
-                        CapsuleButton {
+                        reset-button := CapsuleButton {
                             text: @tr("Reset HTTPorter…");
                             destructive: true;
                             enabled: root.reset-allowed;
-                            clicked => { root.reset-requested(); }
+                            clicked => {
+                                root.confirming = true;
+                                root.reset-requested();
+                            }
                         }
                     }
                 }
@@ -74,6 +135,19 @@ export component SecurityTab inherits Rectangle {
             Note {
                 text: @tr("Files on your sites are not touched.");
             }
+        }
+    }
+
+    // Over the tab while it is up, and only while a reset may start: work that starts meanwhile
+    // takes it away.
+    if root.confirming && root.reset-allowed: ResetAlert {
+        confirmed => {
+            root.confirming = false;
+            root.reset-confirmed();
+        }
+        cancelled => {
+            root.confirming = false;
+            reset-button.focus();
         }
     }
 }

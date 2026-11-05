@@ -1899,6 +1899,8 @@ dependencies = [
  "i-slint-backend-testing",
  "image",
  "reqwest",
+ "rustls",
+ "serde_json",
  "slint",
  "slint-build",
  "tempfile",

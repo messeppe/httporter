@@ -23,6 +23,10 @@ httporter-transfer = { path = "../httporter-transfer" }
 image = { version = "0.25.10", default-features = false, features = ["webp", "gif"] }
 # The update check (system/update.rs): the same features as httporter-bunny, so nothing new links.
 reqwest = { workspace = true, features = ["rustls-no-provider", "http2", "stream", "system-proxy"] }
+# The update check: ring's TLS crypto for reqwest, and the release feed's JSON. Both are linked
+# already (the providers, the store), so nothing new links.
+rustls.workspace = true
+serde_json.workspace = true
 # raw-window-handle-06: the owner window of the file pickers.
 slint = { workspace = true, features = ["unstable-winit-030", "raw-window-handle-06"] }
 tokio = { workspace = true, features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
