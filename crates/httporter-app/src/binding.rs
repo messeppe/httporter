@@ -52,7 +52,7 @@ use crate::{AppWindow, FileRow, ProviderTile, SiteDraft, SiteItem};
 /// folder's (so the selected row stays, found by name); a new sort only reorders them; a loading
 /// view only says that a listing is on its way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Change {
+pub(crate) enum Change {
     Listed,
     Refreshed,
     Sorted,
@@ -367,6 +367,18 @@ impl Link {
             view,
             Change::Refreshed,
         );
+    }
+
+    /// Puts a cloud view a Manage+ request made (a tab, synchronized browsing, a search: I4 T7)
+    /// on screen, as `change` says. Unlike the panes' own requests, it leaves the pane in use as
+    /// it is.
+    pub(crate) fn show_remote_as(&self, view: RemoteView, change: Change) {
+        post_remote(&self.ui, &self.shown, &self.session, view, change);
+    }
+
+    /// As [`Link::show_remote_as`], for the This PC pane.
+    pub(crate) fn show_local_as(&self, view: LocalView, change: Change) {
+        post_local(&self.ui, &self.shown, &self.session, view, change);
     }
 
     /// Sets what the transfer engine has to say in the banner (on the UI thread).

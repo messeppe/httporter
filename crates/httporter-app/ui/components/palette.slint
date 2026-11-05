@@ -1,38 +1,127 @@
 // The command palette (T7; mockup `Main.dc.html` overlay `palette`, l.377–400, data l.550–557):
-// 600 px wide, 90 px from the top, over a scrim.
+// 600 px wide, 90 px from the top, over a light scrim. A borderless field with the search mark
+// and an Esc key cap; the rows in sections (an icon, the title over its subtitle, the keys at the
+// right); a footer with the keys that move and run.
 //
-// T1 shell: the properties and an empty panel; Escape closes.
+// The app fills `items` for the query (`query-changed`). Up and Down move the chosen row (past
+// the section headers), Return or a click runs it (`run`, unless it is off), Escape or a click
+// outside closes the palette. The field keeps the focus throughout.
 
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
-import { PaletteItem } from "../types.slint";
+import { Icons } from "../icons.slint";
+import { PaletteIcon, PaletteItem } from "../types.slint";
 import { Modal } from "sheets.slint";
+import { VCenter } from "layout.slint";
 
-// T1 shell: a scrim with an empty panel; Escape calls `cancel`. The task that builds this file
-// replaces it.
-component Shell inherits Rectangle {
-    in property <length> panel-width: 440px;
-    in property <length> panel-height: 200px;
-    // The panel's top edge; below 0 centres it.
-    in property <length> panel-y: -1px;
-    callback cancel();
+// A key cap (mockup `.kbd`).
+component Kbd inherits Rectangle {
+    in property <string> text;
 
-    init => { keys.focus(); }
+    height: 20px;
+    min-width: 20px;
+    border-radius: 5px;
+    background: Theme.chip;
+    border-width: 0.5px;
+    border-color: Theme.control-border;
+    accessible-role: none;
 
-    Modal {
-        cancel => { root.cancel(); }
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
 
-        keys := FocusScope {
-            width: 0px;
-            height: 0px;
+        Text {
+            text: root.text;
+            color: Theme.label2;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// One row: a section header, or an entry.
+component PaletteRow inherits Rectangle {
+    in property <PaletteItem> item;
+    in property <bool> current;
+    callback pressed();
+
+    property <image> icon: root.item.icon == PaletteIcon.publish ? Icons.send
+        : root.item.icon == PaletteIcon.purge ? Icons.refresh
+        : root.item.icon == PaletteIcon.upload ? Icons.up
+        : root.item.icon == PaletteIcon.download ? Icons.down
+        : root.item.icon == PaletteIcon.folder ? Icons.folder
+        : root.item.icon == PaletteIcon.site ? Icons.cloud
+        : root.item.icon == PaletteIcon.profile ? Icons.send
+        : root.item.icon == PaletteIcon.favorite ? Icons.star
+        : root.item.icon == PaletteIcon.shortcut ? Icons.key
+        : root.item.icon == PaletteIcon.settings ? Icons.gear
+        : Icons.chev-r;
+
+    height: root.item.header ? 28px : 40px;
+
+    if root.item.header: Text {
+        x: 10px;
+        y: parent.height - self.height - 4px;
+        text: root.item.title;
+        color: Theme.label2;
+        font-size: Theme.font-small;
+        font-weight: Theme.weight-semibold;
+        accessible-role: none;
+    }
+
+    if !root.item.header: Rectangle {
+        border-radius: 8px;
+        background: root.current ? Theme.sel-quiet : (area.has-hover && root.item.enabled ? Theme.hover : transparent);
+        accessible-role: list-item;
+        accessible-label: root.item.title;
+        accessible-description: root.item.subtitle;
+        accessible-item-selected: root.current;
+        accessible-enabled: root.item.enabled;
+        accessible-action-default => { root.pressed(); }
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 10px;
+            opacity: root.item.enabled ? 1 : 0.5;
+
+            VCenter {
+                Image {
+                    source: root.icon;
+                    colorize: Theme.accent-text;
+                    width: 16px;
+                    height: 16px;
+                    accessible-role: none;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+
+                Text {
+                    text: root.item.title;
+                    color: Theme.label;
+                    font-size: Theme.font-body;
+                    font-weight: root.current ? Theme.weight-medium : 400;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+                if root.item.subtitle != "": Text {
+                    text: root.item.subtitle;
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+            if root.item.keys != "": VCenter {
+                Kbd { text: root.item.keys; }
+            }
         }
 
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: root.panel-y < 0px ? (parent.height - self.height) / 2 : root.panel-y;
-            width: min(root.panel-width, parent.width - 32px);
-            height: min(root.panel-height, parent.height - 32px);
-            background: Theme.sheet;
-            border-radius: Theme.radius-lg;
+        area := TouchArea {
+            clicked => { root.pressed(); }
         }
     }
 }
@@ -45,10 +134,253 @@ export component CommandPalette inherits Rectangle {
     callback run(int);
     callback close();
 
-    Shell {
-        panel-width: 600px;
-        panel-height: 360px;
-        panel-y: 90px;
+    // The row Return runs: the first entry when the rows change.
+    property <int> current: 1;
+    property <length> list-max: 380px;
+
+    function first-entry() -> int {
+        return root.items.length > 1 && root.items[0].header ? 1 : 0;
+    }
+
+    // Up (-1) or Down (1), past a section header; stops at the ends.
+    function move(step: int) {
+        let next = root.current + step;
+        let past-header = next >= 0 && next < root.items.length && root.items[next].header ? next + step : next;
+        if (past-header >= 0 && past-header < root.items.length) {
+            root.current = past-header;
+        }
+    }
+
+    function run-current() {
+        if (root.current >= 0 && root.current < root.items.length && !root.items[root.current].header && root.items[root.current].enabled) {
+            root.run(root.current);
+        }
+    }
+
+    // Scrolls just far enough to show the row at `y`, `h` high.
+    function reveal(y: length, h: length) {
+        if (scroller.visible-height <= 0px) {
+            return;
+        }
+        if (y < -scroller.content-y) {
+            scroller.content-y = -y;
+        } else if (y + h > -scroller.content-y + scroller.visible-height) {
+            scroller.content-y = scroller.visible-height - (y + h);
+        }
+    }
+
+    init => {
+        root.current = root.first-entry();
+        input.focus();
+        input.set-selection-offsets(root.query == "?" ? 1 : 0, root.query == "?" ? 1 : 0);
+    }
+    changed items => {
+        root.current = root.first-entry();
+        scroller.content-y = 0px;
+    }
+
+    Modal {
+        background: Theme.dark ? #00000059 : #0000001a;
         cancel => { root.close(); }
+        confirm => { root.run-current(); }
+
+        // A click beside the panel closes it.
+        TouchArea {
+            clicked => { root.close(); }
+        }
+
+        panel := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 90px;
+            width: min(600px, parent.width - 32px);
+            height: body.preferred-height;
+            background: Theme.sheet;
+            border-radius: 16px;
+            border-width: 0.5px;
+            border-color: Theme.sep-strong;
+            drop-shadow-blur: 30px;
+            drop-shadow-offset-y: 10px;
+            drop-shadow-color: Theme.shadow-sheet;
+            clip: true;
+            accessible-role: groupbox;
+            accessible-label: @tr("Command palette");
+
+            // The panel itself takes clicks (they don't close it).
+            TouchArea { }
+
+            body := VerticalLayout {
+                // The field.
+                Rectangle {
+                    height: 52px;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 10px;
+
+                        VCenter {
+                            Image {
+                                source: Icons.search;
+                                colorize: Theme.label2;
+                                width: 20px;
+                                height: 20px;
+                                accessible-role: none;
+                            }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+
+                            // The placeholder, while nothing is typed.
+                            if root.query == "": Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: @tr("Type a command, a site or a folder");
+                                color: Theme.label3;
+                                font-size: 17px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                            input := TextInput {
+                                width: parent.width;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                text <=> root.query;
+                                font-size: 17px;
+                                color: Theme.label;
+                                single-line: true;
+                                accessible-role: text-input;
+                                accessible-label: @tr("Command");
+                                accessible-placeholder-text: @tr("Type a command, a site or a folder");
+                                edited => { root.query-changed(self.text); }
+                                key-pressed(event) => {
+                                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                                        return reject;
+                                    }
+                                    if (event.text == Key.DownArrow) {
+                                        root.move(1);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.UpArrow) {
+                                        root.move(-1);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.Return) {
+                                        if (!event.repeat) {
+                                            root.run-current();
+                                        }
+                                        return accept;
+                                    }
+                                    if (event.text == Key.Escape) {
+                                        root.close();
+                                        return accept;
+                                    }
+                                    // The field is the palette's only stop.
+                                    if (event.text == Key.Tab || event.text == Key.Backtab) {
+                                        return accept;
+                                    }
+                                    return reject;
+                                }
+                            }
+                        }
+                        VCenter {
+                            Kbd { text: @tr("Esc"); }
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.sep;
+                    }
+                }
+
+                // The rows.
+                scroller := ScrollView {
+                    height: min(rows.preferred-height, root.list-max);
+                    accessible-role: list;
+                    accessible-label: @tr("Commands");
+
+                    rows := VerticalLayout {
+                        padding: 6px;
+                        alignment: start;
+
+                        for item[i] in root.items: PaletteRow {
+                            item: item;
+                            current: i == root.current;
+                            pressed => {
+                                if (!item.header) {
+                                    root.current = i;
+                                    root.run-current();
+                                }
+                            }
+
+                            // Created when the row becomes the current one: brings it into view.
+                            if i == root.current: Rectangle {
+                                width: 0px;
+                                height: 0px;
+                                init => { root.reveal(parent.y, parent.height); }
+                            }
+                        }
+
+                        if root.items.length == 0: Text {
+                            height: 44px;
+                            text: @tr("No matches");
+                            color: Theme.label2;
+                            font-size: Theme.font-body;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // The footer (mockup `.statusbar`).
+                Rectangle {
+                    height: Theme.statusbar-height;
+                    background: Theme.chrome;
+
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        background: Theme.sep;
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 4px;
+
+                        VCenter {
+                            Kbd { text: @tr("↑"); }
+                        }
+                        VCenter {
+                            Kbd { text: @tr("↓"); }
+                        }
+                        Text {
+                            text: @tr("to move ·");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                        }
+                        VCenter {
+                            Kbd { text: @tr("Enter"); }
+                        }
+                        Text {
+                            text: @tr("to run");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: @tr("Ctrl K");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

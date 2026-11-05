@@ -1,9 +1,93 @@
-// The main window's tabs (T7), under the toolbar while there is more than one.
-//
-// T1 shell: the properties and an empty strip.
+// The main window's tabs (T7), under the toolbar while there is more than one (Finder-style):
+// the tabs share the width, the current one raised like a segmented control's choice; each has
+// a close button on the left (shown on the current tab and on hover), a middle click closes it
+// too, and + at the right opens a new tab. Not Tab stops: Ctrl+Tab, Ctrl+T and Ctrl+W are the
+// keys.
 
 import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
 import { TabItem } from "../types.slint";
+
+// A small round button that is not a Tab stop (close, +).
+component StripButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <length> size: 18px;
+    callback clicked();
+
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: area.pressed ? Theme.sep-strong : (area.has-hover ? Theme.hover : transparent);
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+
+    Image {
+        source: root.icon;
+        colorize: Theme.label2;
+        width: root.size * 0.6;
+        height: root.size * 0.6;
+        accessible-role: none;
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component Tab inherits Rectangle {
+    in property <TabItem> item;
+    in property <bool> current;
+    callback selected();
+    callback close();
+
+    border-radius: 6px;
+    background: root.current ? Theme.control : (area.has-hover ? Theme.hover : transparent);
+    border-width: root.current ? 0.5px : 0px;
+    border-color: Theme.control-border;
+    drop-shadow-blur: root.current ? 2px : 0px;
+    drop-shadow-offset-y: root.current ? 1px : 0px;
+    drop-shadow-color: root.current ? #0000001f : transparent;
+    accessible-role: tab;
+    accessible-label: root.item.title;
+    accessible-description: root.item.subtitle;
+    accessible-item-selected: root.current;
+    accessible-action-default => { root.selected(); }
+
+    // The text and the close button sit in the touch area, so that pointing at the button still
+    // counts as pointing at the tab.
+    area := TouchArea {
+        clicked => { root.selected(); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.up) {
+                root.close();
+            }
+        }
+
+        Text {
+            x: 28px;
+            width: parent.width - 56px;
+            height: parent.height;
+            text: root.item.title;
+            color: root.current ? Theme.label : Theme.label2;
+            font-size: 12px;
+            font-weight: root.current ? Theme.weight-semibold : 400;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+
+        if root.current || area.has-hover: StripButton {
+            x: 5px;
+            y: (parent.height - self.height) / 2;
+            icon: Icons.x;
+            label: @tr("Close tab {}", root.item.title);
+            clicked => { root.close(); }
+        }
+    }
+}
 
 export component TabStrip inherits Rectangle {
     in property <[TabItem]> tabs;
@@ -12,8 +96,55 @@ export component TabStrip inherits Rectangle {
     callback close(int);
     callback new-tab();
 
-    height: 30px;
+    height: 32px;
     background: Theme.chrome;
     accessible-role: tab-list;
     accessible-label: @tr("Tabs");
+
+    // Bottom hairline, like the toolbar's.
+    Rectangle {
+        y: parent.height - self.height;
+        height: 1px;
+        background: Theme.sep;
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 3px;
+        padding-bottom: 4px;
+        spacing: 4px;
+
+        // The well the tabs sit in (mockup `.tabs`).
+        Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 8px;
+            background: Theme.chip;
+
+            HorizontalLayout {
+                padding: 2px;
+                spacing: 2px;
+
+                for tab[i] in root.tabs: Tab {
+                    horizontal-stretch: 1;
+                    min-width: 60px;
+                    item: tab;
+                    current: i == root.current;
+                    selected => { root.selected(i); }
+                    close => { root.close(i); }
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            StripButton {
+                size: 22px;
+                icon: Icons.plus;
+                label: @tr("New tab");
+                clicked => { root.new-tab(); }
+            }
+        }
+    }
 }

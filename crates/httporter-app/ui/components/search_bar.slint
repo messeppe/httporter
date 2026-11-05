@@ -1,10 +1,45 @@
-// The search filter bar (T7), under the toolbar while searching: Whole site | This folder, Kind,
-// Size and Modified.
-//
-// T1 shell: the properties and an empty bar.
+// The search filter bar (T7), under the toolbar while searching (Finder's search bar): where to
+// search (Whole site | This folder), then Kind, Size and Modified, and a close button that ends
+// the search. Each change hands the whole set of filters to the app, which searches again.
 
 import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
 import { SearchFilters } from "../types.slint";
+import { Segmented } from "sheets.slint";
+import { RegionPicker } from "form_controls.slint";
+import { ToolButton } from "buttons.slint";
+import { VCenter } from "layout.slint";
+
+// A label and its pop-up.
+component Filter inherits HorizontalLayout {
+    in property <string> label;
+    in property <[string]> options;
+    in property <length> picker-width: 120px;
+    in property <int> current;
+    callback chosen(int);
+
+    spacing: 6px;
+
+    init => { picker.current-index = root.current; }
+    changed current => { picker.current-index = root.current; }
+
+    Text {
+        text: root.label;
+        color: Theme.label2;
+        font-size: Theme.font-small;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    VCenter {
+        picker := RegionPicker {
+            width: root.picker-width;
+            height: 24px;
+            model: root.options;
+            label: root.label;
+            selected(index) => { root.chosen(index); }
+        }
+    }
+}
 
 export component SearchFilterBar inherits Rectangle {
     in-out property <SearchFilters> filters;
@@ -12,6 +47,75 @@ export component SearchFilterBar inherits Rectangle {
     // The bar's close button: the search ends.
     callback cancelled();
 
-    height: 36px;
+    height: 38px;
     background: Theme.chrome;
+    accessible-role: groupbox;
+    accessible-label: @tr("Search filters");
+
+    // Bottom hairline, like the toolbar's.
+    Rectangle {
+        y: parent.height - self.height;
+        height: 1px;
+        background: Theme.sep;
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 16px;
+
+        VCenter {
+            Segmented {
+                height: 24px;
+                label: @tr("Search in");
+                options: [@tr("Whole site"), @tr("This folder")];
+                current: root.filters.scope;
+                selected(index) => {
+                    root.filters.scope = index;
+                    root.changed(root.filters);
+                }
+            }
+        }
+
+        Filter {
+            label: @tr("Kind");
+            options: [@tr("Any"), @tr("Images"), @tr("Code"), @tr("Documents"), @tr("Archives"), @tr("Media")];
+            current: root.filters.kind;
+            chosen(index) => {
+                root.filters.kind = index;
+                root.changed(root.filters);
+            }
+        }
+
+        Filter {
+            label: @tr("Size");
+            picker-width: 100px;
+            options: [@tr("Any"), @tr("> 100 KB"), @tr("> 1 MB"), @tr("> 10 MB")];
+            current: root.filters.size;
+            chosen(index) => {
+                root.filters.size = index;
+                root.changed(root.filters);
+            }
+        }
+
+        Filter {
+            label: @tr("Modified");
+            options: [@tr("Any time"), @tr("Today"), @tr("Last 7 days"), @tr("Last 30 days")];
+            current: root.filters.modified;
+            chosen(index) => {
+                root.filters.modified = index;
+                root.changed(root.filters);
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        VCenter {
+            ToolButton {
+                icon: Icons.x;
+                label: @tr("End search");
+                clicked => { root.cancelled(); }
+            }
+        }
+    }
 }
