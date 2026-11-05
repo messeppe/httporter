@@ -70,7 +70,7 @@ parley = { path = "vendor/parley" }
 # Built for size (S8: ≤ 25 MB), except the code that is busy while transferring
 # (checksums, TLS) or drawing (the software renderer and its rasterizers).
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
@@ -92,7 +92,3 @@ opt-level = 3
 
 [profile.release.package.zeno]
 opt-level = 3
-
-# The app crate is mostly Slint-generated UI code: smallest wins there.
-[profile.release.package.httporter-app]
-opt-level = "z"
