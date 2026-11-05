@@ -28,6 +28,7 @@ pub(super) fn job_view(id: u64, kind: JobKind, path: &str, size: u64, done_bytes
         done_bytes,
         error: None,
         paused: false,
+        folder: matches!(kind, JobKind::CreateFolder),
     }
 }
 

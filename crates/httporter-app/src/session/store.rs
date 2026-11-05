@@ -2,7 +2,9 @@
 //! conflict choice.
 //!
 //! [`Store::settings`] answers the default when a setting cannot be read, so nothing here ever
-//! writes back what it read: a setting is saved only when the user changed it.
+//! writes back what it read: a setting is saved only when the user changed it, and then only the
+//! fields that changed ([`Store::update_settings`]), so that the defaults of a read that failed
+//! never replace what is stored (ledger 138, 144).
 
 use std::sync::{Arc, Mutex};
 
@@ -20,15 +22,16 @@ impl Session {
         self.hub.settings()
     }
 
-    /// Saves the Transfers settings, on one of `rt`'s blocking threads. Saves started one after
-    /// another end up with the newest stored, whatever order their threads run in.
+    /// Saves the Transfers settings, on one of `rt`'s blocking threads: the fields that differ
+    /// from those last read or written. Saves started one after another end up with the newest
+    /// stored, whatever order their threads run in.
     pub fn save_settings(
         &self,
         rt: &Rt,
         settings: TransferSettings,
     ) -> JoinHandle<Result<(), String>> {
         let (store, pending) = (self.store.clone(), self.pending_settings.clone());
-        *lock(&pending) = Some(settings);
+        lock(&pending).newest = Some(settings);
         rt.spawn_blocking(move || write_newest(&store, &pending))
     }
 
@@ -66,17 +69,38 @@ impl Session {
     }
 }
 
-/// Writes the newest settings waiting, if any. The store is locked before they are taken, so a
-/// write that runs late finds nothing newer to take and leaves the newest in place.
-fn write_newest(
-    store: &Mutex<Store>,
-    pending: &Arc<Mutex<Option<TransferSettings>>>,
-) -> Result<(), String> {
+/// The Transfers settings waiting to be written, and those last read or written: a write stores
+/// the fields that differ between the two.
+pub(super) struct PendingSettings {
+    written: TransferSettings,
+    newest: Option<TransferSettings>,
+}
+
+impl PendingSettings {
+    /// Nothing waiting, after reading `settings` (the defaults, when the read failed).
+    pub(super) fn read_as(settings: TransferSettings) -> Self {
+        Self {
+            written: settings,
+            newest: None,
+        }
+    }
+}
+
+/// Writes the newest settings waiting, if any: the fields they changed since the last write. The
+/// store is locked before they are taken, so a write that runs late finds nothing newer to take
+/// and leaves the newest in place. A write that fails leaves its changes to the next one.
+fn write_newest(store: &Mutex<Store>, pending: &Arc<Mutex<PendingSettings>>) -> Result<(), String> {
     let store = lock(store);
-    let Some(settings) = lock(pending).take() else {
-        return Ok(());
+    let (written, settings) = {
+        let mut pending = lock(pending);
+        let Some(settings) = pending.newest.take() else {
+            return Ok(());
+        };
+        (pending.written.clone(), settings)
     };
     store
-        .put_settings(SETTINGS_TRANSFERS, &settings)
-        .map_err(|e| e.to_string())
+        .update_settings(SETTINGS_TRANSFERS, &written, &settings)
+        .map_err(|e| e.to_string())?;
+    lock(pending).written = settings;
+    Ok(())
 }

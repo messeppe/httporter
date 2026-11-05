@@ -46,6 +46,9 @@ pub(super) struct PlacesCache {
     extras: HashMap<SiteId, SiteExtras>,
     /// The UI state waiting to be written; the newest wins.
     pending_ui: Option<UiState>,
+    /// The UI state as last read from the store or written to it: a write stores only the
+    /// fields that differ from it (ledger 138, 144).
+    written_ui: Option<UiState>,
     /// M8: how many transfers the engine lets each site run now, after any slow-down.
     engine_limits: HashMap<SiteId, usize>,
 }
@@ -89,7 +92,9 @@ impl Session {
             return ui;
         }
         let read: UiState = lock(&self.store).settings(UI_STATE_KEY);
-        lock(&self.places).ui.get_or_insert(read).clone()
+        let mut places = lock(&self.places);
+        places.written_ui.get_or_insert_with(|| read.clone());
+        places.ui.get_or_insert(read).clone()
     }
 
     /// Keeps `s` as the UI state and writes it to the database on a thread of its own. Saves made
@@ -105,9 +110,19 @@ impl Session {
             .name("save-ui-state".into())
             .spawn(move || {
                 // The store first, then the newest waiting: a late thread finds nothing to write.
+                // Only the fields changed since the last read or write are written, so that the
+                // defaults of a read that failed never replace what is stored.
                 let store = lock(&store);
-                if let Some(ui) = lock(&places).pending_ui.take() {
-                    let _ = store.put_settings(UI_STATE_KEY, &ui);
+                let Some((ui, written)) = ({
+                    let mut places = lock(&places);
+                    let written = places.written_ui.clone();
+                    places.pending_ui.take().map(|ui| (ui, written))
+                }) else {
+                    return;
+                };
+                let written = written.unwrap_or_else(|| store.settings(UI_STATE_KEY));
+                if store.update_settings(UI_STATE_KEY, &written, &ui).is_ok() {
+                    lock(&places).written_ui = Some(ui);
                 }
             });
     }

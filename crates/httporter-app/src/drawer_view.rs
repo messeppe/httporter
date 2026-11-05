@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use httporter_core::{EngineSnapshot, EngineState, JobId, JobKind, JobView};
+use httporter_core::{EngineSnapshot, EngineState, JobId, JobView};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::format::{format_rate, format_size};
@@ -116,10 +116,8 @@ fn row(view: &JobView, list: List) -> TransferRowData {
         List::Queued if paused => copy::ROW_PAUSED.to_owned(),
         _ => String::new(),
     };
-    let kind = match view.kind {
-        JobKind::CreateFolder => FileKindData::Folder,
-        _ => kind_for(&view.path, false),
-    };
+    // A folder's delete shows the folder icon too, not a document's (review M15).
+    let kind = kind_for(&view.path, view.folder);
     TransferRowData {
         id: view.id.0,
         name: view.path.clone(),

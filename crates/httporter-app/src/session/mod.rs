@@ -324,8 +324,9 @@ pub struct Session {
     /// The site database. Its own lock, so that a slow disk write holds up only other writes.
     /// Shared, so that a write can run on a blocking thread.
     store: Arc<Mutex<Store>>,
-    /// Transfers settings waiting to be written (see [`Session::save_settings`]).
-    pending_settings: Arc<Mutex<Option<TransferSettings>>>,
+    /// Transfers settings waiting to be written, and those last read or written (see
+    /// [`Session::save_settings`]).
+    pending_settings: Arc<Mutex<store::PendingSettings>>,
     /// Shared, so that a save can update it from the blocking thread that writes the site.
     book: Arc<Mutex<Book>>,
     /// The UI state and the site extras as last read or saved (`places`).
@@ -349,6 +350,7 @@ impl Session {
         let sort = (SortKey::Name, true);
         // The defaults when nothing (readable) is stored; nothing is written back.
         let settings: TransferSettings = store.settings(SETTINGS_TRANSFERS);
+        let pending_settings = store::PendingSettings::read_as(settings.clone());
         let hub = Arc::new(SiteHub::new(creds.clone(), factory, settings));
         Self {
             creds,
@@ -356,7 +358,7 @@ impl Session {
             now,
             book: Arc::new(Mutex::new(Book::read(&store))),
             store: Arc::new(Mutex::new(store)),
-            pending_settings: Arc::new(Mutex::new(None)),
+            pending_settings: Arc::new(Mutex::new(pending_settings)),
             places: Arc::default(),
             remote: Mutex::new(RemotePane::new(sort)),
             local: Mutex::new(LocalPane::new(sort)),

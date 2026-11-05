@@ -25,6 +25,50 @@ use crate::drop_hook::{DropBatch, PaneSide};
 use crate::format::format_size;
 use crate::viewmodel::RowData;
 
+// ---- Sizes, dates and empty cells (format.rs, viewmodel.rs; ruling Q36) ----
+
+/// Shown in place of a folder's size and of a time that is not known (an em dash).
+pub const NO_VALUE: &str = "\u{2014}";
+
+/// The month abbreviations of the panes' dates ("12 Mar 2026").
+pub const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The size units, smallest first: bytes, then 1024-based kilo-, mega- and gigabytes.
+pub const BYTES_UNIT: &str = "B";
+pub const SIZE_UNITS: [&str; 3] = ["KB", "MB", "GB"];
+
+/// A size: the number (already written, "383.4") and its unit: "383.4 KB".
+pub fn size_in(number: &str, unit: &str) -> String {
+    format!("{number} {unit}")
+}
+
+/// How far a transfer has got, both numbers in one unit: "527 of 865 MB".
+pub fn progress_in(done: &str, total: &str, unit: &str) -> String {
+    format!("{done} of {total} {unit}")
+}
+
+/// A time today: "Today 10:02".
+pub fn today_at(hour: u32, minute: u32) -> String {
+    format!("Today {hour:02}:{minute:02}")
+}
+
+/// A time yesterday: "Yesterday 17:02".
+pub fn yesterday_at(hour: u32, minute: u32) -> String {
+    format!("Yesterday {hour:02}:{minute:02}")
+}
+
+/// A date before yesterday, the month numbered from 0: "12 Mar 2026".
+pub fn day_month_year(day: u32, month0: u32, year: i32) -> String {
+    let month = usize::try_from(month0)
+        .ok()
+        .and_then(|i| MONTHS.get(i))
+        .copied()
+        .unwrap_or_default();
+    format!("{day} {month} {year}")
+}
+
 // ---- Counts ----
 
 /// "1 item", "2 items".
@@ -175,8 +219,9 @@ pub fn describe(error: &ProviderError, zone: &str, host: &str, attempt: Attempt<
 
 /// Why a transfer failed, for its row in the queue's Failed tab. The row already names the site
 /// and the file, so the words do not: this is the short reason on its own. A `Refused` or
-/// `Permanent` error is the app's own explanation and is shown as it is. The transfer engine takes
-/// this as its `describe` hook.
+/// `Permanent` error carries a provider's or the app's own explanation, which is shown as one
+/// sentence (review M9: some arrive in lower case, "unexpected response from server (…)"). The
+/// transfer engine takes this as its `describe` hook.
 pub fn describe_transfer_error(error: &ProviderError) -> String {
     match error {
         ProviderError::Network(_) => "No connection".to_owned(),
@@ -193,7 +238,7 @@ pub fn describe_transfer_error(error: &ProviderError) -> String {
         ProviderError::Refused(message) if message == httporter_s3::ACCESS_DENIED => {
             FILE_ACCESS_DENIED.to_owned()
         }
-        ProviderError::Refused(message) | ProviderError::Permanent(message) => message.clone(),
+        ProviderError::Refused(message) | ProviderError::Permanent(message) => sentence(message),
     }
 }
 
@@ -999,7 +1044,7 @@ pub const PROXY_HAS_PASSWORD: &str =
 
 // ---- Transfers ----
 
-use httporter_transfer::messages;
+use httporter_transfer::{messages, reason};
 
 /// The title of the file picker Upload opens when nothing is selected on This PC.
 pub const PICK_FILES_TITLE: &str = "Choose files to upload";
@@ -1074,8 +1119,25 @@ pub fn transfer_not_started(reason: impl Display) -> String {
     )
 }
 
+/// Why the planner left an item out (review M9): its fixed reasons (`plan::reason`) in the app's
+/// words, and anything else (the system's message about a local file) as one sentence.
+pub fn plan_reason(why: &str) -> String {
+    let words = match why {
+        reason::NAME => "Its name has characters HTTPorter can't handle.",
+        reason::FOLDER_THERE => "The site has a folder with this name.",
+        reason::FILE_THERE => "The site has a file with this name.",
+        reason::LINKED_FOLDER => "Linked folders aren't uploaded.",
+        reason::EMPTY_FOLDER => "This storage can't keep an empty folder.",
+        reason::SAME_NAME => "Another item in this upload has the same name.",
+        reason::ROOT_DELETE => "The top folder of a site can't be deleted.",
+        other => return sentence(other),
+    };
+    words.to_owned()
+}
+
 /// Items of an upload or download that won't be sent, with the first one and why.
 pub fn skipped_items(n: usize, first: &str, reason: &str) -> String {
+    let reason = plan_reason(reason);
     if n == 1 {
         format!("1 item was skipped: {first}: {reason}")
     } else {
@@ -1310,14 +1372,14 @@ mod tests {
             said(ProviderError::ClockSkew),
             "Your PC's clock is off. Turn on “Set time automatically” in Windows Settings."
         );
-        // The app's own explanations are passed on as they are.
+        // The explanations they carry are passed on as one sentence (review M9).
         assert_eq!(
             said(ProviderError::Refused("the zone root is a folder".into())),
-            "the zone root is a folder"
+            "The zone root is a folder."
         );
         assert_eq!(
             said(ProviderError::Permanent("unexpected (418)".into())),
-            "unexpected (418)"
+            "Unexpected (418)."
         );
     }
 

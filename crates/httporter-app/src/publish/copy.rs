@@ -345,7 +345,18 @@ pub fn purge_done(result: &httporter_core::PurgeResult) -> String {
         ),
         PurgeResult::Zone => "Purged the whole CDN zone.".to_owned(),
         PurgeResult::Failed(reason) => format!("CDN purge failed: {reason}"),
-        PurgeResult::Unavailable(why) => why.clone(),
+        PurgeResult::Unavailable(why) => sentence_case(why),
+    }
+}
+
+/// `text` with its first letter a capital (review M9): a reason passed on from elsewhere that
+/// is shown on its own.
+fn sentence_case(text: &str) -> String {
+    let text = text.trim();
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
