@@ -1,4 +1,4 @@
-//! Files on the clipboard: what Explorer's Copy (or Cut) puts there.
+//! The clipboard: the files Explorer's Copy (or Cut) puts there, and text the app copies.
 
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
@@ -6,11 +6,13 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    SetClipboardData,
 };
-use windows::Win32::System::Ole::CF_HDROP;
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 /// Another program may hold the clipboard open for a moment (clipboard managers and remote
@@ -82,8 +84,38 @@ pub fn clipboard_files() -> Vec<PathBuf> {
     files
 }
 
-/// Puts `text` on the clipboard (T4).
-#[allow(unused_variables)]
+/// Puts `text` on the clipboard, as Unicode text.
 pub fn set_clipboard_text(text: &str) -> Result<(), String> {
-    todo!("T4")
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = wide.len() * std::mem::size_of::<u16>();
+    let Some(_open) = OpenClipboardGuard::open() else {
+        return Err(windows::core::Error::from_thread().message());
+    };
+    // SAFETY: the clipboard is open on this thread.
+    unsafe { EmptyClipboard() }.map_err(|e| e.message())?;
+    // SAFETY: a fresh movable block of `bytes` bytes; checked below.
+    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }.map_err(|e| e.message())?;
+    // SAFETY: `memory` is the block just allocated; locking gives its address.
+    let target = unsafe { GlobalLock(memory) }.cast::<u16>();
+    if target.is_null() {
+        let error = windows::core::Error::from_thread().message();
+        // SAFETY: the block is ours until the clipboard takes it.
+        let _ = unsafe { GlobalFree(Some(memory)) };
+        return Err(error);
+    }
+    // SAFETY: the block holds `wide.len()` u16s, and the two do not overlap.
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), target, wide.len());
+        // Reports an "error" once the lock count is back to zero, which is what we want.
+        let _ = GlobalUnlock(memory);
+    }
+    // SAFETY: the clipboard is open and emptied by us; on success it owns the block.
+    match unsafe { SetClipboardData(u32::from(CF_UNICODETEXT.0), Some(HANDLE(memory.0))) } {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // SAFETY: the clipboard did not take the block, so it is still ours.
+            let _ = unsafe { GlobalFree(Some(memory)) };
+            Err(e.message())
+        }
+    }
 }

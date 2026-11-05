@@ -10,6 +10,10 @@
 //! Schema v3 adds the publish profiles, their history (the files of each publish too) and each
 //! site's CDN link. Lists, the purge choice and the pull zones are stored as JSON.
 //!
+//! Schema v4 adds the persistent hash cache (local files' digests by path, size and time), the
+//! sidebar's favorites and each profile's Cache-Control header. Site extras and the window's UI
+//! state are JSON in the settings.
+//!
 //! The file is opened in WAL mode with a 5 s busy timeout, so the store and the transfer
 //! journal ([`crate::journal`]) can each hold their own connection to it.
 
@@ -21,8 +25,8 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 use httporter_core::{
     AccountId, CdnLink, CdnZone, DeleteGuard, Favorite, FileAction, FileOutcome, HISTORY_KEEP,
-    HistoryFile, HistoryRecord, ProfileId, ProfileRecord, ProviderKind, PublishResult, PurgeMode,
-    PurgeResult, RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
+    HistoryFile, HistoryRecord, PlaceKind, ProfileId, ProfileRecord, ProviderKind, PublishResult,
+    PurgeMode, PurgeResult, RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
@@ -124,6 +128,24 @@ const MIGRATIONS: &[&str] = &[
         zones      TEXT NOT NULL,
         checked_at TEXT NOT NULL
     );",
+    // v4: the persistent hash cache, the sidebar's favorites and each profile's Cache-Control.
+    "CREATE TABLE hash_cache (
+        path     TEXT PRIMARY KEY,
+        size     INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        sha256   BLOB NOT NULL,
+        md5      BLOB NOT NULL,
+        used_at  TEXT NOT NULL
+    );
+    CREATE TABLE favorites (
+        id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind   TEXT NOT NULL,
+        name   TEXT NOT NULL,
+        local  TEXT,
+        site   TEXT,
+        remote TEXT
+    );
+    ALTER TABLE profiles ADD COLUMN cache_control TEXT;",
 ];
 
 /// The Transfers settings (Settings window, Transfers tab) are stored under this key.
@@ -300,8 +322,9 @@ impl Store {
         Ok(list)
     }
 
-    /// Deletes a site, with its publish profiles, their history and its CDN link, in one
-    /// transaction. Removing an id that is not stored is not an error.
+    /// Deletes a site, with its publish profiles, their history, its CDN link, its favorites, its
+    /// extras and its remembered conflict choices, in one transaction. Removing an id that is not
+    /// stored is not an error.
     pub fn remove_site(&self, id: &SiteId) -> Result<(), StoreError> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -317,6 +340,14 @@ impl Store {
         )?;
         tx.execute("DELETE FROM profiles WHERE site = ?1", params![id.0])?;
         tx.execute("DELETE FROM cdn_links WHERE site = ?1", params![id.0])?;
+        tx.execute("DELETE FROM favorites WHERE site = ?1", params![id.0])?;
+        for key in [
+            site_extras_key(id),
+            site_conflicts_key(id, true),
+            site_conflicts_key(id, false),
+        ] {
+            tx.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        }
         tx.execute("DELETE FROM sites WHERE id = ?1", params![id.0])?;
         tx.commit()?;
         Ok(())
@@ -419,8 +450,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO profiles (id, site, name, local_dir, remote_dir, skip_rules,
                                    remove_extras, purge, guard_files, guard_percent,
-                                   created_at, last_published_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                   created_at, last_published_at, cache_control)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 p.id.0,
                 p.site.0,
@@ -434,6 +465,7 @@ impl Store {
                 p.guard.percent,
                 stamp(p.created_at),
                 p.last_published_at.map(stamp),
+                p.cache_control,
             ],
         )?;
         Ok(())
@@ -449,7 +481,7 @@ impl Store {
             "UPDATE profiles
              SET site = ?2, name = ?3, local_dir = ?4, remote_dir = ?5, skip_rules = ?6,
                  remove_extras = ?7, purge = ?8, guard_files = ?9, guard_percent = ?10,
-                 created_at = ?11
+                 created_at = ?11, cache_control = ?12
              WHERE id = ?1",
             params![
                 p.id.0,
@@ -463,6 +495,7 @@ impl Store {
                 int(p.guard.files)?,
                 p.guard.percent,
                 stamp(p.created_at),
+                p.cache_control,
             ],
         )?;
         if changed == 0 {
@@ -493,7 +526,7 @@ impl Store {
     pub fn list_profiles(&self) -> Result<Vec<ProfileRecord>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, site, name, local_dir, remote_dir, skip_rules, remove_extras, purge,
-                    guard_files, guard_percent, created_at, last_published_at
+                    guard_files, guard_percent, created_at, last_published_at, cache_control
              FROM profiles ORDER BY name COLLATE NOCASE, id",
         )?;
         let mut rows = stmt.query([])?;
@@ -733,6 +766,7 @@ struct RawProfile {
     guard_percent: u8,
     created_at: String,
     last_published_at: Option<String>,
+    cache_control: Option<String>,
 }
 
 impl RawProfile {
@@ -750,6 +784,7 @@ impl RawProfile {
             guard_percent: row.get(9)?,
             created_at: row.get(10)?,
             last_published_at: row.get(11)?,
+            cache_control: row.get(12)?,
         })
     }
 
@@ -773,8 +808,7 @@ impl RawProfile {
                 Some(text) => Some(parse_stamp(&text).ok()?),
                 None => None,
             },
-            // T4: the v4 `profiles.cache_control` column.
-            cache_control: None,
+            cache_control: self.cache_control.filter(|value| !value.trim().is_empty()),
         })
     }
 }
@@ -1263,8 +1297,7 @@ fn migrate_with(conn: &mut Connection, mut at: impl FnMut(MigrateStage)) -> Resu
     }
 }
 
-/// Schema v4 (T4): the persistent hash cache and the sidebar's favorites.
-#[allow(unused_variables)]
+/// Schema v4: the persistent hash cache and the sidebar's favorites.
 impl Store {
     /// The digests kept for `path` at this size and modification time (and marks them used).
     #[allow(clippy::type_complexity)]
@@ -1274,10 +1307,35 @@ impl Store {
         size: u64,
         mtime_ns: u64,
     ) -> Result<Option<([u8; 32], [u8; 16])>, StoreError> {
-        todo!("T4")
+        let (Some(key), Ok(size), Ok(mtime)) =
+            (path.to_str(), i64::try_from(size), i64::try_from(mtime_ns))
+        else {
+            return Ok(None);
+        };
+        let found: Option<(Vec<u8>, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT sha256, md5 FROM hash_cache
+                 WHERE path = ?1 AND size = ?2 AND mtime_ns = ?3",
+                params![key, size, mtime],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((sha, md5)) = found else {
+            return Ok(None);
+        };
+        let (Ok(sha), Ok(md5)) = (<[u8; 32]>::try_from(sha), <[u8; 16]>::try_from(md5)) else {
+            return Ok(None);
+        };
+        self.conn.execute(
+            "UPDATE hash_cache SET used_at = ?2 WHERE path = ?1",
+            params![key, used_stamp(Utc::now())],
+        )?;
+        Ok(Some((sha, md5)))
     }
 
-    /// Keeps the digests of `path` at this size and modification time.
+    /// Keeps the digests of `path` at this size and modification time. A path that is not
+    /// Unicode is not kept.
     pub fn hash_put(
         &self,
         path: &Path,
@@ -1286,38 +1344,148 @@ impl Store {
         sha256: &[u8; 32],
         md5: &[u8; 16],
     ) -> Result<(), StoreError> {
-        todo!("T4")
+        let Some(key) = path.to_str() else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "INSERT INTO hash_cache (path, size, mtime_ns, sha256, md5, used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (path) DO UPDATE SET size = excluded.size, mtime_ns = excluded.mtime_ns,
+                 sha256 = excluded.sha256, md5 = excluded.md5, used_at = excluded.used_at",
+            params![
+                key,
+                int(size)?,
+                int(mtime_ns)?,
+                &sha256[..],
+                &md5[..],
+                used_stamp(Utc::now()),
+            ],
+        )?;
+        Ok(())
     }
 
     /// Forgets the digests not used since `unused_since`; how many.
     pub fn hash_prune(&self, unused_since: DateTime<Utc>) -> Result<u64, StoreError> {
-        todo!("T4")
+        let gone = self.conn.execute(
+            "DELETE FROM hash_cache WHERE used_at < ?1",
+            params![used_stamp(unused_since)],
+        )?;
+        Ok(gone as u64)
     }
 
     /// How many files' digests are kept.
     pub fn hash_count(&self) -> Result<u64, StoreError> {
-        todo!("T4")
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM hash_cache", [], |row| row.get(0))?;
+        Ok(count(n).unwrap_or(0))
     }
 
     /// Forgets every kept digest.
     pub fn hash_clear(&self) -> Result<(), StoreError> {
-        todo!("T4")
+        self.conn.execute("DELETE FROM hash_cache", [])?;
+        Ok(())
     }
 
-    /// The sidebar's favorites, in the order they were added.
+    /// The sidebar's favorites, in the order they were added. A row this build cannot read is
+    /// left out.
     pub fn favorites(&self) -> Result<Vec<Favorite>, StoreError> {
-        todo!("T4")
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, kind, name, local, site, remote FROM favorites ORDER BY id")?;
+        let mut rows = stmt.query([])?;
+        let mut favorites = Vec::new();
+        while let Some(row) = rows.next()? {
+            match read_favorite(row) {
+                Ok(raw) => favorites.extend(favorite_of(raw)),
+                Err(e) if is_row_decode_error(&e) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(favorites)
     }
 
     /// Stores `f` (its `id` is ignored); the new id.
     pub fn add_favorite(&self, f: &Favorite) -> Result<i64, StoreError> {
-        todo!("T4")
+        let local = match &f.local {
+            Some(path) => Some(path.to_str().ok_or_else(|| {
+                StoreError::Encode("the folder's name is not valid Unicode".into())
+            })?),
+            None => None,
+        };
+        self.conn.execute(
+            "INSERT INTO favorites (kind, name, local, site, remote) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                place_to_text(f.kind),
+                f.name,
+                local,
+                f.site.as_ref().map(|id| id.0.as_str()),
+                f.remote.as_ref().map(RemotePath::as_str),
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
     }
 
     /// Removing an id that is not stored is not an error.
     pub fn remove_favorite(&self, id: i64) -> Result<(), StoreError> {
-        todo!("T4")
+        self.conn
+            .execute("DELETE FROM favorites WHERE id = ?1", params![id])?;
+        Ok(())
     }
+}
+
+/// A `favorites` row as stored: id, kind, name, local, site, remote.
+type RawFavorite = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn read_favorite(row: &Row<'_>) -> rusqlite::Result<RawFavorite> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+/// `None` when a column holds something this build does not understand.
+fn favorite_of((id, kind, name, local, site, remote): RawFavorite) -> Option<Favorite> {
+    let kind = match kind.as_str() {
+        "local" => PlaceKind::Local,
+        "remote" => PlaceKind::Remote,
+        _ => return None,
+    };
+    let remote = match remote {
+        Some(text) => Some(RemotePath::parse(&text).ok()?),
+        None => None,
+    };
+    Some(Favorite {
+        id,
+        kind,
+        name,
+        local: local.map(PathBuf::from),
+        site: site.map(SiteId),
+        remote,
+    })
+}
+
+fn place_to_text(kind: PlaceKind) -> &'static str {
+    match kind {
+        PlaceKind::Local => "local",
+        PlaceKind::Remote => "remote",
+    }
+}
+
+/// A hash cache entry's last use, to the second, so that the stored texts sort as the times do.
+fn used_stamp(time: DateTime<Utc>) -> String {
+    time.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
@@ -1617,8 +1785,17 @@ mod tests {
                 "guard_files",
                 "guard_percent",
                 "created_at",
-                "last_published_at"
+                "last_published_at",
+                "cache_control"
             ]
+        );
+        assert_eq!(
+            st.column_names("hash_cache").unwrap(),
+            ["path", "size", "mtime_ns", "sha256", "md5", "used_at"]
+        );
+        assert_eq!(
+            st.column_names("favorites").unwrap(),
+            ["id", "kind", "name", "local", "site", "remote"]
         );
         assert_eq!(
             st.column_names("publish_history").unwrap(),
@@ -1679,6 +1856,8 @@ mod tests {
             [
                 "accounts",
                 "cdn_links",
+                "favorites",
+                "hash_cache",
                 "journal",
                 "profiles",
                 "publish_files",

@@ -109,6 +109,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         .build()?;
     let session = open_session()?;
     let journal = open_journal(&session);
+    // Digests of local files not used for 90 days go, off the UI thread.
+    session.prune_hash_cache();
     manage::activity_view::open_log(httporter_platform::default_log_dir());
     // Cached previews, thumbnails and edits not touched for a week go, off the UI thread.
     let _ = std::thread::Builder::new()

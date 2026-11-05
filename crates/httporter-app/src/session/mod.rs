@@ -64,7 +64,7 @@ mod sites;
 mod store;
 
 pub use local::LocalView;
-#[allow(unused_imports)] // T4 and T8 use it.
+#[allow(unused_imports)] // T8 uses it.
 pub use places::ImportReport;
 pub use remote::{RemotePlace, RemoteView};
 pub use sites::{SiteItemData, SiteProvider, TestResult, endpoint_preview, hub_error_text};
@@ -328,6 +328,8 @@ pub struct Session {
     pending_settings: Arc<Mutex<Option<TransferSettings>>>,
     /// Shared, so that a save can update it from the blocking thread that writes the site.
     book: Arc<Mutex<Book>>,
+    /// The UI state and the site extras as last read or saved (`places`).
+    places: Arc<Mutex<places::PlacesCache>>,
     remote: Mutex<RemotePane>,
     local: Mutex<LocalPane>,
     /// The last ticket given out for each pane.
@@ -355,6 +357,7 @@ impl Session {
             book: Arc::new(Mutex::new(Book::read(&store))),
             store: Arc::new(Mutex::new(store)),
             pending_settings: Arc::new(Mutex::new(None)),
+            places: Arc::default(),
             remote: Mutex::new(RemotePane::new(sort)),
             local: Mutex::new(LocalPane::new(sort)),
             remote_tickets: AtomicU64::new(0),
