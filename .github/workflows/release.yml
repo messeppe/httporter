@@ -1,0 +1,158 @@
+# Release: on a v* tag (v1.0.0 for httporter-app 1.0.0), build and package HTTPorter, then
+# put the portable zip, the setup and SHA256SUMS.txt on a *draft* GitHub release for a
+# person to review and publish.
+#
+# Hardening:
+# - actions pinned to full commit SHAs (tag in the comment); checkout keeps no credentials;
+# - the build job's token is read-only, and the build runs before, and apart from, the
+#   signing secrets; no dependency cache is restored into a release build;
+# - only the publish job, which runs no project code, can write (contents: write);
+# - every cargo command that resolves dependencies runs with --locked.
+#
+# Signing (spec B7) runs only when its secrets exist; without them the release is unsigned
+# and package.ps1 says so. It uses Azure Artifact Signing (formerly Trusted Signing) with a
+# service principal (secret-based, read by the signing client from the environment):
+#   secrets AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
+#           SIGNING_ENDPOINT (e.g. https://eus.codesigning.azure.net),
+#           SIGNING_ACCOUNT, SIGNING_PROFILE (the certificate profile).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build and package
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # The app's update check reads this repository's releases (compiled in by option_env!).
+      HTTPORTER_RELEASE_REPO: ${{ github.repository }}
+      SIGNING: ${{ secrets.AZURE_CLIENT_SECRET != '' && secrets.SIGNING_ACCOUNT != '' }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          cargo --version
+
+      - name: Version matches the tag
+        id: version
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $metadata = cargo metadata --format-version 1 --no-deps --locked | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq 'httporter-app').version
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "tag $env:GITHUB_REF_NAME does not match httporter-app $version (Cargo.toml)"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        run: cargo build --release --locked -p httporter-app
+
+      - name: Set up signing
+        if: env.SIGNING == 'true'
+        env:
+          SIGNING_ENDPOINT: ${{ secrets.SIGNING_ENDPOINT }}
+          SIGNING_ACCOUNT: ${{ secrets.SIGNING_ACCOUNT }}
+          SIGNING_PROFILE: ${{ secrets.SIGNING_PROFILE }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $folder = Join-Path $env:RUNNER_TEMP 'signing'
+          nuget install Microsoft.ArtifactSigning.Client -Version 1.0.151 -ExcludeVersion -NonInteractive -OutputDirectory $folder
+          $dlib = Get-ChildItem $folder -Recurse -Filter '*Dlib.dll' |
+            Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+          if (-not $dlib) { throw 'the signing client package has no x64 Dlib.dll' }
+          $metadata = Join-Path $folder 'metadata.json'
+          @{
+            Endpoint = $env:SIGNING_ENDPOINT
+            CodeSigningAccountName = $env:SIGNING_ACCOUNT
+            CertificateProfileName = $env:SIGNING_PROFILE
+          } | ConvertTo-Json | Set-Content -Path $metadata -Encoding utf8
+          "HTTPORTER_SIGN_DLIB=$($dlib.FullName)" >> $env:GITHUB_ENV
+          "HTTPORTER_SIGN_METADATA=$metadata" >> $env:GITHUB_ENV
+          "HTTPORTER_SIGN_TIMESTAMP=http://timestamp.acs.microsoft.com" >> $env:GITHUB_ENV
+
+      - name: Package
+        env:
+          # Read by the signing client (EnvironmentCredential); empty when signing is off.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/package.ps1 -SkipBuild
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/*-windows-x64-portable.zip
+            dist/*-setup.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Draft the GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v heading="## [${VERSION}]" '
+            index($0, heading) == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "HTTPorter ${VERSION}" > notes.md; fi
+          cat notes.md
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft --verify-tag \
+            --title "HTTPorter ${VERSION}" \
+            --notes-file notes.md
