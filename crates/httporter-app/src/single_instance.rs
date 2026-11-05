@@ -20,8 +20,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::BOOL;
 
-/// The named mutex the first HTTPorter of a session holds while it runs.
-const MUTEX_NAME: &str = "Local\\HTTPorter.Running";
+/// The named mutex the first HTTPorter of a session holds while it runs. A reset at start
+/// (`system::reset`) holds it too, while it wipes.
+pub(crate) const MUTEX_NAME: &str = "Local\\HTTPorter.Running";
 
 /// Whether this is the only HTTPorter of the user's session. The first one keeps the mutex
 /// open for as long as it runs; Windows closes it when the process ends, crash or not. When

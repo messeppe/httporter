@@ -53,6 +53,8 @@ enum Command {
     CloseTab,
     NextTab,
     PreviousTab,
+    /// About HTTPorter, Check for Updates (I5, `system/`).
+    System(crate::system::PaletteCommand),
 }
 
 /// What each of [`copy::SHORTCUTS`] runs, in the same order (`None`: only shown).
@@ -508,6 +510,17 @@ fn actions(ui: &AppWindow, m: &Manager) -> Vec<Candidate> {
         Command::Settings,
         unless(ui.get_settings_available(), copy::PALETTE_LATER),
     ));
+    list.extend(crate::system::palette_entries(ui).into_iter().map(|e| {
+        let command = Command::System(e.command);
+        action(
+            e.title,
+            e.subtitle,
+            PaletteIcon::Settings,
+            "",
+            command,
+            e.off,
+        )
+    }));
     list.push(action(
         copy::PALETTE_ADD_SITE,
         copy::PALETTE_ADD_SITE_NOTE,
@@ -692,6 +705,7 @@ fn run(ui: &AppWindow, command: Command) {
             ui.invoke_activity_filter_changed(ui.get_activity_filter());
         }
         Command::Settings if ui.get_settings_available() => ui.invoke_open_settings(),
+        Command::System(command) => crate::system::run_palette(ui, command),
         Command::AddSite => {
             ui.set_add_site_open(true);
             ui.invoke_add_site();

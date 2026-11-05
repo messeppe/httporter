@@ -220,8 +220,113 @@ impl CredentialStore for KeyringStore {
         }
     }
 
+    /// Lists Credential Manager's generic credentials whose target starts `HTTPorter/` and keeps
+    /// only those in the exact form [`Self::set`] writes them (see [`CredentialKey::from_entry`]).
+    /// Anything else under that prefix is left out, and so never deleted: the caller only ever
+    /// deletes what this returns.
     fn keys(&self) -> Result<Vec<CredentialKey>, CredError> {
-        todo!("T4")
+        use windows::Win32::Foundation::ERROR_NOT_FOUND;
+        use windows::Win32::Security::Credentials::{
+            CRED_TYPE_GENERIC, CREDENTIALW, CredEnumerateW, CredFree,
+        };
+        use windows::core::PCWSTR;
+
+        let filter: Vec<u16> = ENUM_FILTER.encode_utf16().chain(Some(0)).collect();
+        let mut count = 0u32;
+        let mut list: *mut *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: a NUL-terminated filter that outlives the call; `count` and `list` are written
+        // by the call, and `list` is freed below with `CredFree`.
+        let listed =
+            unsafe { CredEnumerateW(PCWSTR(filter.as_ptr()), None, &mut count, &mut list) };
+        match listed {
+            Ok(()) => {}
+            // Nothing under the prefix: Windows says so as an error.
+            Err(e) if e.code() == ERROR_NOT_FOUND.to_hresult() => return Ok(Vec::new()),
+            Err(e) => return Err(CredError::Platform(e.message())),
+        }
+        let mut keys = Vec::new();
+        if !list.is_null() {
+            // SAFETY: on success `list` points at `count` credential pointers, all valid until
+            // `CredFree`.
+            let entries = unsafe { std::slice::from_raw_parts(list, count as usize) };
+            for &entry in entries {
+                if entry.is_null() {
+                    continue;
+                }
+                // SAFETY: a credential of the list, valid until `CredFree`.
+                let entry = unsafe { &*entry };
+                // The listing carries every secret along; none is read here, and each is wiped
+                // before the memory goes back (as `keyring` does after `CredReadW`).
+                if !entry.CredentialBlob.is_null() && entry.CredentialBlobSize > 0 {
+                    // SAFETY: the blob is `CredentialBlobSize` bytes of the list's own buffer.
+                    unsafe {
+                        std::ptr::write_bytes(
+                            entry.CredentialBlob,
+                            0,
+                            entry.CredentialBlobSize as usize,
+                        );
+                    }
+                }
+                if entry.Type != CRED_TYPE_GENERIC {
+                    continue;
+                }
+                // SAFETY: NUL-terminated strings of the list (or null), valid until `CredFree`.
+                let text = |s: windows::core::PWSTR| {
+                    (!s.is_null())
+                        .then(|| unsafe { s.to_string() }.ok())
+                        .flatten()
+                };
+                let (Some(target), Some(user)) = (text(entry.TargetName), text(entry.UserName))
+                else {
+                    continue;
+                };
+                keys.extend(CredentialKey::from_entry(&target, &user));
+            }
+            // SAFETY: the buffer `CredEnumerateW` allocated, freed once; nothing above keeps a
+            // pointer into it.
+            unsafe { CredFree(list as *const std::ffi::c_void) };
+        }
+        keys.sort_by(|a, b| a.0.cmp(&b.0));
+        keys.dedup();
+        Ok(keys)
+    }
+}
+
+/// The Credential Manager filter for HTTPorter's targets (`CredEnumerateW`: a prefix and `*`).
+/// Windows compares target names without regard to case, so this also lists `httporter/…`;
+/// [`CredentialKey::from_entry`] then keeps only the exact form.
+const ENUM_FILTER: &str = "HTTPorter/*";
+
+/// The longest site or account id [`CredentialKey::from_entry`] accepts. Ids are UUIDs (36).
+const ID_MAX: usize = 64;
+
+impl CredentialKey {
+    /// The key of a Credential Manager entry, if HTTPorter wrote it, read back by the form
+    /// `keyring` 3.6.3 gives it (`windows.rs`: `WinCredential::new_with_target`, then
+    /// `save_credential`). [`KeyringStore::entry`] passes the key as both the target and the
+    /// user, so `keyring` writes a generic credential whose target name *and* user name are
+    /// exactly `HTTPorter/site/<id>` or `HTTPorter/account/<id>` (the service name is not stored
+    /// on Windows when a target is given). So an entry is HTTPorter's only when:
+    ///
+    /// - its target starts with `HTTPorter/site/` or `HTTPorter/account/`, in that case;
+    /// - the id after it is 1 to [`ID_MAX`] ASCII letters, digits, `-` or `_` (no `/`);
+    /// - its user name is its target.
+    ///
+    /// Anything else (another program's `httporter/…`, an entry edited by hand) is not HTTPorter's
+    /// to delete.
+    fn from_entry(target: &str, user: &str) -> Option<Self> {
+        if user != target {
+            return None;
+        }
+        let id = target
+            .strip_prefix(SITE_PREFIX)
+            .or_else(|| target.strip_prefix(ACCOUNT_PREFIX))?;
+        let id_ok = !id.is_empty()
+            && id.len() <= ID_MAX
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        id_ok.then(|| Self(target.to_owned()))
     }
 }
 
@@ -427,6 +532,103 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(format!("{err:?}"), "BadEncoding");
         assert!(!format!("{err}").contains("odd-length-blob"));
+    }
+
+    /// Only the exact form `KeyringStore::set` writes is read back as HTTPorter's key.
+    #[test]
+    fn only_httporters_own_entry_form_is_a_key() {
+        let id = "0b9f6c1e-2d4a-4c8e-9f1a-3b5d7e9f1a2c";
+        for target in [
+            format!("HTTPorter/site/{id}"),
+            format!("HTTPorter/account/{id}"),
+            "HTTPorter/site/site_1".to_owned(),
+        ] {
+            let key = CredentialKey::from_entry(&target, &target).expect(&target);
+            assert_eq!(key.as_str(), target);
+            assert_ne!(key.kind(), CredentialKind::Other);
+        }
+        let site = format!("HTTPorter/site/{id}");
+        for (target, user) in [
+            // Another user name: not written by `KeyringStore`.
+            (site.as_str(), "someone"),
+            (site.as_str(), ""),
+            // Another case, prefix, kind or shape of id.
+            ("httporter/site/abc", "httporter/site/abc"),
+            ("HTTPORTER/site/abc", "HTTPORTER/site/abc"),
+            ("HTTPorter/Site/abc", "HTTPorter/Site/abc"),
+            ("HTTPorter/cdn/abc", "HTTPorter/cdn/abc"),
+            ("HTTPorter/abc", "HTTPorter/abc"),
+            ("HTTPorter", "HTTPorter"),
+            ("HTTPorterX/site/abc", "HTTPorterX/site/abc"),
+            ("Other/HTTPorter/site/abc", "Other/HTTPorter/site/abc"),
+            ("HTTPorter/site/", "HTTPorter/site/"),
+            ("HTTPorter/site/a/b", "HTTPorter/site/a/b"),
+            ("HTTPorter/site/a b", "HTTPorter/site/a b"),
+            ("HTTPorter/site/a*", "HTTPorter/site/a*"),
+            ("HTTPorter/site/é", "HTTPorter/site/é"),
+        ] {
+            assert_eq!(CredentialKey::from_entry(target, user), None, "{target}");
+        }
+        let long = format!("HTTPorter/site/{}", "a".repeat(ID_MAX + 1));
+        assert_eq!(CredentialKey::from_entry(&long, &long), None);
+    }
+
+    /// Credential Manager entries a test makes for itself, removed even if an assertion fails.
+    #[cfg(windows)]
+    struct Decoys(Vec<keyring::Entry>);
+
+    #[cfg(windows)]
+    impl Drop for Decoys {
+        fn drop(&mut self) {
+            for entry in &self.0 {
+                let _ = entry.delete_credential();
+            }
+        }
+    }
+
+    /// `KeyringStore::keys` lists HTTPorter's key, and none of the look-alikes that Windows' own
+    /// filter lets through (another case, another kind, another user name). Only entries made
+    /// here are written and removed; the others are only listed.
+    #[cfg(windows)]
+    #[test]
+    fn keyring_keys_lists_only_httporters_own_targets() {
+        let ours = CredentialKey::site(&SiteId::new());
+        let _cleanup = DeleteOnDrop(ours.clone());
+        KeyringStore.set(&ours, "pw-test").unwrap();
+
+        let id = || SiteId::new().0;
+        let decoy_targets = [
+            (format!("httporter/site/{}", id()), None),
+            (format!("HTTPorter/decoy/{}", id()), None),
+            (format!("HTTPorterDecoy/site/{}", id()), None),
+            (format!("HTTPorter/site/{}", id()), Some("someone-else")),
+        ];
+        let mut decoys = Decoys(Vec::new());
+        for (target, user) in &decoy_targets {
+            let entry =
+                keyring::Entry::new_with_target(target, "decoy", user.unwrap_or(target)).unwrap();
+            entry.set_password("decoy").unwrap();
+            decoys.0.push(entry);
+        }
+
+        let keys = KeyringStore.keys().unwrap();
+        assert!(keys.contains(&ours), "HTTPorter's own key is listed");
+        for (target, _) in &decoy_targets {
+            assert!(
+                !keys
+                    .iter()
+                    .any(|key| key.as_str().eq_ignore_ascii_case(target)),
+                "a look-alike was listed: {target}"
+            );
+        }
+        assert!(
+            keys.iter().all(|key| key.kind() != CredentialKind::Other),
+            "only site and account keys are listed"
+        );
+        drop(decoys);
+
+        KeyringStore.delete(&ours).unwrap();
+        assert!(!KeyringStore.keys().unwrap().contains(&ours));
     }
 
     /// `keyring::Error::BadEncoding` carries the raw credential blob, i.e. the secret.

@@ -111,10 +111,16 @@ export component GroupRow inherits Rectangle {
 export component Switch inherits Rectangle {
     in property <string> label;
     in-out property <bool> checked: false;
+    // Off, the switch is dimmed and ignores presses and keys (I5: the update switch of a build
+    // without a release address).
+    in property <bool> enabled: true;
     out property <bool> has-focus: key-focus.has-focus;
     callback toggled(bool);
 
     function toggle() {
+        if (!root.enabled) {
+            return;
+        }
         root.checked = !root.checked;
         root.toggled(root.checked);
     }
@@ -127,10 +133,12 @@ export component Switch inherits Rectangle {
     border-width: 1px;
     border-color: root.checked ? Theme.accent : Theme.field-border;
     forward-focus: key-focus;
+    opacity: root.enabled ? 1 : 0.45;
     accessible-role: switch;
     accessible-label: root.label;
     accessible-checkable: true;
     accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
     accessible-action-default => { root.toggle(); }
 
     Rectangle {
@@ -163,6 +171,7 @@ export component Switch inherits Rectangle {
     key-focus := FocusScope {
         x: 0;
         width: 0;
+        enabled: root.enabled;
         key-pressed(event) => {
             if (event.text == Key.Space && !event.repeat && !event.modifiers.alt) {
                 root.toggle();
@@ -173,6 +182,7 @@ export component Switch inherits Rectangle {
     }
 
     TouchArea {
+        enabled: root.enabled;
         clicked => { root.toggle(); }
     }
 }
@@ -301,6 +311,7 @@ export component GeneralTab inherits Rectangle {
                 Group {
                     GroupRow {
                         title: @tr("Keep running in the tray when the window is closed during transfers");
+                        help: @tr("Its icon shows the progress, and HTTPorter quits when the transfers finish.");
                         last: true;
 
                         Switch {
@@ -318,16 +329,18 @@ export component GeneralTab inherits Rectangle {
                 Group {
                     GroupRow {
                         title: @tr("Check for updates at start");
+                        help: root.updates-available ? @tr("At most once a day. HTTPorter asks GitHub for its newest release and sends nothing else.") : @tr("This build has no release address.");
 
                         Switch {
                             label: @tr("Check for updates at start");
+                            enabled: root.updates-available;
                             checked <=> root.check-updates;
                             toggled => { root.edited(); }
                         }
                     }
                     GroupRow {
-                        title: @tr("Check now");
-                        help: root.updates-note;
+                        title: @tr("Newest version");
+                        help: root.updates-available ? root.updates-note : "";
                         last: true;
 
                         CapsuleButton {
@@ -343,20 +356,70 @@ export component GeneralTab inherits Rectangle {
                 title: @tr("About");
 
                 Group {
-                    GroupRow {
-                        title: @tr("HTTPorter {}", root.app-version);
-                        help: @tr("Free software under the MIT or Apache-2.0 license");
-                        last: true;
+                    Rectangle {
+                        min-height: 64px;
+                        accessible-role: groupbox;
+                        accessible-label: @tr("About HTTPorter");
 
-                        CapsuleButton {
-                            text: @tr("Third-Party Licenses…");
-                            enabled: root.licenses-available;
-                            clicked => { root.open-licenses(); }
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 12px;
+                            padding-bottom: 12px;
+                            spacing: 12px;
+
+                            // The app icon, as on Welcome.
+                            VCenter {
+                                Rectangle {
+                                    width: 40px;
+                                    height: 40px;
+                                    border-radius: 10px;
+                                    background: @linear-gradient(160deg, Theme.app-icon-top, Theme.app-icon-bottom);
+
+                                    Image {
+                                        source: Icons.porter;
+                                        colorize: Theme.on-accent;
+                                        width: parent.width * 0.58;
+                                        height: self.width;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        accessible-role: none;
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                spacing: 2px;
+
+                                Text {
+                                    text: @tr("HTTPorter {}", root.app-version);
+                                    color: Theme.label;
+                                    font-size: Theme.font-body;
+                                    font-weight: Theme.weight-semibold;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: @tr("Free software under the MIT or Apache-2.0 license");
+                                    color: Theme.label2;
+                                    font-size: Theme.font-small;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            VCenter {
+                                CapsuleButton {
+                                    text: @tr("Third-Party Licenses…");
+                                    enabled: root.licenses-available;
+                                    clicked => { root.open-licenses(); }
+                                }
+                            }
                         }
                     }
                 }
+                // "Made with Slint": the credit Slint's royalty-free licence asks for.
                 HorizontalLayout {
                     alignment: center;
+                    padding-top: 6px;
 
                     AboutSlint { }
                 }

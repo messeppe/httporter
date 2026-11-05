@@ -370,6 +370,12 @@ impl Session {
         &self.hub
     }
 
+    /// The credential store the secrets are in, for Settings › Security (I5), which counts and
+    /// removes HTTPorter's own keys there.
+    pub fn creds(&self) -> Arc<dyn CredentialStore> {
+        self.creds.clone()
+    }
+
     /// A place in line for moving the cloud pane. Take it when the user asks, before handing the
     /// request to a task.
     pub fn remote_ticket(&self) -> Ticket {
