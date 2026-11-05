@@ -1,7 +1,12 @@
 //! The cloud pane: the site being browsed, the folder shown from it, and the requests that move it
 //! (open a site, a folder, a crumb, Back, Forward, Refresh, a new sort).
+//!
+//! Search mode (I4 T7): the pane can show a search of the open site in place of a folder. The
+//! rows are then the matches, named by their path from where the search began, and they grow as
+//! the search lists the site ([`Session::start_search`]). Any request that moves the pane ends it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use httporter_core::{
@@ -9,6 +14,7 @@ use httporter_core::{
 };
 use tokio::sync::oneshot;
 
+use super::local::LocalView;
 use super::sites::{SiteProvider, hub_error_text, listing_error_text};
 use super::{Course, Session, Step, Ticket, blocking, lock, until_cancelled};
 use crate::copy;
@@ -113,6 +119,30 @@ pub(super) struct Remote {
     /// Folders made with New Folder that the storage doesn't show yet (Bunny Storage keeps no
     /// empty folder): shown in their folder, with a note, until a listing has them.
     virtual_folders: BTreeSet<RemotePath>,
+    /// The search shown in place of the folder (`dir` stays the folder it began in), if any.
+    search: Option<Search>,
+}
+
+/// A search the cloud pane shows (I4 T7).
+struct Search {
+    /// Where it lists from: the site's root, or the folder shown when it began.
+    root: RemotePath,
+    /// The crumb that says what the rows are ("Results for “x”").
+    label: String,
+    /// Matches in since the last view, not yet in the rows.
+    pending: Vec<Entry>,
+}
+
+impl Search {
+    /// What a match's row is called: its path from where the search began.
+    fn row_name<'a>(&self, entry: &'a Entry) -> &'a str {
+        let path = entry.path.as_str();
+        if self.root.is_root() {
+            return path;
+        }
+        path.strip_prefix(self.root.as_str())
+            .map_or(path, |rest| rest.trim_start_matches('/'))
+    }
 }
 
 impl Remote {
@@ -126,6 +156,7 @@ impl Remote {
             error: None,
             offer_edit: false,
             virtual_folders: BTreeSet::new(),
+            search: None,
         }
     }
 
@@ -172,6 +203,20 @@ fn virtual_entry(path: RemotePath) -> Entry {
 fn remote_ancestor(dir: &RemotePath, index: usize) -> Option<RemotePath> {
     let segments: Vec<&str> = dir.segments().collect();
     if index >= segments.len() {
+        return None;
+    }
+    segments[..index]
+        .iter()
+        .try_fold(RemotePath::root(), |path, segment| path.join(segment))
+        .ok()
+}
+
+/// The folder a search's crumb `index` stands for: 0 is the zone's root, and the last of them
+/// `root` itself, where the search lists from. `None` past it (the crumb that says what the rows
+/// are).
+fn search_ancestor(root: &RemotePath, index: usize) -> Option<RemotePath> {
+    let segments: Vec<&str> = root.segments().collect();
+    if index > segments.len() {
         return None;
     }
     segments[..index]
@@ -275,12 +320,19 @@ impl Session {
         self.navigate_remote(ticket, Step::Go, pick, started).await
     }
 
+    /// Goes to the parent folder; from a search, to the folder the search lists from.
     pub async fn remote_up(
         &self,
         ticket: Ticket,
         started: impl FnOnce(RemoteView) + Send,
     ) -> RemoteView {
-        let pick = |pane: &RemotePane| pane.open.as_ref()?.dir.parent();
+        let pick = |pane: &RemotePane| {
+            let remote = pane.open.as_ref()?;
+            match &remote.search {
+                Some(search) => Some(search.root.clone()),
+                None => remote.dir.parent(),
+            }
+        };
         self.navigate_remote(ticket, Step::Go, pick, started).await
     }
 
@@ -297,16 +349,26 @@ impl Session {
             if pane.version != seen {
                 return None;
             }
-            remote_ancestor(&pane.open.as_ref()?.dir, index)
+            let remote = pane.open.as_ref()?;
+            match &remote.search {
+                // A search's crumbs are the folder it lists from (each of them a place to go),
+                // then what the rows are.
+                Some(search) => search_ancestor(&search.root, index),
+                None => remote_ancestor(&remote.dir, index),
+            }
         };
         self.navigate_remote(ticket, Step::Go, pick, started).await
     }
 
+    /// Back; from a search, back to the folder the search began in.
     pub async fn remote_back(
         &self,
         ticket: Ticket,
         started: impl FnOnce(RemoteView) + Send,
     ) -> RemoteView {
+        if self.remote_searching() {
+            return self.end_search(ticket, started).await;
+        }
         // Counted from where a Back already on its way is going: two quick Backs are two steps.
         let pick = |pane: &RemotePane| pane.course.ahead().back_to();
         self.navigate_remote(ticket, Step::Back, pick, started)
@@ -374,6 +436,12 @@ impl Session {
             let Some(((site, provider, shown), dir)) = open.zip(pick(&pane)) else {
                 return self.remote_view_of(&pane);
             };
+            // A search shown ends with the request: its matches are no folder's rows.
+            if let Some(remote) = pane.open.as_mut()
+                && remote.search.take().is_some()
+            {
+                remote.entries.clear();
+            }
             pane.course.begin(step, &shown, dir.clone());
             pane.latest = ticket;
             pane.loading = true;
@@ -484,19 +552,36 @@ impl Session {
         })
     }
 
-    /// The site and folder the cloud pane shows, while no listing for it is on its way.
+    /// The site and folder the cloud pane shows, while no listing for it is on its way (and no
+    /// search is shown in its place).
     pub fn remote_shows(&self) -> Option<(SiteId, RemotePath)> {
         let pane = lock(&self.remote);
-        let remote = pane.open.as_ref().filter(|_| !pane.loading)?;
+        let remote = pane
+            .open
+            .as_ref()
+            .filter(|r| !pane.loading && r.search.is_none())?;
         Some((remote.site.id.clone(), remote.dir.clone()))
     }
 
-    /// The entries of the cloud pane named `names` (the rows selected), in the order given.
+    /// The entries of the cloud pane named `names` (the rows selected), in the order given. In a
+    /// search a row is named by its path from where the search began, and the entry found is the
+    /// match at that path.
     pub fn remote_entries(&self, names: &[String]) -> Vec<Entry> {
         let pane = lock(&self.remote);
         let Some(remote) = pane.open.as_ref() else {
             return Vec::new();
         };
+        if let Some(search) = &remote.search {
+            let by_name: HashMap<&str, &Entry> = remote
+                .entries
+                .iter()
+                .map(|entry| (search.row_name(entry), entry))
+                .collect();
+            return names
+                .iter()
+                .filter_map(|name| by_name.get(name.as_str()).map(|e| (*e).clone()))
+                .collect();
+        }
         names
             .iter()
             .filter_map(|name| remote.entries.iter().find(|entry| entry.name() == name))
@@ -575,22 +660,176 @@ impl Session {
             if remote.is_virtual(entry) {
                 copy::VIRTUAL_FOLDER_NOTE.clone_into(&mut row.modified);
             }
+            if let Some(search) = &remote.search {
+                search.row_name(entry).clone_into(&mut row.name);
+            }
         }
+        let crumbs = match &remote.search {
+            Some(search) => {
+                let mut crumbs = remote_crumbs(&site.container, &search.root);
+                crumbs.push(search.label.clone());
+                crumbs
+            }
+            None => remote_crumbs(&site.container, &remote.dir),
+        };
         RemoteView {
             version: pane.version,
             site: Some(site.id.clone()),
             rows,
-            crumbs: remote_crumbs(&site.container, &remote.dir),
+            crumbs,
             connection,
             connecting: remote.info.is_none() && remote.error.is_none(),
             connection_ok: remote.info.is_some() || remote.error.is_none(),
             endpoint: copy::endpoint(service, &site.container),
             chip: copy::chip(&site.host),
             status_right,
-            can_back: !pane.course.history.back.is_empty(),
+            // From a search, Back goes to the folder it began in.
+            can_back: !pane.course.history.back.is_empty() || remote.search.is_some(),
             can_forward: !pane.course.history.forward.is_empty(),
             loading: pane.loading,
             error: remote.error.clone(),
         }
+    }
+}
+
+// ---- Search mode, and going straight to a folder (I4 T7: search, tabs, synchronized browsing) ----
+
+impl Session {
+    /// Shows a search of the open site in the cloud pane, in place of the folder: from the root,
+    /// or (`in_folder`) from the folder shown. The rows start empty and grow with
+    /// [`Self::search_add`] and [`Self::search_view`]; `label` is the last crumb. It takes effect
+    /// as a request does (a listing on its way is given up), and the history stays as it is.
+    /// Returns the pane, the site's client and the folder to list from; `None` with no site open
+    /// (or none that could be reached), or when a later request has taken effect.
+    pub fn start_search(
+        &self,
+        ticket: Ticket,
+        in_folder: bool,
+        label: String,
+    ) -> Option<(RemoteView, Arc<dyn StorageProvider>, RemotePath)> {
+        let mut guard = lock(&self.remote);
+        let pane = &mut *guard;
+        if ticket < pane.latest {
+            return None;
+        }
+        let remote = pane.open.as_mut()?;
+        let provider = remote.provider.clone()?;
+        let root = if in_folder {
+            remote.dir.clone()
+        } else {
+            RemotePath::root()
+        };
+        remote.search = Some(Search {
+            root: root.clone(),
+            label,
+            pending: Vec::new(),
+        });
+        remote.entries.clear();
+        remote.error = None;
+        pane.course.fail();
+        pane.latest = ticket;
+        pane.loading = false;
+        // The listing on its way, if any, is given up.
+        pane.listing = None;
+        pane.version += 1;
+        Some((self.remote_view_of(pane), provider, root))
+    }
+
+    /// Matches found by search `ticket`, kept until the next [`Self::search_view`]. False once
+    /// the pane has moved on (the search can stop).
+    pub fn search_add(&self, ticket: Ticket, found: Vec<Entry>) -> bool {
+        let mut pane = lock(&self.remote);
+        if pane.latest != ticket {
+            return false;
+        }
+        match pane.open.as_mut().and_then(|r| r.search.as_mut()) {
+            Some(search) => {
+                search.pending.extend(found);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The pane with the matches search `ticket` has found so far, sorted as the pane is; `None`
+    /// once the pane has moved on.
+    pub fn search_view(&self, ticket: Ticket) -> Option<RemoteView> {
+        let mut guard = lock(&self.remote);
+        let pane = &mut *guard;
+        if pane.latest != ticket {
+            return None;
+        }
+        let (key, ascending) = pane.sort;
+        let remote = pane.open.as_mut()?;
+        let search = remote.search.as_mut()?;
+        remote.entries.append(&mut search.pending);
+        sort_remote_entries(&mut remote.entries, key, ascending);
+        pane.version += 1;
+        Some(self.remote_view_of(pane))
+    }
+
+    /// The cloud pane shows a search.
+    pub fn remote_searching(&self) -> bool {
+        lock(&self.remote)
+            .open
+            .as_ref()
+            .is_some_and(|remote| remote.search.is_some())
+    }
+
+    /// Ends the search shown: the pane lists the folder it began in again (the history stays as
+    /// it is). Does nothing without a search.
+    pub async fn end_search(
+        &self,
+        ticket: Ticket,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        let pick = |pane: &RemotePane| {
+            let remote = pane.open.as_ref()?;
+            remote.search.as_ref()?;
+            Some(remote.dir.clone())
+        };
+        self.navigate_remote(ticket, Step::Refresh, pick, started)
+            .await
+    }
+
+    /// Goes to folder `dir` of the open site (a tab's folder, the one synchronized browsing
+    /// mirrors), as opening a folder does. Nothing happens if it is the folder shown.
+    pub async fn goto_remote(
+        &self,
+        ticket: Ticket,
+        dir: RemotePath,
+        started: impl FnOnce(RemoteView) + Send,
+    ) -> RemoteView {
+        let pick = |pane: &RemotePane| {
+            let remote = pane.open.as_ref()?;
+            (remote.search.is_some() || pane.loading || remote.dir != dir).then_some(dir)
+        };
+        self.navigate_remote(ticket, Step::Go, pick, started).await
+    }
+
+    /// As [`Self::goto_remote`], for the This PC pane: `None` is the list of drives.
+    pub async fn goto_local(
+        &self,
+        ticket: Ticket,
+        dir: Option<PathBuf>,
+        started: impl FnOnce(LocalView) + Send,
+    ) -> LocalView {
+        let pick = |_: &super::local::LocalPane| Some(dir);
+        self.navigate_local(ticket, Step::Go, pick, started).await
+    }
+
+    /// The folder of the open site's folder shown named `name` (any case, if no exact match),
+    /// while no listing or search is in its place.
+    pub fn remote_child_folder(&self, name: &str) -> Option<RemotePath> {
+        let pane = lock(&self.remote);
+        let remote = pane
+            .open
+            .as_ref()
+            .filter(|r| !pane.loading && r.search.is_none())?;
+        let folders = || remote.entries.iter().filter(|entry| entry.is_folder);
+        folders()
+            .find(|entry| entry.name() == name)
+            .or_else(|| folders().find(|entry| entry.name().to_lowercase() == name.to_lowercase()))
+            .map(|entry| entry.path.clone())
     }
 }
