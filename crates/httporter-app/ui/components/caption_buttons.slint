@@ -1,6 +1,8 @@
-// The window's caption buttons (I5; T2 finishes them): Minimize, Maximize or Restore, and Close,
-// at the right end of the row that is the title bar. 46 px wide each, as tall as the row; Close
-// turns red when hovered. The glyphs are 10 px paths in the manner of Segoe Fluent Icons.
+// The window's caption buttons (I5, T2): Minimize, Maximize or Restore, and Close, at the right
+// end of the row that is the title bar (mockup `.caption`). 46 px wide each, as tall as the row;
+// Close turns red when hovered, with a white glyph. The glyphs are 10 px, 1 px strokes in the
+// manner of Segoe Fluent Icons (Windows 11: the squares have rounded corners). They dim while the
+// window is not the active one.
 //
 // Over the maximize button Windows answers `HTMAXBUTTON` (for the Windows 11 Snap Layouts
 // flyout), so the mouse messages there never reach Slint: the app tells the button it is hovered
@@ -93,7 +95,7 @@ export component CaptionButtons inherits Rectangle {
             height: 10px;
             viewbox-width: 10;
             viewbox-height: 10;
-            commands: "M 0.5 0.5 L 9.5 0.5 L 9.5 9.5 L 0.5 9.5 Z";
+            commands: "M 1.5 0.5 L 8.5 0.5 A 1 1 0 0 1 9.5 1.5 L 9.5 8.5 A 1 1 0 0 1 8.5 9.5 L 1.5 9.5 A 1 1 0 0 1 0.5 8.5 L 0.5 1.5 A 1 1 0 0 1 1.5 0.5 Z";
             stroke: parent.glyph;
             stroke-width: 1px;
         }
@@ -104,7 +106,7 @@ export component CaptionButtons inherits Rectangle {
             height: 10px;
             viewbox-width: 10;
             viewbox-height: 10;
-            commands: "M 2.5 2.5 L 2.5 0.5 L 9.5 0.5 L 9.5 7.5 L 7.5 7.5 M 0.5 2.5 L 7.5 2.5 L 7.5 9.5 L 0.5 9.5 Z";
+            commands: "M 2.5 2.5 L 2.5 1.5 A 1 1 0 0 1 3.5 0.5 L 8.5 0.5 A 1 1 0 0 1 9.5 1.5 L 9.5 6.5 A 1 1 0 0 1 8.5 7.5 L 7.5 7.5 M 1.5 2.5 L 6.5 2.5 A 1 1 0 0 1 7.5 3.5 L 7.5 8.5 A 1 1 0 0 1 6.5 9.5 L 1.5 9.5 A 1 1 0 0 1 0.5 8.5 L 0.5 3.5 A 1 1 0 0 1 1.5 2.5 Z";
             stroke: parent.glyph;
             stroke-width: 1px;
         }

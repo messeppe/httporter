@@ -153,6 +153,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     // (`transfers::install_close`).
     ui.show()?;
     slint::run_event_loop_until_quit()?;
+    // Every way out ends here (a close, Quit, the tray's last batch): where the window is, while
+    // its HWND still exists.
+    window::save_placement();
     ui.hide()?;
     // Edited files still waiting for their re-upload go first.
     if let Some(manager) = manage::manager() {

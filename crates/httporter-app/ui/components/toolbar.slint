@@ -73,6 +73,9 @@ export component Toolbar inherits Rectangle {
     callback search-submitted(string);
     callback search-cancel();
 
+    // The sidebar shows: the sidebar button reads as checked.
+    in property <bool> sidebar-visible: true;
+
     // ---- The title bar (I5, T2) ----
     // The window is maximized or active, and the app-drawn maximize button is hovered or pressed
     // (Windows reports those, see `caption_buttons.slint`).
@@ -111,11 +114,11 @@ export component Toolbar inherits Rectangle {
         background: Theme.sep;
     }
 
-    // The empty toolbar is the window's caption: a press drags the window, a double-click
-    // maximizes or restores it, a right-click opens the system menu. It lies under the controls,
-    // which keep their own presses.
+    // The empty toolbar is the window's caption: a press drags the window, a right-click opens the
+    // system menu. A double-click maximizes or restores it: the app tells the second press from a
+    // first one (`win::start_drag`), as Windows does on its own captions. It lies under the
+    // controls, which keep their own presses.
     caption-area := TouchArea {
-        double-clicked => { root.caption-toggle-maximize(); }
         pointer-event(event) => {
             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
                 root.caption-drag();
@@ -128,13 +131,16 @@ export component Toolbar inherits Rectangle {
     HorizontalLayout {
         width: parent.width - captions.width;
         padding-left: 14px;
-        padding-right: 14px;
+        // The mockup's 10 px gap and the caption buttons' 6 px margin.
+        padding-right: 16px;
         spacing: 10px;
 
         VCenter {
             ToolButton {
                 icon: Icons.sidebar;
                 label: @tr("Toggle sidebar");
+                accessible-checkable: true;
+                accessible-checked: root.sidebar-visible;
                 clicked => { root.toggle-sidebar(); }
             }
         }

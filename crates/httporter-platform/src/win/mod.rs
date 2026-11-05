@@ -20,13 +20,13 @@ mod watch;
 pub use a11y::{animations_enabled, text_scale};
 pub use clipboard::{clipboard_files, set_clipboard_text};
 pub use notify::{ensure_app_identity, notify, notify_or_flash};
-pub use pickers::{pick_file, pick_files, pick_folder, pick_save_file};
-pub use placement::{placement, visible_placement};
+pub use pickers::{pick_file, pick_files, pick_folder, pick_save_file, set_dialog_owner};
+pub use placement::{client_logical_size, default_placement, placement, visible_placement};
 pub use shell::{mono_font_family, open_default, open_url, open_with};
 pub use taskbar::{TaskbarProgress, TaskbarState, flash, is_foreground};
 pub use titlebar::{
-    CaptionEvent, CaptionRect, TitleBar, is_maximized, minimize, show_system_menu, start_drag,
-    toggle_maximize,
+    CaptionEvent, CaptionRect, TitleBar, cancel_prepared_window, is_maximized, minimize,
+    prepare_window, show_system_menu, start_drag, toggle_maximize,
 };
 pub use tray::{Tray, TrayEvent};
 pub use watch::DirWatcher;

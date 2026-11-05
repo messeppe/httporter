@@ -1,0 +1,14 @@
+[package]
+name = "httporter-icon"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Renders assets/icon/httporter.svg into the app's .ico and a 32 px PNG."
+
+# A throwaway tool run by hand when the icon changes: a workspace of its own, so that it is not
+# part of the app's (`cargo` from the repository root never builds it).
+[workspace]
+
+[dependencies]
+ico = "0.4"
+resvg = { version = "0.48", default-features = false }

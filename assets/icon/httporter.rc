@@ -1,0 +1,42 @@
+// The resources of httporter.exe: the app icon, the version information and the manifest.
+//
+// crates/httporter-app/build.rs compiles this with embed-resource. It writes version.h (from
+// CARGO_PKG_VERSION) into OUT_DIR, which rc.exe searches, and adds this folder to the search path
+// for the icon and the manifest. Icon 1 is also the window and tray icon (LoadImageW resource 1).
+
+#include "version.h"
+
+1 ICON "httporter.ico"
+
+1 VERSIONINFO
+FILEVERSION VER_MAJOR, VER_MINOR, VER_PATCH, 0
+PRODUCTVERSION VER_MAJOR, VER_MINOR, VER_PATCH, 0
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0x0
+// VOS_NT_WINDOWS32, VFT_APP
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "HTTPorter"
+            VALUE "FileVersion", VER_STRING
+            VALUE "InternalName", "httporter"
+            VALUE "LegalCopyright", "MIT OR Apache-2.0"
+            VALUE "OriginalFilename", "httporter.exe"
+            VALUE "ProductName", "HTTPorter"
+            VALUE "ProductVersion", VER_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        // U.S. English, Unicode
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+// CREATEPROCESS_MANIFEST_RESOURCE_ID, RT_MANIFEST
+1 24 "httporter.exe.manifest"

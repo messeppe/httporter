@@ -1956,6 +1956,7 @@ dependencies = [
  "dirs",
  "httporter-core",
  "keyring",
+ "raw-window-handle",
  "rfd",
  "rusqlite",
  "serde",
