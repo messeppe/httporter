@@ -251,6 +251,45 @@ pub async fn latest(client: &reqwest::Client, repo: &str) -> Result<Release, Str
 pub fn is_newer(candidate: &str, current: &str) -> bool;
 ```
 
+### 0.5 T1 as built
+Every §0 name and signature above is as written, except where noted here.
+- **Cargo:** the path dependencies' `version = "0.1.0"` became `"1.0.0"` (the workspace version). `embed-resource`
+  is in `httporter-app`'s `[build-dependencies]` only, not yet called from `build.rs` (T2). `Cargo.lock` gained
+  only `embed-resource`, `vswhom(-sys)` and `winreg` (all build-only).
+- **`CredentialKey::id()`** is the text after `HTTPorter/site/` or `HTTPorter/account/`; for `Other`, the whole key.
+  `CredentialKind` derives `Debug, Clone, Copy, PartialEq, Eq, Hash` and is re-exported from the crate root.
+  `MemoryStore::keys` returns its `HTTPorter/…` keys sorted. The test `SpyStore` forwards `keys`.
+- **`ColumnWidths`** also has `#[serde(default)]`; `WindowPlacement` has no `Default` (as written).
+- **`CaptionButtons`** (Slint) names its outputs `max-button-x/-y/-width/-height`: `max-width` / `max-height` are
+  built-in Slint properties. `Toolbar` and `AppWindow` keep the §0.3 names (`caption-max-*`). `AppWindow` raises
+  `caption-layout-changed` from `changed` handlers on the four `caption-max-*`; it is wired to a no-op, since the
+  first layout raises it.
+- **`caption-close`** (and the Settings window's `settings-caption-close`) is wired for real in T1: it dispatches
+  `WindowEvent::CloseRequested`, so it runs the window's own close handling. Minimize, maximize, drag and the
+  menu are `todo!("T2")`.
+- **Settings window:** `settings-caption-close()`, `settings-caption-drag()`, `settings-caption-menu(length,
+  length)` and `in property <bool> settings-window-active`. No minimize, maximize or layout callback. Its tray,
+  update, About and Security properties and callbacks have the same names as on `GeneralTab` / `SecurityTab`.
+  The caption buttons and the drag area sit in the tabs row for now (T2 makes the title row).
+- **`settings_tabs.slint`** now exports `Section`, `Group`, `GroupRow`, `Switch`, `Note` and `TabColumn`, so that
+  `security_tab.slint` can import them.
+- **Two hooks not in §0.4:** `window::wire_settings(&SettingsWindow)` (T2) and `system::wire_settings(&SettingsWindow)`
+  (T4). `transfers::settings_window()` calls them each time the Settings window is made, so neither track edits
+  that function. `system::wire_settings` wires the Security and General callbacks to `todo!("T4")`.
+- **`Manager`'s** `session`, `transfers`, `publisher` and `link` fields are `pub(crate)`, for the three new folders.
+- **`run_pending_reset()`** is the first line of `main()`, before the single-instance check, because it waits for
+  the old instance's mutex. It is still before the store opens.
+- **Main loop:** `ui.show()`, then `slint::run_event_loop_until_quit()`, then `ui.hide()` (what `ui.run()` did). To
+  keep closing the same, `transfers::install_close` calls `slint::quit_event_loop()` where it returns `HideWindow`.
+  T3: a hide into the tray must return `HideWindow` *without* that call.
+- **The installs:** `main.rs` gets the `Arc<Manager>` from `manage::manager()` and passes `&manager.session` to
+  `window::install`. `Theme.text-scale` / `motion` are set on the main window only. The Settings window's `Theme`
+  is T5's to set when it pushes the live values.
+- **`AppWindow.col-*-width`** default to the `Cols` global's widths (76, 128 and 96 px). Nothing binds them yet (T5).
+- **Keys:** Ctrl+, opens Settings only while `settings-available`. F6 also fires with Shift. All five are inside
+  the `!TextInputInterface.text-input-focused` block. The pane rejects Alt-modified keys, so Alt+↑ reaches the
+  scope.
+
 ---
 
 ## Tasks
