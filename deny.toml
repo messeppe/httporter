@@ -1,10 +1,20 @@
 # cargo-deny policy. Checked by tools/check.ps1 and CI:
 #   cargo deny check licenses bans
 #
-# I5 licence review: MPL-2.0 (option-ext) requires telling recipients where its
-# source is; BSL-1.0 needs its notice in the third-party licences file.
+# HTTPorter is MIT OR Apache-2.0. Every dependency (normal, build and dev) must be
+# usable under a licence on the allow list below, or under one of the per-crate
+# exceptions. cargo-deny rejects anything else, so GPL, AGPL and LGPL are errors
+# wherever they appear: a crate passes only if its expression offers another,
+# allowed option (r-efi: "MIT OR Apache-2.0 OR LGPL-2.1-or-later" passes as MIT).
+# Never add a GPL-family licence to `allow` or to an exception.
 
 [licenses]
+# Licence-check dev-dependencies (wiremock, i-slint-backend-testing, ...) and
+# build-dependencies too, not only what ships in the exe. cargo-deny leaves dev
+# out of the licence check unless told.
+include-dev = true
+include-build = true
+
 allow = [
     "MIT",
     "Apache-2.0",
@@ -18,46 +28,51 @@ allow = [
     "OFL-1.1",
 ]
 
-# Our own crates are `publish = false` and carry no licence field.
+# Our own crates are `publish = false`; their licence is the workspace's.
 private = { ignore = true }
 
 # The allow list is a policy, not an inventory: stay quiet about entries (such
 # as OFL-1.1) that no current dependency uses.
 unused-allowed-license = "allow"
 
-# Slint is offered as GPL-3.0-only OR a royalty-free / commercial licence; this
-# project takes the GPL option (spec section 16). Allowed for Slint crates only.
-# cargo-deny matches exact crate names here (no globs), so the i-slint-* family
-# is listed out; add new ones here when a Slint upgrade pulls them in.
+# Slint is offered as "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+# LicenseRef-Slint-Software-3.0". HTTPorter takes the royalty-free option, whose
+# condition is the "Made with Slint" credit (AboutSlint in About, the badge in the
+# README). It is allowed for Slint's own crates only. cargo-deny matches exact
+# crate names (no globs), so the i-slint-* family is listed out; when a Slint
+# upgrade or a new feature pulls in another one, `cargo deny check licenses`
+# names it, and it is added here.
 exceptions = [
-    { allow = ["GPL-3.0-only"], crate = "slint" },
-    { allow = ["GPL-3.0-only"], crate = "slint-build" },
-    { allow = ["GPL-3.0-only"], crate = "slint-macros" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-backend-selector" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-backend-winit" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-common" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-compiler" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-core" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-core-macros" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-renderer-femtovg" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-renderer-skia" },
-    { allow = ["GPL-3.0-only"], crate = "i-slint-renderer-software" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "slint" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "slint-build" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "slint-macros" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-backend-selector" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-backend-testing" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-backend-winit" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-common" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-compiler" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-core" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-core-macros" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-renderer-skia" },
+    { allow = ["LicenseRef-Slint-Royalty-free-2.0"], crate = "i-slint-renderer-software" },
 
-    # Other permissive / weak-copyleft crates outside the allow list; each is
-    # named so a new dependency with the same licence is still rejected.
-    # BSL-1.0, via the Slint winit backend (arboard clipboard).
+    # Other licences outside the allow list, each allowed for one named crate so a
+    # new dependency under the same licence is still reviewed first.
+    # BSL-1.0 (Boost), via the Slint winit backend's clipboard (arboard). Permissive;
+    # its text goes into THIRD-PARTY-NOTICES.txt.
     { allow = ["BSL-1.0"], crate = "clipboard-win" },
-    # BSL-1.0, via clipboard-win (Slint winit backend).
+    # BSL-1.0 (Boost), via clipboard-win.
     { allow = ["BSL-1.0"], crate = "error-code" },
-    # MPL-2.0, via dirs -> dirs-sys (httporter-platform).
+    # MPL-2.0, via dirs -> dirs-sys (httporter-platform). File-level copyleft: we
+    # ship it unmodified, and THIRD-PARTY-NOTICES.txt says where its source is.
     { allow = ["MPL-2.0"], crate = "option-ext" },
-    # Unlicense, Linux-only tray support via i-slint-core; not in the Windows build.
-    { allow = ["Unlicense"], crate = "ksni" },
 ]
 
 [bans]
-# Slint/winit pull in dozens of duplicate crate versions we cannot control;
-# "warn" prints ~4000 lines on every run, so duplicates are allowed.
-multiple-versions = "allow"
+# Slint and winit pull in duplicate versions we cannot control. They are listed as
+# warnings (the simplest path to each), never errors.
+multiple-versions = "warn"
+highlight = "simplest-path"
 wildcards = "deny"
+# Path dependencies (our crates, vendor/parley) carry no version requirement.
 allow-wildcard-paths = true
