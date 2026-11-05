@@ -339,6 +339,12 @@ export component AddSiteSheet inherits Rectangle {
     property <bool> wants-path-style: root.provider == 7;
     // The Use path-style addresses box (Other S3).
     property <bool> path-style: false;
+    // Review M12: an `http://` address to a host other than this PC (localhost, 127.x, [::1])
+    // sends the files, and requests a listener could send again, in clear text. Saving is still
+    // allowed; the sheet warns.
+    property <string> address: endpoint-field.text.replace-all(" ", "").to-lowercase();
+    property <bool> address-local: root.address == "http://localhost" || root.address.starts-with("http://localhost:") || root.address.starts-with("http://localhost/") || root.address.starts-with("http://127.") || root.address.starts-with("http://[::1]");
+    property <bool> address-in-clear: root.s3 && root.wants-address && root.address.starts-with("http://") && !root.address-local;
     // Choose… is open.
     property <bool> buckets-open: false;
     // The default button can be pressed: not while a run is going, and an account key needs a
@@ -874,6 +880,32 @@ export component AddSiteSheet inherits Rectangle {
                                     accepted => { root.submit(); }
                                 }
                                 if root.s3-errors.endpoint != "": ErrorLine { text: root.s3-errors.endpoint; }
+                                if root.address-in-clear && root.s3-errors.endpoint == "": Rectangle {
+                                    accessible-role: AccessibleRole.text;
+                                    accessible-label: @tr("Not encrypted: files and signed requests travel in clear text.");
+
+                                    HorizontalLayout {
+                                        spacing: 4px;
+
+                                        VCenter {
+                                            Image {
+                                                source: Icons.warn;
+                                                colorize: Theme.orange;
+                                                width: 12px;
+                                                height: 12px;
+                                                accessible-role: none;
+                                            }
+                                        }
+                                        Text {
+                                            text: @tr("Not encrypted: files and signed requests travel in clear text.");
+                                            color: Theme.orange;
+                                            font-size: Theme.font-small;
+                                            wrap: word-wrap;
+                                            vertical-alignment: center;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -1052,8 +1084,8 @@ export component AddSiteSheet inherits Rectangle {
 
                                     VCenter {
                                         Image {
-                                            source: Icons.lock;
-                                            colorize: Theme.green;
+                                            source: root.address-in-clear ? Icons.warn : Icons.lock;
+                                            colorize: root.address-in-clear ? Theme.orange : Theme.green;
                                             width: 14px;
                                             height: 14px;
                                             accessible-role: none;

@@ -138,6 +138,9 @@ pub struct AwsProfile {
     pub secret: String,
     /// `region` from the `config` file's section for this profile.
     pub region: Option<String>,
+    /// The profile has an `aws_session_token`: its keys are temporary (`ASIA…`), and HTTPorter's
+    /// sites have no place for the token (review M5). Import lists it as not supported.
+    pub temporary: bool,
 }
 
 // Not derived, for the same reason as `EnvImport`.
@@ -148,7 +151,19 @@ impl fmt::Debug for AwsProfile {
             .field("key_id", &self.key_id)
             .field("secret", &"<hidden>")
             .field("region", &self.region)
+            .field("temporary", &self.temporary)
             .finish()
+    }
+}
+
+/// How Import lists `profile`: "default · eu-west-1"; a profile with temporary credentials says
+/// it is not supported (review M5).
+pub fn profile_label(profile: &AwsProfile) -> String {
+    let label = copy::aws_profile_label(&profile.name, profile.region.as_deref());
+    if profile.temporary {
+        copy::aws_temporary_label(&label)
+    } else {
+        label
     }
 }
 
@@ -157,7 +172,8 @@ impl fmt::Debug for AwsProfile {
 ///
 /// The `credentials` file names a profile `[name]`; the `config` file names it `[profile name]`
 /// (`[default]` in both). A profile that `config` describes but `credentials` does not (single
-/// sign-on, a role) has no key to import and is left out. A session token is not read: it expires.
+/// sign-on, a role) has no key to import and is left out. A session token is not kept (it
+/// expires, and a site has no place for it): a profile with one is marked `temporary` (review M5).
 pub fn parse_aws_profiles(credentials: &str, config: &str) -> Vec<AwsProfile> {
     let regions: HashMap<String, String> = ini_sections(config)
         .into_iter()
@@ -180,11 +196,15 @@ pub fn parse_aws_profiles(credentials: &str, config: &str) -> Vec<AwsProfile> {
                 .remove("aws_secret_access_key")
                 .filter(|v| !v.is_empty())?;
             let region = regions.get(&name).cloned();
+            let temporary = keys
+                .remove("aws_session_token")
+                .is_some_and(|token| !token.is_empty());
             Some(AwsProfile {
                 name,
                 key_id,
                 secret,
                 region,
+                temporary,
             })
         })
         .collect()

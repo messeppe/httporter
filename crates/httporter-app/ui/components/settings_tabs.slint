@@ -1,20 +1,199 @@
-// Settings › General, Sites and Advanced (T8; mockup `Settings.dc.html`).
+// Settings › General, Sites and Advanced (I4, T8). The mockup (`Settings.dc.html`) draws the
+// Transfers tab; these tabs use its titled sections of rounded groups, one setting per row, with
+// what it does in small type under its name and its control at the right.
 //
-// T1 shells: the properties, and the note the other unbuilt tabs show.
+// Every edit applies at once, as on Transfers (the window has no OK button): a tab only draws its
+// properties and reports each edit; the app (`src/manage/settings_tabs.rs`) checks it, stores it
+// and draws the answer, with a message under the field it is about.
 
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Activation, CapsuleButton } from "buttons.slint";
+import { ErrorLine, Field, RegionPicker } from "form_controls.slint";
+import { Segmented } from "sheets.slint";
+import { VCenter } from "layout.slint";
 import { SiteSettingsData, SiteSettingsRow } from "../types.slint";
 
-// The note of a tab that is not built yet.
-component LaterNote inherits Rectangle {
-    Text {
-        text: @tr("These settings arrive in a later version.");
-        color: Theme.label2;
-        font-size: Theme.font-body;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+// The pieces below are the Transfers tab's (`settings_window.slint`), which that file keeps to
+// itself: it imports this one, so this one cannot import from it.
+
+// A titled block of rows (mockup `.sb-sec` over a `.group`).
+component Section inherits VerticalLayout {
+    in property <string> title;
+
+    spacing: 6px;
+
+    HorizontalLayout {
+        padding-left: 4px;
+
+        Text {
+            text: root.title;
+            color: Theme.label2;
+            font-size: Theme.font-small;
+            font-weight: Theme.weight-semibold;
+        }
+    }
+    @children
+}
+
+// The rounded box around the rows of a section (mockup `.group`).
+component Group inherits Rectangle {
+    background: Theme.content;
+    border-radius: Theme.radius-md;
+    border-width: 0.5px;
+    border-color: Theme.sep-strong;
+
+    VerticalLayout {
+        @children
     }
 }
+
+// One row of a group (mockup `.group-row`): what the setting is called and, in small type under
+// it, what it does; its controls at the right. `error` is a red line under the explanation.
+component GroupRow inherits Rectangle {
+    in property <string> title;
+    in property <string> help;
+    in property <string> error;
+    // The last row of a group has no line under it.
+    in property <bool> last: false;
+
+    min-height: 44px;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 12px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: root.title;
+                color: Theme.label;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+            }
+            if root.help != "": Text {
+                text: root.help;
+                color: Theme.label2;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
+            }
+            if root.error != "": ErrorLine {
+                text: root.error;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                @children
+            }
+        }
+    }
+
+    if !root.last: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.sep;
+    }
+}
+
+// On/off switch (mockup `.switch`: 38 x 22 px). Space toggles it.
+component Switch inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked: false;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback toggled(bool);
+
+    function toggle() {
+        root.checked = !root.checked;
+        root.toggled(root.checked);
+    }
+
+    width: 38px;
+    height: 22px;
+    border-radius: self.height / 2;
+    background: root.checked ? Theme.accent : Theme.chip;
+    // The off switch is outlined so that it can be seen on the white group (3:1, WCAG 1.4.11).
+    border-width: 1px;
+    border-color: root.checked ? Theme.accent : Theme.field-border;
+    forward-focus: key-focus;
+    accessible-role: switch;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.toggle(); }
+
+    Rectangle {
+        x: root.checked ? 17px : 1px;
+        y: 1px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #0000004d;
+
+        animate x { duration: 120ms; }
+    }
+
+    // Keyboard focus ring, 3 px outside.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.text == Key.Space && !event.repeat && !event.modifiers.alt) {
+                root.toggle();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.toggle(); }
+    }
+}
+
+// A note under the groups of a tab, in small type.
+component Note inherits Text {
+    color: Theme.label2;
+    font-size: Theme.font-small;
+    wrap: word-wrap;
+}
+
+// The padding and spacing of a tab's column of sections (as Transfers).
+component TabColumn inherits VerticalLayout {
+    padding-left: 24px;
+    padding-right: 24px;
+    padding-top: 20px;
+    padding-bottom: 22px;
+    spacing: 18px;
+    alignment: start;
+}
+
+// ---- General ----
 
 // Appearance, the start view, Restore tabs, Ask before previewing big files, the preview cache.
 export component GeneralTab inherits Rectangle {
@@ -28,7 +207,163 @@ export component GeneralTab inherits Rectangle {
     callback clear-preview-cache();
     callback edited();
 
-    LaterNote { }
+    ScrollView {
+        TabColumn {
+            Section {
+                title: @tr("Look");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Appearance");
+                        help: @tr("System follows the light or dark mode of Windows.");
+
+                        Segmented {
+                            options: [@tr("System"), @tr("Light"), @tr("Dark")];
+                            label: @tr("Appearance");
+                            current <=> root.appearance;
+                            selected => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Start in");
+                        help: @tr("The view the main window opens with.");
+                        last: true;
+
+                        Segmented {
+                            options: [@tr("Two panes"), @tr("Single pane")];
+                            label: @tr("Start in");
+                            current <=> root.start-view;
+                            selected => { root.edited(); }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                title: @tr("Tabs and previews");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Restore tabs at start");
+                        help: @tr("Opens the tabs and folders that were open when HTTPorter closed.");
+
+                        Switch {
+                            label: @tr("Restore tabs at start");
+                            checked <=> root.restore-tabs;
+                            toggled => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Ask before previewing files over 50 MB");
+                        help: @tr("Quick Look and the inspector download a site's file before they show it.");
+
+                        Switch {
+                            label: @tr("Ask before previewing files over 50 MB");
+                            checked <=> root.ask-big-preview;
+                            toggled => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Preview cache");
+                        help: root.preview-cache-text;
+                        last: true;
+
+                        CapsuleButton {
+                            text: @tr("Clear");
+                            clicked => { root.clear-preview-cache(); }
+                        }
+                    }
+                }
+            }
+
+            Note {
+                text: @tr("Previews and thumbnails not used for 7 days are removed at start.");
+            }
+        }
+    }
+}
+
+// ---- Sites ----
+
+// A site in the list of Settings › Sites: its name over its subtitle, a lock when it is
+// read-only. Reachable with Tab, chosen with a click, Space or Return.
+component SiteRowItem inherits Rectangle {
+    in property <SiteSettingsRow> site;
+    in property <bool> selected;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    height: 44px;
+    border-radius: 7px;
+    background: root.selected ? Theme.sel : (area.has-hover ? Theme.hover : transparent);
+    forward-focus: key-focus;
+    accessible-role: list-item;
+    accessible-label: root.site.name;
+    accessible-description: root.site.subtitle;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 1px;
+
+            Text {
+                text: root.site.name;
+                color: root.selected ? Theme.sel-text : Theme.label;
+                font-size: Theme.font-body;
+                font-weight: Theme.weight-medium;
+                overflow: elide;
+                accessible-role: none;
+            }
+            Text {
+                text: root.site.subtitle;
+                color: root.selected ? Theme.sel-text : Theme.label2;
+                font-size: Theme.font-small;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+        if root.site.read-only: VCenter {
+            Image {
+                source: Icons.lock;
+                colorize: root.selected ? Theme.sel-text : Theme.label2;
+                width: 14px;
+                height: 14px;
+                accessible-role: none;
+            }
+        }
+    }
+
+    // Keyboard focus ring, inside the list's clip.
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        clicked => { root.clicked(); }
+    }
 }
 
 // The sites (master-detail): read-only, public base URL, CDN, pre-signed expiry, the remembered
@@ -46,8 +381,247 @@ export component SitesTab inherits Rectangle {
     callback import-sites();
     in property <string> message;
 
-    LaterNote { }
+    // How long a pre-signed link lasts, in the order the app maps to seconds.
+    property <[string]> expiry-options: [@tr("15 minutes"), @tr("1 hour"), @tr("1 day"), @tr("7 days")];
+
+    // The form's controls hold their own values while the user edits (a switch, a field, a
+    // drop-down write to themselves); these follow `form` when the app changes a value in it
+    // (another site, an address it tidied), and are what `save` hands back.
+    property <bool> read-only-on;
+    property <string> url-text;
+    property <int> expiry: 1;
+    // The form as last drawn, to tell which of its values the app changed.
+    property <SiteSettingsData> drawn;
+    property <bool> has-site: root.current >= 0 && root.current < root.rows.length && root.form.id != "";
+
+    function draw-form() {
+        if (root.form.id != root.drawn.id || root.form.read-only != root.drawn.read-only) {
+            root.read-only-on = root.form.read-only;
+        }
+        if (root.form.id != root.drawn.id || root.form.public-url != root.drawn.public-url) {
+            root.url-text = root.form.public-url;
+        }
+        if (root.form.id != root.drawn.id || root.form.presign-expiry != root.drawn.presign-expiry) {
+            root.expiry = root.form.presign-expiry;
+        }
+        root.drawn = root.form;
+    }
+
+    // Hands the form, as the controls hold it now, to the app (every edit applies at once).
+    function save-now() {
+        root.save({
+            id: root.form.id,
+            read-only: root.read-only-on,
+            public-url: root.url-text,
+            presign: root.form.presign,
+            presign-expiry: root.expiry,
+            cdn: root.form.cdn,
+            upload-choice: root.form.upload-choice,
+            download-choice: root.form.download-choice,
+            error: "",
+        });
+    }
+
+    init => { root.draw-form(); }
+    changed form => { root.draw-form(); }
+
+    VerticalLayout {
+        padding-left: 24px;
+        padding-right: 24px;
+        padding-top: 20px;
+        padding-bottom: 18px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 16px;
+
+            // The sites.
+            Rectangle {
+                width: 210px;
+                background: Theme.content;
+                border-radius: Theme.radius-md;
+                border-width: 0.5px;
+                border-color: Theme.sep-strong;
+                clip: true;
+                accessible-role: list;
+                accessible-label: @tr("Sites");
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 5px;
+                        spacing: 2px;
+                        alignment: start;
+
+                        for row[index] in root.rows: SiteRowItem {
+                            site: row;
+                            selected: index == root.current;
+                            clicked => {
+                                root.current = index;
+                                root.chosen(index);
+                            }
+                        }
+                    }
+                }
+                if root.rows.length == 0: Text {
+                    x: 12px;
+                    width: parent.width - 24px;
+                    text: @tr("No sites yet. Add one in the main window, or import a file.");
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // The chosen site.
+            Rectangle {
+                horizontal-stretch: 1;
+
+                if !root.has-site: Text {
+                    text: @tr("Choose a site to see its settings.");
+                    color: Theme.label2;
+                    font-size: Theme.font-body;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                ScrollView {
+                    visible: root.has-site;
+
+                    VerticalLayout {
+                        spacing: 18px;
+                        alignment: start;
+
+                        Section {
+                            title: @tr("Access");
+
+                            Group {
+                                GroupRow {
+                                    title: @tr("Read-only");
+                                    help: @tr("Writes are disabled. Use this with a Bunny read-only password or read-only S3 keys.");
+                                    last: true;
+
+                                    Switch {
+                                        label: @tr("Read-only");
+                                        checked <=> root.read-only-on;
+                                        toggled => { root.save-now(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        Section {
+                            title: @tr("Links");
+
+                            Group {
+                                GroupRow {
+                                    title: @tr("Public base URL");
+                                    help: @tr("Where the files are served from, for Copy Public Link when no pull zone says.");
+                                    error: root.form.error;
+
+                                    VCenter {
+                                        // Applied when finished (Return, or leaving the field), not as
+                                        // it is typed.
+                                        url-field := Field {
+                                            width: 220px;
+                                            text <=> root.url-text;
+                                            placeholder: @tr("https://cdn.example.com/");
+                                            label: @tr("Public base URL");
+                                            error: root.form.error;
+                                            accepted => { root.save-now(); }
+                                            changed has-focus => {
+                                                if (!self.has-focus && root.url-text != root.form.public-url) {
+                                                    root.save-now();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if !root.form.presign: GroupRow {
+                                    title: @tr("CDN");
+                                    help: root.form.cdn;
+                                    last: true;
+                                }
+                                if root.form.presign: GroupRow {
+                                    title: @tr("Pre-signed links last");
+                                    help: @tr("What Copy Presigned Link… offers first.");
+                                    last: true;
+
+                                    RegionPicker {
+                                        width: 140px;
+                                        model: root.expiry-options;
+                                        label: @tr("Pre-signed links last");
+                                        current-index <=> root.expiry;
+                                        selected => { root.save-now(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        Section {
+                            title: @tr("When a file already exists");
+
+                            Group {
+                                GroupRow {
+                                    title: @tr("Uploads");
+                                    help: root.form.upload-choice != "" ? @tr("Remembered for this site: {}", root.form.upload-choice) : @tr("The Transfers setting applies.");
+
+                                    CapsuleButton {
+                                        text: @tr("Forget");
+                                        enabled: root.form.upload-choice != "";
+                                        clicked => { root.forget-choice(true); }
+                                    }
+                                }
+                                GroupRow {
+                                    title: @tr("Downloads");
+                                    help: root.form.download-choice != "" ? @tr("Remembered for this site: {}", root.form.download-choice) : @tr("The Transfers setting applies.");
+                                    last: true;
+
+                                    CapsuleButton {
+                                        text: @tr("Forget");
+                                        enabled: root.form.download-choice != "";
+                                        clicked => { root.forget-choice(false); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            CapsuleButton {
+                text: @tr("Export Sites…");
+                enabled: root.rows.length > 0;
+                clicked => { root.export-sites(); }
+            }
+            CapsuleButton {
+                text: @tr("Import Sites…");
+                clicked => { root.import-sites(); }
+            }
+        }
+        if root.message != "": Text {
+            text: root.message;
+            color: Theme.label;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+            accessible-label: root.message;
+            accessible-live-region: polite;
+        }
+        Note {
+            text: @tr("An exported file holds the sites, their settings and publish profiles, but no password or key: after an import, enter them in Edit Site.");
+        }
+    }
 }
+
+// ---- Advanced ----
 
 // Show Activity Log…, Open Log Folder, the checksum cache.
 export component AdvancedTab inherits Rectangle {
@@ -56,5 +630,49 @@ export component AdvancedTab inherits Rectangle {
     callback show-activity();
     callback open-log-folder();
 
-    LaterNote { }
+    ScrollView {
+        TabColumn {
+            Section {
+                title: @tr("Activity log");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Activity log");
+                        help: @tr("What HTTPorter uploaded, downloaded, deleted, moved and published, kept on this PC.");
+                        last: true;
+
+                        CapsuleButton {
+                            text: @tr("Show Activity Log…");
+                            clicked => { root.show-activity(); }
+                        }
+                        CapsuleButton {
+                            text: @tr("Open Log Folder");
+                            clicked => { root.open-log-folder(); }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                title: @tr("Checksums");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Checksum cache");
+                        help: root.hash-cache-text;
+                        last: true;
+
+                        CapsuleButton {
+                            text: @tr("Clear");
+                            clicked => { root.clear-hash-cache(); }
+                        }
+                    }
+                }
+            }
+
+            Note {
+                text: @tr("The checksum cache remembers the SHA-256 and MD5 of files on this PC, so that comparing and publishing don't read an unchanged file again. Clearing it is safe: files are read again when needed.");
+            }
+        }
+    }
 }

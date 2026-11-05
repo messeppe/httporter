@@ -34,7 +34,9 @@ use crate::add_site::{
     SiteForm, draft_for, field_blamed, show_buckets, show_form_errors, show_zones, validate,
 };
 use crate::copy;
-use crate::import::{AwsProfile, aws_draft, env_draft, read_aws_profiles, read_env_file};
+use crate::import::{
+    AwsProfile, aws_draft, env_draft, profile_label, read_aws_profiles, read_env_file,
+};
 use crate::manage::{self, Manager, Side};
 use crate::publish::{self, Publisher};
 use crate::selection::{ActivePane, Selection, ToolbarInputs, ToolbarState, toolbar_state};
@@ -1115,7 +1117,7 @@ fn start_import(ctx: &Ctx) {
         let _ = weak.upgrade_in_event_loop(move |ui| {
             let labels: Vec<SharedString> = profiles
                 .iter()
-                .map(|profile| copy::aws_profile_label(&profile.name, profile.region.as_deref()))
+                .map(profile_label)
                 .map(SharedString::from)
                 .collect();
             lock(&state).profiles = profiles;
@@ -1130,6 +1132,16 @@ fn start_import(ctx: &Ctx) {
 /// and access key ID, and its secret held here.
 fn import_profile(ctx: &Ctx, index: usize) {
     let Some(ui) = ctx.ui.upgrade() else { return };
+    // Temporary credentials can't make a site (review M5): the sheet stays, and says so.
+    let temporary = lock(&ctx.sheet_state)
+        .profiles
+        .get(index)
+        .is_some_and(|profile| profile.temporary);
+    if temporary {
+        ui.set_import_error(copy::AWS_TEMPORARY.into());
+        ui.set_import_open(true);
+        return;
+    }
     let profile = {
         let mut state = lock(&ctx.sheet_state);
         let profile = state.profiles.get(index).cloned();

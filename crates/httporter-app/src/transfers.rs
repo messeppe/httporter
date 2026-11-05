@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use httporter_core::{
-    Checksum, Direction, EngineSnapshot, EngineState, Entry, Job, JobId, Journal, ProviderError,
-    ProviderKind, RemotePath, Resolution, RetryPolicy, SiteId, SiteRecord, StorageProvider,
-    TransferSettings, with_retry,
+    Checksum, Direction, EngineSnapshot, EngineState, Entry, Job, JobId, JobKind, Journal,
+    ProviderError, ProviderKind, RemotePath, Resolution, RetryPolicy, SiteId, SiteRecord,
+    StorageProvider, TransferSettings, with_retry,
 };
 use httporter_platform::win::{self, TaskbarProgress, TaskbarState};
 use httporter_transfer::{
@@ -409,8 +409,12 @@ impl Transfers {
     }
 
     /// Where a publish's batches for `site` go: the site with the client a batch for it should
-    /// use (as [`Self::target`] picks it), or `None` when no client can be made.
+    /// use (as [`Self::target`] picks it), or `None` when no client can be made. A read-only
+    /// site (I4) gets none: every batch sent this way writes (a publish, an edit, a move).
     pub async fn batch_target(&self, site: &SiteRecord) -> Option<BatchTarget> {
+        if self.refuses_writes(site) {
+            return None;
+        }
         let provider = match self.session.remote_place() {
             Some(place) if place.site.id == site.id => self.target(place).await.provider,
             _ => self.session.connect(site).await.ok()?,
@@ -441,9 +445,20 @@ impl Transfers {
         });
     }
 
+    /// Whether `site` is read-only (Settings › Sites, I4), in which case nothing that writes may
+    /// go to it; the status line says why when it is so.
+    fn refuses_writes(&self, site: &SiteRecord) -> bool {
+        let read_only = crate::manage::settings_tabs::site_read_only(&self.session, &site.id);
+        if read_only {
+            self.link
+                .status(crate::manage::settings_tabs::read_only_refused(&site.name));
+        }
+        read_only
+    }
+
     /// Journals `jobs` as one batch for `target` and starts them. A batch the journal can't record
     /// is not started, and the status line says so; `note` (what was skipped) goes there
-    /// otherwise.
+    /// otherwise. A batch that writes to a read-only site is refused (I4).
     async fn submit(
         &self,
         target: Target,
@@ -462,6 +477,11 @@ impl Transfers {
         if self.session.site(&target.site.id).is_none() {
             self.link
                 .status(copy::transfer_site_gone(&target.site.name));
+            return;
+        }
+        if jobs.iter().any(|job| job.kind() != JobKind::Download)
+            && self.refuses_writes(&target.site)
+        {
             return;
         }
         let batch = Batch {
@@ -911,10 +931,13 @@ impl Transfers {
         affected: Affected,
         purge: Arc<dyn DeletePurge>,
     ) {
-        // Removed while it was asked about, as in `submit`.
+        // Removed while it was asked about, as in `submit`; read-only, as there too.
         if self.session.site(&target.site.id).is_none() {
             self.link
                 .status(copy::transfer_site_gone(&target.site.name));
+            return;
+        }
+        if self.refuses_writes(&target.site) {
             return;
         }
         let site = target.site.clone();
@@ -996,6 +1019,9 @@ impl Transfers {
     /// Makes the folder `name` in the cloud pane's folder. Bunny Storage keeps no empty folder:
     /// there the folder is shown, with a note, until a file put in it makes it real.
     async fn create_remote_folder(&self, place: RemotePlace, name: String) {
+        if self.refuses_writes(&place.site) {
+            return;
+        }
         let dir = place.dir.clone();
         let target = self.target(place).await;
         let path = match dir.join(&name) {
@@ -1615,6 +1641,7 @@ fn install_settings(ui: &AppWindow, transfers: &Arc<Transfers>) -> SettingsSlot 
             }
             if let Some(window) = window.as_ref() {
                 settings_view::show(window, &transfers.session.settings());
+                crate::manage::settings_tabs::shown(window);
                 let _ = window.show();
             }
         }
