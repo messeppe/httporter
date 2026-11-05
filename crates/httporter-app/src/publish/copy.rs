@@ -711,6 +711,24 @@ pub fn key_not_forgotten(reason: impl std::fmt::Display) -> String {
 //
 //
 
+/// Purge from CDN (the toolbar's, the menu's, the inspector's) found nothing to purge.
+pub const PURGE_NOTHING: &str = "Select the files or folders to purge from the CDN.";
+
+/// What the activity log says of a Purge from CDN: "3 files, 1 folder · Purged 12 URLs from the
+/// CDN." (`outcome` is [`purge_done`]'s).
+pub fn purged_what(files: usize, folders: usize, outcome: &str) -> String {
+    let files = match files {
+        1 => "1 file".to_owned(),
+        n => format!("{} files", crate::format::format_count(n as u64)),
+    };
+    let what = match folders {
+        0 => files,
+        1 => format!("{files}, 1 folder"),
+        n => format!("{files}, {} folders", crate::format::format_count(n as u64)),
+    };
+    format!("{what} · {outcome}")
+}
+
 // ---- tree, filter, Cache-Control (T9) ----
 
 /// The profile sheet's Cache-Control field on a Bunny site, which can't use it.

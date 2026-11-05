@@ -69,13 +69,14 @@ pub(crate) fn window_with_panes(local: usize, remote: usize) -> AppWindow {
     w
 }
 
-// Tab order of `window_with_panes`: sidebar toggle, the site's row, Add Site (Back, Forward,
-// Publish, Settings and the four file actions are turned off), then each pane: its list, its
-// crumbs, its Refresh button (the cloud pane's is turned off without a chosen site), then its
-// Name, Size and Modified headers.
-pub(crate) const LOCAL_LIST: usize = 4;
-pub(crate) const LOCAL_NAME_HEADER: usize = 6;
-pub(crate) const REMOTE_LIST: usize = 9;
+// Tab order of `window_with_panes`: sidebar toggle, the toolbar's Two panes, Single pane and
+// Synchronized browsing, the site's row, Add Site (Back, Forward, Compare, Publish, Settings, the
+// four file actions and Purge are turned off), then each pane: its list, its crumbs, its Refresh
+// button (the cloud pane's is turned off without a chosen site), then its Name, Size and Modified
+// headers.
+pub(crate) const LOCAL_LIST: usize = 7;
+pub(crate) const LOCAL_NAME_HEADER: usize = 9;
+pub(crate) const REMOTE_LIST: usize = 12;
 
 fn list_items(w: &impl ComponentHandle) -> Vec<ElementHandle> {
     ElementQuery::from_root(w)

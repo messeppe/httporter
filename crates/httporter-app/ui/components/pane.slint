@@ -21,6 +21,10 @@
 // come up before it narrows the selection, so that a whole selection can be dragged. Files from
 // Explorer, or from the other pane, over this one light it up (`drop-hover`), and a folder row
 // under them too (`drop-row`). Ctrl+V in the cloud pane asks to paste.
+//
+// Grid (`grid`, the inspector view's Thumbnails): the same rows as tiles (PaneTile) with their
+// `thumb`, without the column headers. The arrows move item by item and line by line; pressing
+// below the last line clears the selection; a drop goes into the folder shown.
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
@@ -38,6 +42,17 @@ global Cols {
     out property <length> status: 96px;
     out property <length> size: 76px;
     out property <length> modified: 128px;
+}
+
+// The thumbnail grid (I4: the inspector view's Thumbnails layout): 120 px tiles, as many to a line
+// as fit after `pad` on each side. src/manage/thumbs.rs works out which tiles are in view from
+// the same sizes (TILE_WIDTH, TILE_HEIGHT, GRID_PAD).
+global Grid {
+    out property <length> tile-w: 120px;
+    out property <length> tile-h: 132px;
+    out property <length> pad: 4px;
+    // The thumbnail's square inside a tile, and the name's two lines under it.
+    out property <length> thumb: 88px;
 }
 
 // One breadcrumb that goes to its folder when pressed (mockup `.crumbs`), in the secondary text
@@ -434,6 +449,167 @@ component PaneRow inherits Rectangle {
     }
 }
 
+// One file or folder of the grid (Finder's icon view): its thumbnail (the app sets the row's
+// `thumb` for an image) or its kind's icon on a rounded square, and its name under it, two lines
+// at most. The selected tile's square is shaded and its name sits on the accent colour. Pointer
+// and drag behaviour are PaneRow's.
+component PaneTile inherits Rectangle {
+    in property <FileRow> item;
+    in property <int> index;
+    in property <int> count;
+    in property <bool> drop-target: false;
+    in property <bool> drag-ok: false;
+    callback pressed(bool /* ctrl */, bool /* shift */);
+    callback held();
+    callback context-pressed(Point);
+    callback opened();
+    callback drag-moved(Point);
+    callback drag-ended(Point);
+    callback drag-cancelled();
+
+    property <bool> lit: root.item.selected && !root.drop-target;
+    property <string> kind-label: root.item.kind == FileKind.code ? @tr("code file") : root.item.kind == FileKind.image ? @tr("image") : @tr("document");
+    property <image> kind-icon: root.item.kind == FileKind.folder ? Icons.folder : root.item.kind == FileKind.code ? Icons.code : root.item.kind == FileKind.image ? Icons.image : Icons.doc;
+    property <color> kind-color: root.item.kind == FileKind.folder ? Theme.folder : root.item.kind == FileKind.image ? Theme.green : Theme.label2;
+
+    width: Grid.tile-w;
+    height: Grid.tile-h;
+    accessible-role: list-item;
+    accessible-label: root.item.folder ? @tr("{}, folder, modified {}", root.item.name, root.item.modified) : @tr("{}, {}, {}, modified {}", root.item.name, root.kind-label, root.item.size, root.item.modified);
+    accessible-item-selectable: true;
+    accessible-item-selected: root.item.selected;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+    accessible-action-default => { root.opened(); }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 6px;
+        width: Grid.thumb;
+        height: Grid.thumb;
+        border-radius: 8px;
+        background: root.drop-target ? Theme.accent-soft : (root.item.selected ? Theme.sel-quiet : transparent);
+        border-width: root.drop-target ? 2px : 0px;
+        border-color: Theme.accent;
+
+        if root.item.thumb.width > 0: Image {
+            x: 4px;
+            y: 4px;
+            width: parent.width - 8px;
+            height: parent.height - 8px;
+            source: root.item.thumb;
+            image-fit: contain;
+            accessible-role: none;
+        }
+        if root.item.thumb.width == 0: Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 48px;
+            height: 48px;
+            source: root.kind-icon;
+            colorize: root.kind-color;
+            accessible-role: none;
+        }
+    }
+
+    Rectangle {
+        x: 4px;
+        y: Grid.thumb + 10px;
+        width: parent.width - 8px;
+        height: parent.height - self.y - 2px;
+        border-radius: 5px;
+        background: root.lit ? Theme.sel : transparent;
+
+        Text {
+            x: 4px;
+            y: 1px;
+            width: parent.width - 8px;
+            height: parent.height - 2px;
+            text: root.item.name;
+            color: root.lit ? Theme.sel-text : Theme.label;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: top;
+            wrap: char-wrap;
+            overflow: elide;
+            accessible-role: none;
+        }
+    }
+
+    // As PaneRow's: a press selects (or waits for the button to come up on a selected tile, so
+    // that the selection can be dragged), 4 px of movement starts a drag, the right button opens
+    // the menu and a double click opens the item.
+    area := TouchArea {
+        property <bool> armed: false;
+        property <bool> dragging: false;
+        property <bool> owed: false;
+        property <length> press-x;
+        property <length> press-y;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                if (event.button == PointerEventButton.left) {
+                    self.press-x = self.absolute-position.x + self.mouse-x;
+                    self.press-y = self.absolute-position.y + self.mouse-y;
+                    self.armed = true;
+                    self.dragging = false;
+                    if (root.item.selected && !event.modifiers.control && !event.modifiers.shift) {
+                        self.owed = true;
+                        root.held();
+                    } else {
+                        self.owed = false;
+                        root.pressed(event.modifiers.control, event.modifiers.shift);
+                    }
+                } else if (event.button == PointerEventButton.right) {
+                    root.context-pressed({
+                        x: area.absolute-position.x + area.mouse-x,
+                        y: area.absolute-position.y + area.mouse-y,
+                    });
+                }
+            } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                let was-dragging = self.dragging;
+                let was-owed = self.owed;
+                self.armed = false;
+                self.dragging = false;
+                self.owed = false;
+                if (was-dragging) {
+                    root.drag-ended({
+                        x: self.absolute-position.x + self.mouse-x,
+                        y: self.absolute-position.y + self.mouse-y,
+                    });
+                } else if (was-owed) {
+                    root.pressed(false, false);
+                }
+            } else if (event.kind == PointerEventKind.cancel) {
+                let was-dragging = self.dragging;
+                self.armed = false;
+                self.dragging = false;
+                self.owed = false;
+                if (was-dragging) {
+                    root.drag-cancelled();
+                }
+            }
+        }
+        moved => {
+            if (self.armed && root.drag-ok) {
+                let x = self.absolute-position.x + self.mouse-x;
+                let y = self.absolute-position.y + self.mouse-y;
+                if (!self.dragging) {
+                    let dx = (x - self.press-x) / 1px;
+                    let dy = (y - self.press-y) / 1px;
+                    if (Math.sqrt(dx * dx + dy * dy) >= 4) {
+                        self.dragging = true;
+                    }
+                }
+                if (self.dragging) {
+                    root.drag-moved({ x: x, y: y });
+                }
+            }
+        }
+        double-clicked => { root.opened(); }
+    }
+}
+
 // A pane of files: "This PC" on the left, the cloud site on the right.
 export component Pane inherits Rectangle {
     in property <string> title;
@@ -529,16 +705,24 @@ export component Pane inherits Rectangle {
 
     // Where the pane and its list are in the window, for hit-testing a dragged file's position
     // (src/drop_hook.rs reads it for the files from Explorer, the window for its own drag).
+    // In the grid, `row-height` and `scroll-y` are the grid's lines (for src/manage/thumbs.rs),
+    // and `rows` is 0: a drop lands in the folder shown rather than on a tile.
     out property <PaneBounds> bounds: {
         x: root.absolute-position.x,
         y: root.absolute-position.y,
         width: root.width,
         height: root.height,
         list-top: list-area.absolute-position.y,
-        row-height: Theme.row-height,
-        scroll-y: -list.content-y,
-        rows: root.rows.length,
+        row-height: root.grid ? Grid.tile-h : Theme.row-height,
+        scroll-y: root.grid ? -grid-list.content-y : -list.content-y,
+        rows: root.grid ? 0 : root.rows.length,
     };
+
+    // The grid's tiles to a line, and its lines.
+    property <int> grid-cols: Math.max(1, Math.floor((list-area.width - 2 * Grid.pad) / Grid.tile-w));
+    property <int> grid-lines: Math.ceil(root.rows.length / root.grid-cols);
+    // The tiles' lines that fit in view, for PageUp and PageDown in the grid.
+    property <int> grid-page: Math.max(1, Math.floor(grid-list.visible-height / Grid.tile-h));
 
     property <bool> keyboard-focus: false;
     // `loading` for 200 ms: only then does the header show the "Loading…" mark.
@@ -557,9 +741,10 @@ export component Pane inherits Rectangle {
 
     // The folder row under the height y of the window, or -1 when that is over a file, the empty
     // space below the rows, or not the list.
+    // In the grid there is none: a drop goes into the folder shown.
     public pure function folder-at(y: length) -> int {
         let row = Math.floor((y - list-area.absolute-position.y - list.content-y) / Theme.row-height);
-        return y >= list-area.absolute-position.y && row >= 0 && row < root.rows.length && root.rows[row].folder ? row : -1;
+        return !root.grid && y >= list-area.absolute-position.y && row >= 0 && row < root.rows.length && root.rows[row].folder ? row : -1;
     }
 
     forward-focus: key-focus;
@@ -622,6 +807,10 @@ export component Pane inherits Rectangle {
     // Scroll so that the selected row is fully in view; with no selection, back to the top. Does
     // nothing before the list has been laid out (its visible height is 0 then).
     function reveal() {
+        if (root.grid) {
+            root.reveal-tile();
+            return;
+        }
         if (list.visible-height <= 0px) {
             return;
         }
@@ -642,7 +831,36 @@ export component Pane inherits Rectangle {
         }
     }
 
+    // As `reveal`, in the grid: the line of the selected tile.
+    function reveal-tile() {
+        if (grid-list.visible-height <= 0px) {
+            return;
+        }
+        if (root.selected < 0) {
+            grid-list.content-y = 0px;
+        } else if (root.selected < root.rows.length) {
+            let top = Math.floor(root.selected / root.grid-cols) * Grid.tile-h;
+            if (top < -grid-list.content-y) {
+                grid-list.content-y = -top;
+            } else if (top + Grid.tile-h > -grid-list.content-y + grid-list.visible-height) {
+                grid-list.content-y = grid-list.visible-height - top - Grid.tile-h;
+            }
+        }
+    }
+
+    // The keyboard moves `by` items in the grid (a line is `grid-cols`); with nothing selected
+    // it lands on the first item, or the last going back.
+    function step(by: int, extend: bool) {
+        root.keyboard-focus = true;
+        if (root.selected < 0) {
+            root.move-to(by > 0 ? 0 : root.rows.length - 1, extend);
+        } else {
+            root.move-to(root.selected + by, extend);
+        }
+    }
+
     changed selected => { root.reveal(); }
+    changed grid => { root.reveal(); }
 
     // The mark appears 200 ms into a listing and goes with it. The timer runs while `loading`,
     // so a listing that is in sooner never shows it.
@@ -680,7 +898,7 @@ export component Pane inherits Rectangle {
                 root.keyboard-focus = true;
                 root.show-menu(root.selected, {
                     x: 48px,
-                    y: root.selected < 0 ? 70px : Math.max(63px, Math.min(card.height - 4px, 63px + list.content-y + (root.selected + 0.5) * Theme.row-height)),
+                    y: root.selected < 0 || root.grid ? 70px : Math.max(63px, Math.min(card.height - 4px, 63px + list.content-y + (root.selected + 0.5) * Theme.row-height)),
                 });
                 return accept;
             }
@@ -693,6 +911,33 @@ export component Pane inherits Rectangle {
             }
             if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                 return reject;
+            }
+            // The grid: Left and Right go item by item, Up and Down line by line.
+            if (root.grid) {
+                if (event.text == Key.RightArrow) {
+                    root.step(1, event.modifiers.shift);
+                    return accept;
+                }
+                if (event.text == Key.LeftArrow) {
+                    root.step(-1, event.modifiers.shift);
+                    return accept;
+                }
+                if (event.text == Key.DownArrow) {
+                    root.step(root.grid-cols, event.modifiers.shift);
+                    return accept;
+                }
+                if (event.text == Key.UpArrow) {
+                    root.step(-root.grid-cols, event.modifiers.shift);
+                    return accept;
+                }
+                if (event.text == Key.PageDown) {
+                    root.step(Math.max(1, root.grid-page - 1) * root.grid-cols, event.modifiers.shift);
+                    return accept;
+                }
+                if (event.text == Key.PageUp) {
+                    root.step(-Math.max(1, root.grid-page - 1) * root.grid-cols, event.modifiers.shift);
+                    return accept;
+                }
             }
             if (event.text == Key.DownArrow) {
                 root.keyboard-focus = true;
@@ -1026,8 +1271,8 @@ export component Pane inherits Rectangle {
                     }
                 }
 
-                // Column headers (mockup `.cols`).
-                Rectangle {
+                // Column headers (mockup `.cols`); the grid has none (it keeps the list's order).
+                if !root.grid: Rectangle {
                     height: 26px;
 
                     HorizontalLayout {
@@ -1086,6 +1331,7 @@ export component Pane inherits Rectangle {
                         y: -2px;
                         width: parent.width + 4px;
                         height: parent.height + 4px;
+                        visible: !root.grid;
                         accessible-label: @tr("Files in {}", root.title);
                         accessible-item-count: root.rows.length;
 
@@ -1116,6 +1362,48 @@ export component Pane inherits Rectangle {
                         }
                     }
 
+                    // The grid: one line of tiles per item of the list view, so that only the
+                    // lines in view are made.
+                    grid-list := ListView {
+                        x: -2px;
+                        y: -2px;
+                        width: parent.width + 4px;
+                        height: parent.height + 4px;
+                        visible: root.grid;
+                        accessible-label: @tr("Files in {}", root.title);
+                        accessible-item-count: root.rows.length;
+
+                        for line in root.grid ? root.grid-lines : 0: Rectangle {
+                            height: Grid.tile-h;
+
+                            for column in Math.min(root.grid-cols, root.rows.length - line * root.grid-cols): PaneTile {
+                                property <int> at: line * root.grid-cols + column;
+
+                                // The lines are centred in the pane.
+                                x: Math.max(Grid.pad, (parent.width - root.grid-cols * Grid.tile-w) / 2) + column * Grid.tile-w;
+                                y: 0px;
+                                item: root.rows[self.at];
+                                index: self.at;
+                                count: root.rows.length;
+                                drop-target: root.drop-hover && self.at == root.drop-row;
+                                drag-ok: root.can-drag;
+                                pressed(ctrl, shift) => { root.pick(self.at, ctrl, shift); }
+                                held => {
+                                    root.keyboard-focus = false;
+                                    key-focus.focus();
+                                }
+                                drag-moved(point) => { root.drag-moved(point); }
+                                drag-ended(point) => { root.drag-ended(point); }
+                                drag-cancelled => { root.drag-cancelled(); }
+                                context-pressed(point) => { root.row-menu(self.at, point); }
+                                opened => {
+                                    root.pick(self.at, false, false);
+                                    root.open(self.at);
+                                }
+                            }
+                        }
+                    }
+
                     // The empty space below the last row. Pressing there clears the selection (Ctrl
                     // keeps it) and dragging draws the rubber band, which selects the rows it crosses.
                     // A full list has no empty space, so no band.
@@ -1129,7 +1417,9 @@ export component Pane inherits Rectangle {
                         property <length> now-y;
 
                         x: 0px;
-                        y: Math.max(0px, root.rows.length * Theme.row-height + list.content-y);
+                        // In the grid: below its last line, where a press only clears the
+                        // selection (no band: tiles are not rows).
+                        y: root.grid ? Math.max(0px, root.grid-lines * Grid.tile-h + grid-list.content-y) : Math.max(0px, root.rows.length * Theme.row-height + list.content-y);
                         width: parent.width;
                         height: Math.max(0px, parent.height - self.y);
 
@@ -1148,7 +1438,11 @@ export component Pane inherits Rectangle {
                         }
 
                         pointer-event(event) => {
-                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            if (root.grid && event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                root.keyboard-focus = false;
+                                key-focus.focus();
+                                root.band-select(-1, -1, event.modifiers.control);
+                            } else if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
                                 self.banding = true;
                                 self.additive = event.modifiers.control;
                                 self.start-x = self.x + self.mouse-x;

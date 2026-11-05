@@ -252,8 +252,9 @@ fn the_sheet_is_closed_until_asked_for() {
 #[test]
 fn the_sidebar_button_opens_the_sheet_and_still_tells_the_app() {
     let b = bed();
-    // Toggle, two site rows, then Add Site.
-    b.tab(4);
+    // Toggle, the toolbar's View group (Two panes, Single pane, Synchronized browsing), two site
+    // rows, then Add Site.
+    b.tab(7);
     b.tap(Key::Return);
     assert!(b.w.get_add_site_open() && b.is_open());
     assert_eq!(b.told()[0], "add-site");
@@ -281,7 +282,7 @@ fn opening_puts_the_focus_in_the_storage_zone_field() {
 #[test]
 fn opening_from_the_keyboard_puts_the_focus_in_the_storage_zone_field_too() {
     let b = bed();
-    b.tab(4);
+    b.tab(7);
     b.tap(Key::Return);
     b.type_text("zone-b");
     assert_eq!(b.value("Storage zone"), "zone-b");
@@ -369,7 +370,7 @@ fn the_cancel_button_cancels_and_closes() {
 #[test]
 fn the_focus_goes_back_to_add_site_when_the_sheet_closes() {
     let b = bed();
-    b.tab(4);
+    b.tab(7);
     b.tap(Key::Return);
     b.tap(Key::Escape);
     slint::platform::update_timers_and_animations();

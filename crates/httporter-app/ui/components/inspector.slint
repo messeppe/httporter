@@ -1,10 +1,270 @@
-// The inspector (T5; mockup `Inspector.dc.html`): 300 px beside the single pane in view-mode 1,
-// with the preview, the metadata, the links with their copy buttons and the actions.
+// The inspector (mockup `Inspector.dc.html`): 300 px beside the single pane in view-mode 1, with
+// the preview, the name and kind, Quick Look / Download / Delete, the metadata, the links with
+// their copy buttons and Purge from CDN.
 //
-// T1 shell: the properties and an empty card.
+// What the app fills in (`InspectorData`):
+// - `shown` while something is selected; without it the card says "No Selection";
+// - `multi` ("3 items · 1.2 MB") in place of one item's name and details;
+// - `storage-note` for what is on a site: the links (one item) and Purge show then, and Download
+//   may be pressed;
+// - a metadata row whose value is empty is left out; `busy` while some of it is on its way.
 
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
 import { InspectorData } from "../types.slint";
+import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
+import { VCenter } from "layout.slint";
+
+// One line of the metadata (mockup: a 96 px label column, then the value). A mono value wraps
+// anywhere: checksums and content types have no spaces to wrap at.
+component InfoRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> mono: false;
+    in property <bool> strong: false;
+    in property <color> value-color: Theme.label;
+
+    accessible-role: AccessibleRole.text;
+    accessible-label: @tr("{}: {}", root.label, root.value);
+
+    HorizontalLayout {
+        spacing: 10px;
+
+        Text {
+            width: 96px;
+            text: root.label;
+            color: Theme.label2;
+            font-size: 12px;
+            vertical-alignment: top;
+            accessible-role: none;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.value;
+            color: root.value-color;
+            font-family: root.mono ? Theme.font-mono : Theme.font-family;
+            font-size: root.mono ? Theme.font-small : 12px;
+            font-weight: root.strong ? Theme.weight-semibold : 400;
+            wrap: root.mono ? TextWrap.char-wrap : TextWrap.word-wrap;
+            vertical-alignment: top;
+            accessible-role: none;
+        }
+    }
+}
+
+// A link and what it is (mockup `.group-row`), with a button that copies it. The link (or, when
+// there is none, the note in its place) sits straight in the row's HorizontalLayout, so that the
+// row grows with the lines it wraps to.
+component LinkRow inherits Rectangle {
+    in property <image> icon;
+    in property <color> icon-color;
+    in property <string> url;
+    in property <string> note;
+    in property <string> copy-label;
+    callback copy();
+
+    VerticalLayout {
+        padding-left: 12px;
+        padding-right: 6px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 2px;
+
+        HorizontalLayout {
+            spacing: 10px;
+
+            VerticalLayout {
+                alignment: start;
+                padding-top: 1px;
+
+                Image {
+                    source: root.icon;
+                    colorize: root.icon-color;
+                    width: 16px;
+                    height: 16px;
+                    accessible-role: none;
+                }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: root.url != "" ? root.url : root.note;
+                color: root.url != "" ? Theme.label : Theme.label2;
+                font-family: root.url != "" ? Theme.font-mono : Theme.font-family;
+                font-size: Theme.font-small;
+                wrap: root.url != "" ? TextWrap.char-wrap : TextWrap.word-wrap;
+                vertical-alignment: top;
+            }
+            if root.url != "": VCenter {
+                ToolButton {
+                    icon: Icons.copy;
+                    label: root.copy-label;
+                    description: root.url;
+                    clicked => { root.copy(); }
+                }
+            }
+        }
+        if root.url != "": HorizontalLayout {
+            padding-left: 26px;
+
+            Text {
+                text: root.note;
+                color: Theme.label2;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// Quick Look and Download (mockup `.btn` with an icon): CapsuleButton's look, sharing the row's
+// width, the label cut short rather than pushing the panel wider. Reachable with Tab, activated
+// with Space or Return.
+component PanelButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    height: 28px;
+    min-width: 60px;
+    horizontal-stretch: 1;
+    border-radius: self.height / 2;
+    background: Theme.control;
+    border-width: 1px;
+    border-color: Theme.field-border;
+    opacity: root.enabled ? 1 : 0.45;
+    forward-focus: key-focus;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 5px;
+        alignment: center;
+
+        VCenter {
+            Image {
+                source: root.icon;
+                colorize: Theme.label;
+                width: 16px;
+                height: 16px;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            overflow: elide;
+            min-width: 0px;
+            accessible-role: none;
+        }
+    }
+
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && Activation.triggers(event)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// The icon-only Delete button (mockup `.btn.destructive` with the trash icon): a capsule like
+// CapsuleButton, its icon in red. Reachable with Tab, activated with Space or Return.
+component DeleteButton inherits Rectangle {
+    in property <bool> enabled: true;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    width: 36px;
+    height: 28px;
+    border-radius: self.height / 2;
+    background: Theme.control;
+    border-width: 1px;
+    border-color: Theme.field-border;
+    opacity: root.enabled ? 1 : 0.45;
+    forward-focus: key-focus;
+    accessible-role: button;
+    accessible-label: @tr("Delete");
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    Image {
+        source: Icons.trash;
+        colorize: Theme.red;
+        width: 16px;
+        height: 16px;
+        accessible-role: none;
+    }
+
+    // Focus ring, 3 px outside the capsule (as on the other buttons).
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && Activation.triggers(event)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
 
 export component Inspector inherits Rectangle {
     in property <InspectorData> data;
@@ -17,10 +277,235 @@ export component Inspector inherits Rectangle {
     callback copy(int);
     callback purge();
 
+    // What is shown is on a site (see the top of the file).
+    property <bool> remote: root.data.storage-note != "";
+    // One item, rather than a summary of several.
+    property <bool> one: root.data.shown && root.data.multi == "";
+    property <bool> has-preview: root.data.is-image && root.image.width > 0;
+    // The words the app writes for "Matches local" (manage/copy.rs: MATCHES_YES, MATCHES_NO),
+    // for their colour, and the kind it writes for a folder (FOLDER_KIND), for its icon.
+    property <bool> matches-yes: root.data.matches == @tr("Yes · same checksum");
+    property <bool> matches-no: root.data.matches == @tr("No · different");
+    property <bool> folder: root.one && root.data.kind-text == @tr("Folder");
+
     background: Theme.content;
     border-radius: Theme.radius-md;
     border-width: 0.5px;
     border-color: Theme.sep-strong;
+    clip: true;
     accessible-role: region;
     accessible-label: @tr("Inspector");
+
+    // Nothing selected (as Finder's inspector says).
+    if !root.data.shown: VerticalLayout {
+        alignment: center;
+        padding: 20px;
+        spacing: 4px;
+
+        Text {
+            text: @tr("No Selection");
+            color: Theme.label3;
+            font-size: Theme.font-title;
+            font-weight: Theme.weight-semibold;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("Select a file to see its preview, details and links.");
+            color: Theme.label3;
+            font-size: 12px;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+
+    // The details scroll when they are taller than the panel; they never make it wider.
+    if root.data.shown: scroll := ScrollView {
+        content-width: self.visible-width;
+        content-height: details.preferred-height;
+
+        details := VerticalLayout {
+            width: scroll.visible-width;
+            alignment: start;
+            padding: 14px;
+            // Clear of the scroll bar, which is drawn over the content.
+            padding-right: 16px;
+            spacing: 14px;
+
+            // The preview (mockup: 4:3, rounded, on the chip colour): the image, or the kind's
+            // icon, large.
+            Rectangle {
+                height: (root.width - 30px) * 3 / 4;
+                border-radius: 10px;
+                background: Theme.chip;
+                clip: true;
+
+                if root.has-preview: Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.image;
+                    image-fit: contain;
+                    accessible-role: AccessibleRole.image;
+                    accessible-label: @tr("Preview of {}", root.data.name);
+                }
+                if !root.has-preview: VerticalLayout {
+                    alignment: center;
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        alignment: center;
+
+                        Image {
+                            source: root.folder ? Icons.folder : (root.data.is-image ? Icons.image : Icons.doc);
+                            colorize: root.folder ? Theme.folder : (root.data.is-image ? Theme.green : Theme.label2);
+                            width: 48px;
+                            height: 48px;
+                            accessible-role: none;
+                        }
+                    }
+                    if root.data.busy && root.data.is-image: Text {
+                        text: @tr("Loading preview…");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // The name, and "JPEG image · 2048 × 1536 · 211.6 KB"; or "3 items · 1.2 MB".
+            VerticalLayout {
+                spacing: 2px;
+
+                Text {
+                    text: root.one ? root.data.name : root.data.multi;
+                    color: Theme.label;
+                    font-size: Theme.font-title;
+                    font-weight: Theme.weight-semibold;
+                    wrap: char-wrap;
+                }
+                if root.one && root.data.kind-text != "": Text {
+                    text: root.data.kind-text;
+                    color: Theme.label2;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+
+            // Quick Look, Download, Delete.
+            HorizontalLayout {
+                spacing: 6px;
+
+                PanelButton {
+                    text: @tr("Quick Look");
+                    icon: Icons.eye;
+                    clicked => { root.quick-look(); }
+                }
+                PanelButton {
+                    text: @tr("Download");
+                    icon: Icons.down;
+                    enabled: root.remote;
+                    clicked => { root.download(); }
+                }
+                DeleteButton {
+                    enabled: root.data.can-write;
+                    clicked => { root.delete(); }
+                }
+            }
+
+            // The metadata (mockup: label column, then the value).
+            if root.one: Rectangle {
+                height: 1px;
+                background: Theme.sep;
+            }
+            if root.one: VerticalLayout {
+                spacing: 6px;
+
+                if root.data.modified != "": InfoRow {
+                    label: @tr("Modified");
+                    value: root.data.modified;
+                }
+                if root.data.created != "": InfoRow {
+                    label: @tr("Created");
+                    value: root.data.created;
+                }
+                if root.data.content-type != "": InfoRow {
+                    label: @tr("Content type");
+                    value: root.data.content-type;
+                    mono: true;
+                }
+                if root.data.regions != "": InfoRow {
+                    label: @tr("Replicated");
+                    value: root.data.regions;
+                }
+                if root.data.checksum != "": InfoRow {
+                    label: root.data.checksum-label;
+                    value: root.data.checksum;
+                    mono: true;
+                }
+                if root.data.matches != "": InfoRow {
+                    label: @tr("Matches local");
+                    value: root.data.matches;
+                    strong: root.matches-yes || root.matches-no;
+                    value-color: root.matches-yes ? Theme.green : (root.matches-no ? Theme.red : Theme.label);
+                }
+            }
+
+            // The links, each with its copy button, and Purge from CDN.
+            if root.remote: Rectangle {
+                height: 1px;
+                background: Theme.sep;
+            }
+            if root.remote: VerticalLayout {
+                spacing: 8px;
+
+                if root.one: Text {
+                    text: @tr("Links");
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    font-weight: Theme.weight-semibold;
+                }
+                // Mockup `.group`.
+                if root.one: Rectangle {
+                    background: Theme.content;
+                    border-radius: Theme.radius-sm + 2px;
+                    border-width: 0.5px;
+                    border-color: Theme.sep-strong;
+
+                    VerticalLayout {
+                        LinkRow {
+                            icon: Icons.globe;
+                            icon-color: Theme.accent-text;
+                            url: root.data.public-url;
+                            note: root.data.public-note;
+                            copy-label: @tr("Copy public link");
+                            copy => { root.copy(0); }
+                        }
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.sep;
+                        }
+                        LinkRow {
+                            icon: Icons.lock;
+                            icon-color: Theme.label2;
+                            url: root.data.storage-url;
+                            note: root.data.storage-note;
+                            copy-label: @tr("Copy storage URL");
+                            copy => { root.copy(1); }
+                        }
+                    }
+                }
+                CapsuleButton {
+                    text: @tr("Purge from CDN");
+                    icon: Icons.purge;
+                    enabled: root.data.can-purge;
+                    clicked => { root.purge(); }
+                }
+                if root.data.purge-note != "": Text {
+                    text: root.data.purge-note;
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
 }
