@@ -258,16 +258,19 @@ async fn copy_on_server(
 ) -> Vec<RemotePath> {
     let provider = &*target.provider;
     let total = plan.items.len() as u64;
-    let mut copies = stream::iter(&plan.items)
-        .map(|item| async move { (item, provider.copy(&item.from, &item.to).await) })
+    // Owned items, so the stream's closure has no borrowed argument: a spawned `Send` future
+    // that takes one fails rustc's higher-ranked lifetime check.
+    let mut copies = stream::iter(plan.items.iter().cloned())
+        .map(|item| async move {
+            let result = provider.copy(&item.from, &item.to).await;
+            (item, result)
+        })
         .buffer_unordered(COPIES_AT_ONCE);
     let mut copied = Vec::new();
     while let Some((item, result)) = copies.next().await {
         match result {
-            Ok(()) => copied.push(item.to.clone()),
-            Err(error) => outcome
-                .failed
-                .push((item.from.clone(), engine.describe(&error))),
+            Ok(()) => copied.push(item.to),
+            Err(error) => outcome.failed.push((item.from, engine.describe(&error))),
         }
         on_phase(MovePhase::Copying {
             done: copied.len() as u64,
