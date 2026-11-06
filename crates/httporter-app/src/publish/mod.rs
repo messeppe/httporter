@@ -66,6 +66,8 @@ pub struct Publisher {
     compare: Mutex<compare_view::CompareState>,
     sheet: Mutex<sheet_view::SheetState>,
     profile: Mutex<profile_view::ProfileState>,
+    /// I6 (T4): the watched profiles and their notes.
+    watch: Mutex<watch::WatchState>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -84,6 +86,7 @@ impl Publisher {
             compare: Mutex::default(),
             sheet: Mutex::default(),
             profile: Mutex::default(),
+            watch: Mutex::default(),
         })
     }
 
