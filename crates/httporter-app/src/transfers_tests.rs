@@ -1086,7 +1086,7 @@ fn skipped_items_are_said_with_the_first_and_why() {
             (PathBuf::from(r"C:\site\b"), "gone".into()),
         ])
         .as_deref(),
-        Some("2 items were skipped. a: gone")
+        Some("2 items were skipped. a: Gone.")
     );
 }
 
