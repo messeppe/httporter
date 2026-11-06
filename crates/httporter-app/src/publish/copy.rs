@@ -750,6 +750,91 @@ pub const CACHE_CONTROL_BUNNY: &str = "Bunny sets caching in the pull zone.";
 /// A Cache-Control value that can't be sent as a header.
 pub const CACHE_CONTROL_INVALID: &str = "The Cache-Control header can hold only plain characters on one line, such as public, max-age=3600.";
 
+// ---- headless publish and its lock (I6 T2) ----
+
+/// Publish (the sheet, Retry) found another publish of the profile running: from the command
+/// line, a schedule or the watch folder.
+pub fn publish_busy(profile: &str) -> String {
+    format!(
+        "“{profile}” is being published already (from the command line, a schedule or the watch \
+         folder). Try again when that ends."
+    )
+}
+
+/// The activity log's words for a publish, with who started it when it wasn't the window.
+pub fn from_source(source: httporter_core::HistorySource, message: &str) -> String {
+    use httporter_core::HistorySource;
+    match source {
+        HistorySource::App => message.to_owned(),
+        HistorySource::Cli => format!("Command line: {message}"),
+        HistorySource::Scheduled => format!("Scheduled: {message}"),
+        HistorySource::Watch => format!("Watch folder: {message}"),
+    }
+}
+
+/// A headless publish's profile folder isn't there.
+pub fn headless_folder_missing(dir: &std::path::Path) -> String {
+    format!(
+        "The folder {} can't be found. Choose another one for the profile in HTTPorter.",
+        dir.display()
+    )
+}
+
+/// The command line couldn't open HTTPorter's database.
+pub fn database_unopened(path: &std::path::Path, reason: impl std::fmt::Display) -> String {
+    format!(
+        "Couldn't open HTTPorter's database at {}: {reason}",
+        path.display()
+    )
+}
+
+/// A headless publish was stopped (Ctrl+C) before anything was sent.
+pub const HEADLESS_CANCELLED: &str = "Stopped before anything was sent.";
+
+/// A site refused its credentials during a headless run: it stopped rather than wait.
+pub fn headless_sign_in_failed(site: &str) -> String {
+    format!(
+        "Couldn't sign in to {site}: it refused the saved credentials. Edit the site in \
+         HTTPorter to enter them again."
+    )
+}
+
+/// The connection stayed down during a headless run: it stopped rather than wait for ever.
+pub fn headless_offline(site: &str) -> String {
+    format!("No connection to {site} for a minute, so the transfers stopped.")
+}
+
+/// A download of a headless run found its drive full: it stopped rather than wait.
+pub fn headless_disk_full(drive: &str, needed: u64) -> String {
+    format!(
+        "Drive {drive} is full: free up {} and try again.",
+        crate::format::format_size(needed)
+    )
+}
+
+/// A headless publish found nothing to upload or delete (the activity log).
+pub fn headless_up_to_date(site: &str) -> String {
+    format!("{site} is up to date: nothing to publish.")
+}
+
+/// A headless publish held deletes back because of the delete guard (the activity log).
+pub fn headless_deletes_held(site: &str, deletes: u64) -> String {
+    let files = match deletes {
+        1 => "1 file".to_owned(),
+        n => format!("{} files", format_count(n)),
+    };
+    format!(
+        "Publishing to {site} would delete {files}, more than the delete guard allows, so they \
+         were kept. Review them with Publish in HTTPorter."
+    )
+}
+
+/// Another publish of the profile held its lock, so a headless run didn't start (the activity
+/// log).
+pub fn headless_busy(profile: &str) -> String {
+    format!("“{profile}” wasn't published: another publish of it was running.")
+}
+
 //
 //
 //

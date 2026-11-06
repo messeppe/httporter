@@ -70,7 +70,8 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Build
-        run: cargo build --release --locked -p httporter-app
+        # The app and its console companion (packaged as httporter.com beside httporter.exe).
+        run: cargo build --release --locked -p httporter-app -p httporter-com
 
       - name: Set up signing
         if: env.SIGNING == 'true'
