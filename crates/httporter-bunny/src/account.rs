@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Bunny account API: with the account API key, list the storage zones with their region,
 //! storage hostname and passwords, and the hostnames of the pull zones in front of each. This is
 //! what "Sign in with Bunny account key" uses to offer the zones to add as sites; the zone

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Syntax highlighting for Quick Look: a small hand-written tokenizer per language, run line by
 //! line with its state carried from one line to the next (a comment, a template string or a
 //! `<script>` that goes on).

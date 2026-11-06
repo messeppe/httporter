@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! HTTP-level tests of the S3 provider against a local mock server. Nothing here contacts a real
 //! service.
 //!

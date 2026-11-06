@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Searching the open site (T7): the toolbar field "Search {site}", the filter bar and the results.
 //!
 //! Return in the field searches the open site from its root ("Whole site") or from the folder the

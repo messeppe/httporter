@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Bunny CDN: the pull zones in front of a storage zone, and purging their URLs or the whole
 //! zone through the account API.
 //!

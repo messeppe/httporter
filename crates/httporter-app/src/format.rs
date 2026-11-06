@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Human-readable file sizes and Finder-style relative dates for the file panes.
 //!
 //! The numbers are worked out here; their words (the units, "Today", the months) are `copy.rs`'s

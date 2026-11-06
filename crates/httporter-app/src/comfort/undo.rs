@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Undo for local UI actions (§8.7.7): a closed tab, a removed favorite. Remote deletes are not
 //! undoable, and their alert says so.
 //!

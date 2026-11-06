@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;

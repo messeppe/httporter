@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The S3 provider: [`S3Storage`] speaks the S3 REST API (path-style or virtual-hosted) to AWS
 //! and to S3-compatible services, signing every request with SigV4.
 //!

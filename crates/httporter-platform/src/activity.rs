@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The activity log: `%APPDATA%\HTTPorter\logs\activity.log`, then `activity.1.log` …
 //! `activity.9.log`, each at most [`LOG_FILE_BYTES`], one JSON line per event.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Files dragged in from Windows Explorer.
 //!
 //! Slint 1.18's `DropArea` does not receive files dragged in from other applications on Windows,

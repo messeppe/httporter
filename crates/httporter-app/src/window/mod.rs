@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The window chrome (I5, T2): the toolbar row is the main window's title bar (caption buttons,
 //! drag, double-click, the system menu and Snap Layouts, on `win::TitleBar`), the app icon on the
 //! window, and the window's place remembered between runs (`UiState.window`).

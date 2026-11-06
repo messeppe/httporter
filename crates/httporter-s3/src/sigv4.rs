@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! AWS Signature Version 4 for S3 and S3-compatible services: header authorization
 //! ([`sign`]) and pre-signed links ([`presign_get`]).
 

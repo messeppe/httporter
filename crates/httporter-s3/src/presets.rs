@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Where each S3-compatible service lives, and how a bucket or object turns into a URL.
 //! Quirks per service are recorded in `docs/notes/s3-presets.md`.
 

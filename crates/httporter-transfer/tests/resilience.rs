@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Resume after a crash, offline pauses, damaged or changing files and a full disk (Task 14),
 //! and uploads a crash cut off on a service that deletes them late (ruling Q55),
 //! against `MockProvider` on a paused tokio clock: every wait below is virtual time.

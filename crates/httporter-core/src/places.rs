@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Places the user keeps: favorites, the window's tabs and how the window was left.
 
 use std::path::PathBuf;

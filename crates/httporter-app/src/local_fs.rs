@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Listing of a local folder and of the PC's drive letters for the "This PC" pane.
 
 use chrono::{DateTime, Local, NaiveDateTime};

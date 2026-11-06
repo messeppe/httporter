@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The toast stack (§8.7.5): at most three shown, newest at the bottom; each goes after 4 s, or
 //! 8 s when it has an action, and its time stands still while the pointer is over it or it has the
 //! focus (`toast.slint` keeps the time and says when it is up).

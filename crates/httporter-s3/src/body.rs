@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Upload and download bodies: cutting an upload into pieces that go through the meter, noticing
 //! a transfer that has stopped making progress, and reading answers without trusting their size.
 //!

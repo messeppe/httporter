@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Publish profiles and their history: what a profile publishes where, how one run went, and the
 //! delete guard that asks before a publish removes many files.
 

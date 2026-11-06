@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! CDN purge: the pull zones in front of a site, a purger for them, and which URLs a publish
 //! purges.
 

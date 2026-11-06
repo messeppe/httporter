@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Uploads and downloads.
 //!
 //! Transfers have no overall time limit: a big file on a slow link can take hours. They are

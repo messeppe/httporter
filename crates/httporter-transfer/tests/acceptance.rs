@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Automated acceptance harness for I2 (plan Task 26, Step 1), without the window: the real
 //! [`Engine`], planners, providers and SQLite journal, wired as `httporter-app` wires them
 //! (`site_hub.rs` builds the clients, `session/sites.rs` tests a connection, `transfers.rs` plans,

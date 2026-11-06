@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Comparing a local folder with a folder of a site, file by file: what is new, changed, only on
 //! the site or the same.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 /// Everything except the RFC 3986 unreserved characters (`A-Z a-z 0-9 - . _ ~`).

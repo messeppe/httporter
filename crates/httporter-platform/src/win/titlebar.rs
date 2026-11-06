@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The windows' own title bars: the system caption goes, the app's top row takes its place.
 //!
 //! The app draws the caption buttons itself (`caption_buttons.slint`); this module hooks the

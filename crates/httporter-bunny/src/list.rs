@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Directory listings: at most five at once, each try with its own time limit
 //! ([`crate::BunnyConfig::list_timeout`]) and retries ([`crate::BunnyConfig::list_retry`]).
 //!

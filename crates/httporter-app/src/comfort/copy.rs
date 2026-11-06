@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The words of the comfort features (I5, T3): the tray icon's tooltip and menu, the toasts and
 //! undo, and the palette's rows for them. Everything they show that Rust builds.
 

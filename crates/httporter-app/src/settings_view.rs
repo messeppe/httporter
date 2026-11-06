@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Settings window's Transfers form: what the window holds, as plain values, and the checks
 //! made before they become [`TransferSettings`].
 //!

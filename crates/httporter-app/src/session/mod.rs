@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The state behind the window: the saved sites, the cloud site being browsed and the folder each
 //! pane shows. Every method returns a plain view struct that the binding (`binding.rs`) applies to
 //! the window, so all of this is testable without a window, a network or a real credential store.

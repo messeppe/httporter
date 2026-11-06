@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! When a site can't be reached or the disk is full.
 //!
 //! A lane goes offline after [`OFFLINE_AFTER`] network errors within [`OFFLINE_WINDOW`], or when

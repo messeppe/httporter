@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The local file work transfers do, behind a trait so a test can stand in for the disk (a full
 //! one, say). The engine makes every call on tokio's blocking threads, never on its workers.
 

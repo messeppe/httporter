@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests of the sheets, alerts and banners: every pinned text (the conflict sheet against the
 //! mockup, the delete alert for Bunny and S3, New Folder's checks, Remove Site, quit and the
 //! banners), the sheet's numbers, and the sheets in a headless window (default buttons, the

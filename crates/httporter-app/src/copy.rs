@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The words the app says, when Rust is the one saying them.
 //!
 //! Every user-facing string that Rust builds lives here: the item counts, the plain-words version

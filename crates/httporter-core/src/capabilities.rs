@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use crate::ChecksumKind;
 
 /// How a provider treats folders that contain no files.

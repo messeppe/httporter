@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The command palette (T7): Ctrl+K, and `?` for the keyboard shortcuts.
 //!
 //! It lists the window's actions, the sites, the publish profiles, the favorites and the folders

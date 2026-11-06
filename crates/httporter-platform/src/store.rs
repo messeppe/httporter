@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Local SQLite database: saved sites, provider accounts, settings and the transfer journal.
 //!
 //! Holds connection details only (name, provider, container, region, host, S3 endpoint).

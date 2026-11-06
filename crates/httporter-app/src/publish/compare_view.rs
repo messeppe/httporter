@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Compare in the main window (T6): the toolbar toggle, the Status column, the "Comparing" chip
 //! and the status bar's summary.
 //!

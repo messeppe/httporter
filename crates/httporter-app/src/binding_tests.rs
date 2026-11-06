@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests of the binding: the window's callbacks reach the session, and views reach the window.
 
 use super::*;

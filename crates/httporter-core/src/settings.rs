@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Transfers settings (Settings window, Transfers tab), stored as JSON. Every stored enum
 //! is written in snake_case, so renaming a Rust variant can't break settings already saved.
 

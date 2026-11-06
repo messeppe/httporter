@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Manage+ (I4): the inspector, Quick Look, editing with re-upload, the sidebar's Favorites and
 //! Editing, the command palette, search, tabs, rename / move / presign, the activity log and the
 //! Settings tabs General, Sites and Advanced.

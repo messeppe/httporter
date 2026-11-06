@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Helpers shared by the integration tests: a small HTTP/1.1 server that counts the connections
 //! requests arrive on, and a way to drive a paused clock while real sockets do their work.
 

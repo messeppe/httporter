@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A line diff of two texts (Myers), for Quick Look's "Changes vs Bunny".
 //!
 //! The linear-space variant: each range is split where the shortest edit paths from its two ends

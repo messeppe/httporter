@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Native file and folder pickers (the standard Windows dialogs).
 //!
 //! Each call blocks the calling thread until the dialog is closed. COM is set up by the

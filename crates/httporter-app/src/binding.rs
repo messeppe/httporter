@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Connects the window to the [`Session`].
 //!
 //! The window and the tasks share one `Arc<Session>`. Every callback that lists a folder or talks

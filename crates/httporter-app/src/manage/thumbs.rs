@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Thumbnails for the grid (T5): images up to 5 MB, scaled to fit 240 × 240 and kept as PNGs in
 //! `cache_dir("thumbs")` (named after the file's path, size and time), made 4 at a time on
 //! blocking threads, for the tiles in view only.

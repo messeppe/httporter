@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Opening files and links with other programs, and the monospaced font.
 
 use std::ffi::OsStr;

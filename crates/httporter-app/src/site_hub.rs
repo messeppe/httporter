@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! One storage client per saved site, shared by browsing and transfers.
 //!
 //! A client is built the first time a site needs one, from the site's record, its secret in the

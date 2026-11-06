@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tabs and synchronized browsing (T7).
 //!
 //! A tab is a [`TabState`]: the site and the folder each pane shows. The panes always show the

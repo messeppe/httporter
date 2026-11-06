@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Shared retry helper: wraps one fallible async operation in a bounded
 //! backoff loop. Whoever makes a request owns its retries and picks the
 //! policy: someone browsing waits briefly, the transfer engine longer.

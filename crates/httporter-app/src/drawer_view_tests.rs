@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests of the transfer drawer's view: the texts and numbers `drawer_view` makes of an engine
 //! snapshot (pinned against the mockup), the redraw throttle, and the drawer in a headless
 //! window (expanding, switching tabs, the row buttons).

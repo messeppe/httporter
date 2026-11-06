@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The cloud pane: the site being browsed, the folder shown from it, and the requests that move it
 //! (open a site, a folder, a crumb, Back, Forward, Refresh, a new sort).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests of the Settings window's Transfers form: `to_form` and `from_form` (round trips, the
 //! checks, Ruling Q19's refusal of a proxy password), and the window itself, headless (its tabs,
 //! Restore Defaults, and `wire`).

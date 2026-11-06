@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The transfer engine: runs uploads, downloads, deletes and new folders on Bunny Storage and
 //! S3 sites, with per-site lanes, adaptive concurrency, retries, a global bandwidth limit and a
 //! journal that survives a crash. And the planner that turns what the user picked into jobs,

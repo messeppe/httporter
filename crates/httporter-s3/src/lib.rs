@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The S3-compatible storage provider for HTTPorter: request signing (AWS Signature Version 4),
 //! service presets and endpoint addressing, and [`S3Storage`], which speaks the S3 REST API.
 //! Signing and addressing are pure (no network, no clock); the provider makes one attempt per

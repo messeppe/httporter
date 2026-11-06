@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Turns directory listings (local and cloud) into the rows and breadcrumbs the file panes show,
 //! and keeps the list columns' widths between runs ([`install_columns`]).
 

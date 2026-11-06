@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 /// Bunny Storage regions as `(code, city)`, in display order.
 pub const REGIONS: [(&str, &str); 9] = [
     ("de", "Frankfurt"),

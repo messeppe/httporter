@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! One HTTPorter per user session (review M10). A second one started while the first runs would
 //! count the first one's live queue as "didn't finish last time": Resume would upload it twice,
 //! Discard would cancel its journal rows. So a second start brings the first one's window to the

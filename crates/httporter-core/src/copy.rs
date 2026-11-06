@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The words the core writes itself (a CDN purge's results), kept in one place so the app's copy
 //! layer can replace them.
 

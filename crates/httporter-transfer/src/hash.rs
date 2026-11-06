@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Local file digests, both from one read.
 
 use std::fs::File;

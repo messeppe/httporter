@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Where the main window was left, and whether that place is still on a screen.
 //!
 //! A placement is the window's outer rectangle in physical screen pixels, which includes the

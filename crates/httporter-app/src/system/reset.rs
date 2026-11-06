@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Reset HTTPorter (§11): confirming writes the marker `%APPDATA%\HTTPorter\reset-pending`,
 //! starts `httporter.exe --after-reset` and quits; the next start wipes everything HTTPorter
 //! keeps on this PC before anything opens it.

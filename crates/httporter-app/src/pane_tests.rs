@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The two file panes, driven headlessly with the testing backend: keyboard selection and
 //! scrolling, clicks, column headers and sorting, breadcrumbs, focus rings, how the panes lay
 //! out, "Loading…", and the status bar following the pane last used. Keys and clicks come from

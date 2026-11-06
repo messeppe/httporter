@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Windows services: taskbar progress, notifications, file pickers, clipboard files, the title
 //! bar, window placement, the tray icon and the accessibility settings.
 //!

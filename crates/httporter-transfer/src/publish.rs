@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A publish: the plan made from a compare, and running it as engine batches (uploads, then
 //! deletes, then the CDN purge).
 

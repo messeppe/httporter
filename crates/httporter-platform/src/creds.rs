@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Credential store for site passwords, S3 keys and account keys. Secrets live only in
 //! Windows Credential Manager (or, in tests, in memory); they never reach SQLite, logs or
 //! `Debug` output.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The profile page, Edit Profile and the publish history (T8).
 //!
 //! - **The page** (mockup `History.dc.html`): choosing a profile in the sidebar reads the profile,

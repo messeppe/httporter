@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use std::time::Duration;
 
 /// Which part of the credentials a rejection points at, when the service says.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Copy Public Link and Copy Path (T5), the inspector's copy buttons, and the links the inspector
 //! shows: a file's public URL (from the site's public base URL, else its pull zones) and its
 //! storage URL.

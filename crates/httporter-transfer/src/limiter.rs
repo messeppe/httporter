@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Adaptive concurrency: fewer requests at once when a server pushes back, then back up again.
 
 /// Successes in a row that earn one more request at once.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Listing a whole subtree, folder by folder.
 
 use std::collections::VecDeque;

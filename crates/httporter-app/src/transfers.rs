@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The transfers: the engine, and everything between it and the window.
 //!
 //! An upload, a download or a delete is planned on the runtime (the folders it touches listed

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Skip rules: the files a publish or a compare leaves out.
 //!
 //! Paths are relative, with '/' between segments, and matched ignoring case. A rule ending in '/'

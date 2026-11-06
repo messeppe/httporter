@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! What I4 keeps in the site database: the sidebar's favorites, the window's UI state, each
 //! site's extras, the persistent hash cache, and the export / import of the sites.
 //!

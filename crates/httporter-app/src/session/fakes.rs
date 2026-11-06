@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Test fakes for the session: a storage factory that hands out mocks (and can hold one back),
 //! a storage that holds back the listing of one folder, and a session over an in-memory database.
 

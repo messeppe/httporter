@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Editing a site's file with automatic re-upload (§8.5.2), and the sidebar's Editing rows.
 //!
 //! Opening a site's file (Enter, a double click, Open, Quick Look's Open With…) downloads it into

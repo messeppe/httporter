@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The global bandwidth limit, shared by every transfer.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};

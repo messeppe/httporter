@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The transfer engine against `MockProvider`, on a paused tokio clock: every wait below is
 //! virtual time, so latency, retries and bandwidth limits cost no real time.
 

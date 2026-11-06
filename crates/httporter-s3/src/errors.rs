@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Turns what an S3 service answered, or failed to answer, into the [`ProviderError`] the
 //! engine acts on.
 //!

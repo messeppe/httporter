@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Planning a transfer before it starts: what to upload, download or delete, which files are
 //! already there (conflicts, for the conflict sheet) and what can't be sent at all (skipped,
 //! with a short reason).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests of how the session browses: the cloud pane and the This PC pane, their history,
 //! sorting and loading state, and the order in which late answers are taken in (Ruling P21). The
 //! helpers are those of `session_tests.rs`.

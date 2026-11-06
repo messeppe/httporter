@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The opt-in update check (§16): the release feed of `RELEASE_REPO` on GitHub, read at start
 //! (at most once in 24 h) or on Check Now. No silent install, no telemetry: one GET with the
 //! app's name and version as its user agent, nothing else.

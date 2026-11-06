@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The XML documents of the S3 API: listings, the bucket list, error documents, the
 //! `DeleteObjects` request and answer, and the documents of a multipart upload. Parsing is
 //! lenient about what it does not need (unknown elements, namespaces, the order of elements)

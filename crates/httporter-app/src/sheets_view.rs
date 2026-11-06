@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! What the sheets, alerts and banners show: the conflict sheet, the delete, Remove Site and quit
 //! alerts, the New Folder sheet's checks and the four banners, as plain functions of what the
 //! engine reports, and the code that puts them in the window.

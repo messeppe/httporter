@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use chrono::{DateTime, NaiveDateTime, Utc};
 use httporter_core::{Checksum, Entry, ProviderError, RemotePath};
 use serde::Deserialize;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests of the transfers controller (Task 23): the whole app wired to a real engine, a mock
 //! storage factory, a journal in memory and a headless window.
 //!

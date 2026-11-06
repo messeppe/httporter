@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The `Content-Type` an upload is sent with.
 
 /// The media type for a file called `name`, from its extension (in any case);

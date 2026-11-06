@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Bunny Storage client: its configuration, its HTTP clients, URLs, deletes, and how
 //! answers map to errors. Listings live in `list.rs`, uploads and downloads in `transfer.rs`;
 //! the account API (`account.rs`) builds its client and maps its answers with the same pieces.

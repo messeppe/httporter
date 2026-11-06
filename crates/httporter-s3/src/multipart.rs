@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Multipart uploads: how [`S3Storage`](crate::storage::S3Storage) sends a file that is too
 //! large to send in one piece, and carries on after an interruption.
 //!

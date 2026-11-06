@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Publish profiles, their history and the CDN links, kept in the site database; and the Bunny
 //! account keys that purge. Async wrappers that run the store on blocking threads (the pattern of
 //! `store.rs`), with errors as text.

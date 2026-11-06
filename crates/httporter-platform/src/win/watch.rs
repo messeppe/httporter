@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Watching a folder for changes: `ReadDirectoryChangesW` on a thread.
 //!
 //! The folder is opened for overlapped reads; the thread waits on the read's event and on a stop

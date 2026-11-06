@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Folders-first sorting shared by the local and cloud file panes.
 
 use chrono::NaiveDateTime;

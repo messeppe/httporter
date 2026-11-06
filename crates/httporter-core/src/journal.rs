@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The transfer journal: every job is written down before it starts and marked when it ends, so
 //! after a crash the unfinished ones can be offered again, and only those.
 

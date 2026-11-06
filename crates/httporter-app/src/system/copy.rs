@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The words of Settings › Security, Reset, the update check and About (I5, T4): everything they
 //! show that Rust builds.
 

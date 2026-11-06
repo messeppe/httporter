@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Live probes of an S3-compatible service (plan Task 11), run against the user's Cloudflare R2
 //! test bucket. Every test here is `#[ignore]`d: it talks to the real service and runs only when
 //! asked for:

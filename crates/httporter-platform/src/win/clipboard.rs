@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The clipboard: the files Explorer's Copy (or Cut) puts there, and text the app copies.
 
 use std::ffi::OsString;

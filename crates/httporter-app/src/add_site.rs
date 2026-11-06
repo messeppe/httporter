@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Add Site form: what the sheet collects and the checks made before a connection is tried.
 //!
 //! The sheet has three kinds of form: a Bunny storage zone and its password, a Bunny account key

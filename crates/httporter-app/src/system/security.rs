@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Settings › Security: the passwords and keys HTTPorter saved in Windows Credential Manager,
 //! counted by what they belong to, Remove Unused Keys (M7), Open Credential Manager, and Reset
 //! HTTPorter… (§11).

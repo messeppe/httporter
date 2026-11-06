@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The activity log's events and their filter.
 
 use chrono::{DateTime, Utc};

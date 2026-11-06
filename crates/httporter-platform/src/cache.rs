@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The app's file cache: `%LOCALAPPDATA%\HTTPorter\cache\{preview,thumbs,edit,move}`.
 
 use std::fs;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Moving and renaming files and folders on a site: a server-side copy where the provider has
 //! one, else download and upload again through the engine; the originals are deleted only once
 //! every copy is made.

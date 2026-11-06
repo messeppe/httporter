@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Windows accessibility settings the window follows: text size and "Animation effects".
 //!
 //! Both are read when asked, never cached: the app reads them at start and again when Windows

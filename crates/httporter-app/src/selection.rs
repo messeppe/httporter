@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Which rows of a pane are selected, with the Explorer and Finder rules for clicks, and what the
 //! toolbar offers for the selection.
 //!

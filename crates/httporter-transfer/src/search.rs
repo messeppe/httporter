@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Searching a site by name: every folder from a root is listed, and the matches stream out as
 //! each folder comes in.
 

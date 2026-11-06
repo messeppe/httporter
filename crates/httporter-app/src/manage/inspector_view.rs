@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The inspector beside the single pane (T5): preview, metadata, links and actions; the view
 //! switch (two panes, or a single pane with the inspector; list or thumbnails) and Purge from CDN.
 //!

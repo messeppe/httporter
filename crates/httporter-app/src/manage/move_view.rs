@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Rename, Move To…, dragging within the cloud pane, the move warning and pre-signed links.
 //!
 //! Rename and Move To… plan the move first ([`plan_move`]), with the sheet saying it is busy, so a

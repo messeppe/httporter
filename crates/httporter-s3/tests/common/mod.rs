@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Helpers shared by the HTTP-level tests of the S3 provider: configuration against a mock
 //! server, the request signature check ([`Signed`]) and canned responses. Nothing here contacts a
 //! real service.

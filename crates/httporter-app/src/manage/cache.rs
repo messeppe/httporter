@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Fetching a site's file into the local cache: `cache_dir(kind)/<site>/<path>`, written as
 //! `.part`, checked against the listed checksum, then renamed.
 //!

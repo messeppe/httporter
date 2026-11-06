@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Renders `assets/icon/httporter.svg` into `httporter.ico` (16 to 256 px: 256 as PNG, the rest as
 //! BMP) and `httporter-32.png`, next to the SVG. Run from this folder:
 //!

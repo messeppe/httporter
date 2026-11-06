@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Toast notifications.
 //!
 //! A desktop program that is not installed through an MSIX package shows toasts under an

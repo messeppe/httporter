@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! One lane per site: its queue, the work in flight, its limits, and the code that runs a unit
 //! of work against the site's provider.
 //!

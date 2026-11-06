@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The sidebar's Favorites: folders of this PC and of the sites, kept to go back to.
 //!
 //! Add to Favorites (a folder row's menu) stores one; a click on a row goes there, the way the

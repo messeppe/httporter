@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Planning uploads, downloads and deletes against `MockProvider` and real local files in a
 //! temporary folder.
 

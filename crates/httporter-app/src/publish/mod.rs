@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Publish: comparing the two panes' folders, the Publish sheet and its runs, the CDN purge, and
 //! the profile pages with their history.
 //!

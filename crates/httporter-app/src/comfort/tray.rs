@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The tray (§8.7.8): the window closed while transfers run goes into the notification area, and
 //! the transfers carry on.
 //!

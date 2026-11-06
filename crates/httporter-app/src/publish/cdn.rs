@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The CDN side of Publish (T7): finding a site's purger, the CDN key sheet, and the delete
 //! alert's purge.
 //!

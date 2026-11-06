@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! What the transfer drawer shows: the engine's [`EngineSnapshot`] turned into the texts, numbers
 //! and rows of the window, and the code that puts them there.
 //!

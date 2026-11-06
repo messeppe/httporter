@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Purge from CDN, now (T5): the toolbar's, the menu's and the inspector's purge, and the local
 //! digests the inspector's "Matches local" reads through the Publisher's cache.
 //!

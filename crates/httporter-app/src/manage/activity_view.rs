@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The activity log and its sheet.
 //!
 //! The log is opened at start ([`open_log`]); anything worth remembering goes through [`log`]:

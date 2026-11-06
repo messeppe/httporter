@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Ruling Q49: the engine keeps every upload's multipart progress in the journal, so a large
 //! file sent in parts carries on from the parts already stored after a crash, a pause or a
 //! failed try; and an upload the user cancels or discards is given up on the service, so its

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The settings kept in the site database: the Transfers settings and each site's remembered
 //! conflict choice.
 //!

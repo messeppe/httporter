@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Reading what a user already has: the `BUNNY_*` lines of a `.env` file and the profiles of the
 //! AWS CLI's `credentials` and `config` files. The Import button on the Welcome screen turns
 //! what they hold into an Add Site form.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Publish sheet, Review Deletions, running a publish and the sidebar's profiles (T7).
 //!
 //! Opening the sheet shows it at once, comparing (with Cancel), and fills it in when the compare

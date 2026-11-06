@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Keyboard operation of the sidebar, the shared buttons and the window's shortcuts (Back and
 //! Forward, Alt+arrows, F5), driven headlessly with the testing backend. The panes' own keys are
 //! in `pane_tests.rs`; the `@tr()` and copy scans are in `lint_tests.rs`.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Comfort (I5, T3): the tray icon while transfers run with the window closed (§8.7.8), toasts
 //! (§8.7.5), undo (§8.7.7) and the remaining shortcuts (§8.7.3).
 //!

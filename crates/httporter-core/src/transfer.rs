@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! What the transfer engine works on and what it tells the UI: jobs, the engine's state and
 //! progress, conflicts and delete summaries. Plain data, so the UI can be tested without an
 //! engine. Every stored enum is written in snake_case, so renaming a Rust variant can't break a

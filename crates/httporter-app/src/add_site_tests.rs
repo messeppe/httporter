@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Add Site sheet and the sidebar's site list, driven headlessly with the testing backend:
 //! what the sheet reports, how it behaves as a modal sheet (focus, Escape, Return, the window
 //! behind) and how it presents itself to assistive technology.

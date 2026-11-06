@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The taskbar button: progress bar, attention flash and "is HTTPorter in front".
 
 use std::mem::size_of;

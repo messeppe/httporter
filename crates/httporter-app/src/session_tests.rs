@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests of the session's sites: the tile a site gets, adding and saving one (the password in the
 //! credential store, nothing secret in the database), Test Connection, and the plain words for
 //! what went wrong. Browsing the panes is in `session_browse_tests.rs`, which shares the helpers

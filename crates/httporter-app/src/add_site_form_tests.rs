@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Task 21: every kind of Add Site form (`validate`), the S3 address preview, the secret's
 //! redaction, and the fields Edit Site starts from.
 

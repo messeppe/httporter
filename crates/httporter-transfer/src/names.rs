@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! File names: another name for a copy kept beside an existing file, and names Windows can store.
 
 use std::collections::HashSet;

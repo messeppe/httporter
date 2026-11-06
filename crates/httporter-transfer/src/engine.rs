@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The engine: every job's state, one lane per site, the dispatcher that starts work, and the
 //! snapshot the transfer drawer reads.
 //!

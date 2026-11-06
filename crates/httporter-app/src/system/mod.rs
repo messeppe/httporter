@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! System (I5, T4): Settings › Security (the saved passwords and keys), Reset HTTPorter (§11), the
 //! opt-in update check (§16) and About.
 //!

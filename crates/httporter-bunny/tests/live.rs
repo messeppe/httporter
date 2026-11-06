@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Live probes of Bunny Storage (plan Task 7). Every test here is `#[ignore]`d: it talks to the
 //! real service with the credentials of a test zone, and runs only when asked for:
 //!

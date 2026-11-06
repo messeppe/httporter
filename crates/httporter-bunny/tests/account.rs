@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The Bunny account API against local mock servers; nothing here reaches api.bunny.net.
 //! The JSON is shaped like live responses (spec 5.2), with the fields we don't read left in.
 

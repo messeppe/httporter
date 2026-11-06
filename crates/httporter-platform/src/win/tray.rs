@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The notification-area icon shown while transfers run with the window closed (§8.7.8).
 //!
 //! The icon's messages go to a window of its own, made on the calling thread (the UI thread),

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The This PC pane: the folder (or the list of drives) shown from the PC, and the requests that
 //! move it.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Throughput over a sliding window, and the time left.
 
 use std::collections::VecDeque;

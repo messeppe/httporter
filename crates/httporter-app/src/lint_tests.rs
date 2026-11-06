@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Source-text lints. Two rules about where words may be written, checked by reading the
 //! repository's own sources:
 //!

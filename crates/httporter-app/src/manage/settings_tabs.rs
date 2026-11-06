@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Settings › General, Sites and Advanced, and read-only sites (I4, T8).
 //!
 //! - **General:** the appearance (`Theme.appearance` on both windows), the view to start in,

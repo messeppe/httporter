@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The saved sites: the list the sidebar shows, how a site is added or changed (tested, then
 //! saved), duplicated and removed, the Bunny account key that adds several zones at once, the
 //! S3 bucket list, and how a saved site's secret turns into a storage client.

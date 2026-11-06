@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Which renderer draws the windows (I5, spec §6): Slint's software renderer by default, for the
 //! lowest memory use (S7), or the GPU one (FemtoVG on OpenGL) when it is chosen in Settings ›
 //! Advanced. The choice applies at the next start, and HTTPorter uses the software renderer

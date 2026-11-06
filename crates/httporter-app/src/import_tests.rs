@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Tests of Import: the `BUNNY_*` lines of a `.env` file, the AWS CLI profiles, that neither
 //! ever shows a secret, and the Add Site fields each fills.
 
