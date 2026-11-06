@@ -14,7 +14,7 @@
 // why purging can't happen. Empty means the account key is missing, and the line offers Add
 // Account Key… instead.
 
-import { TextEdit } from "std-widgets.slint";
+import { ScrollView, TextEdit } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { ProfileDraft } from "../types.slint";
@@ -105,7 +105,8 @@ export component ProfileSheet inherits Rectangle {
             cache-control-enabled: root.draft.cache-control-enabled,
             cache-control-note: root.draft.cache-control-note,
             watch: root.watch,
-            unattended-deletes: root.unattended-deletes,
+            // Deleting without asking is kept only with removing files on.
+            unattended-deletes: root.unattended-deletes && root.remove-extras,
         };
     }
 
@@ -132,7 +133,7 @@ export component ProfileSheet inherits Rectangle {
             sheet-width: 580px;
             label: root.editing ? @tr("Edit Profile") : @tr("New Publish Profile");
 
-            VerticalLayout {
+            header := VerticalLayout {
                 padding-left: 22px;
                 padding-right: 22px;
                 padding-top: 20px;
@@ -153,221 +154,230 @@ export component ProfileSheet inherits Rectangle {
                     accessible-role: none;
                 }
             }
-            VerticalLayout {
-                padding-left: 22px;
-                padding-right: 22px;
-                padding-top: 16px;
-                padding-bottom: 14px;
-                spacing: 10px;
+            // The fields scroll when the window is too short for all of them (the smallest window is
+            // 600 px tall); the title and the buttons stay. The scroll view's own inset is 2 px.
+            ScrollView {
+                horizontal-scrollbar-policy: always-off;
+                height: min(fields.preferred-height + 4px, max(120px, root.height - Theme.toolbar-height - header.preferred-height - footer.preferred-height - 1px - 12px));
+                fields := VerticalLayout {
+                    padding-left: 22px;
+                    padding-right: 22px;
+                    padding-top: 16px;
+                    padding-bottom: 14px;
+                    spacing: 10px;
 
-                FormRow {
-                    label: @tr("Name");
-
-                    name-field := Field {
+                    FormRow {
                         label: @tr("Name");
-                        accepted => { root.submit(); }
-                    }
-                }
-                FormRow {
-                    label: @tr("Site");
 
-                    Text {
-                        height: Theme.control-height;
-                        text: root.draft.site-name;
-                        color: Theme.label;
-                        font-size: Theme.font-body;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                }
-                FormRow {
-                    label: @tr("Folder");
-
-                    HorizontalLayout {
-                        spacing: 8px;
-
-                        folder-field := Field {
-                            horizontal-stretch: 1;
-                            label: @tr("Folder to publish");
+                        name-field := Field {
+                            label: @tr("Name");
                             accepted => { root.submit(); }
                         }
-                        CapsuleButton {
-                            text: @tr("Change Folder…");
-                            clicked => { root.pick-folder(); }
-                        }
                     }
-                }
-                FormRow {
-                    label: @tr("Publish to");
-
-                    remote-field := Field {
-                        placeholder: @tr("Empty for the root of the site");
-                        label: @tr("Folder on the site");
-                        accepted => { root.submit(); }
-                    }
-                }
-                FormRow {
-                    label: @tr("Skip rules");
-
-                    rules-edit := TextEdit {
-                        height: 110px + 5 * (Theme.font-caption - 12px);
-                        font-size: Theme.font-caption;
-                        wrap: no-wrap;
-                        accessible-label: @tr("Skip rules, one per line");
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
+                    FormRow {
+                        label: @tr("Site");
 
                         Text {
-                            horizontal-stretch: 1;
-                            text: @tr("One per line: a name (Thumbs.db), a pattern (*.tmp) or a folder (node_modules/).");
-                            color: Theme.label2;
-                            font-size: Theme.font-small;
-                            wrap: word-wrap;
+                            height: Theme.control-height;
+                            text: root.draft.site-name;
+                            color: Theme.label;
+                            font-size: Theme.font-body;
                             vertical-alignment: center;
+                            overflow: elide;
                         }
-                        VCenter {
+                    }
+                    FormRow {
+                        label: @tr("Folder");
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            folder-field := Field {
+                                horizontal-stretch: 1;
+                                label: @tr("Folder to publish");
+                                accepted => { root.submit(); }
+                            }
                             CapsuleButton {
-                                text: @tr("Restore Defaults");
-                                clicked => { rules-edit.text = root.default-rules; }
+                                text: @tr("Change Folder…");
+                                clicked => { root.pick-folder(); }
                             }
                         }
                     }
-                }
-                FormRow {
-                    label: "";
+                    FormRow {
+                        label: @tr("Publish to");
 
-                    CheckLine {
-                        text: @tr("Remove files from {} that aren't in the folder", root.draft.site-name);
-                        checked: root.remove-extras;
-                        toggled(on) => { root.remove-extras = on; }
-                    }
-                }
-                FormRow {
-                    label: @tr("Purge CDN");
-
-                    HorizontalLayout {
-                        alignment: start;
-
-                        Segmented {
-                            options: [@tr("Off"), @tr("Changed files"), @tr("Whole zone")];
-                            label: @tr("Purge CDN");
-                            current <=> root.purge;
+                        remote-field := Field {
+                            placeholder: @tr("Empty for the root of the site");
+                            label: @tr("Folder on the site");
+                            accepted => { root.submit(); }
                         }
                     }
-                    if root.draft.cdn-note != "": Text {
-                        text: root.draft.cdn-note;
-                        color: Theme.label2;
-                        font-size: Theme.font-small;
-                        wrap: word-wrap;
-                    }
-                    if root.draft.cdn-note == "": HorizontalLayout {
-                        spacing: 8px;
+                    FormRow {
+                        label: @tr("Skip rules");
 
-                        Text {
-                            horizontal-stretch: 1;
-                            text: @tr("Purging needs your Bunny account key.");
+                        rules-edit := TextEdit {
+                            height: 110px + 5 * (Theme.font-caption - 12px);
+                            font-size: Theme.font-caption;
+                            wrap: no-wrap;
+                            accessible-label: @tr("Skip rules, one per line");
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: @tr("One per line: a name (Thumbs.db), a pattern (*.tmp) or a folder (node_modules/).");
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                            VCenter {
+                                CapsuleButton {
+                                    text: @tr("Restore Defaults");
+                                    clicked => { rules-edit.text = root.default-rules; }
+                                }
+                            }
+                        }
+                    }
+                    FormRow {
+                        label: "";
+
+                        CheckLine {
+                            text: @tr("Remove files from {} that aren't in the folder", root.draft.site-name);
+                            checked: root.remove-extras;
+                            toggled(on) => { root.remove-extras = on; }
+                        }
+                    }
+                    FormRow {
+                        label: @tr("Purge CDN");
+
+                        HorizontalLayout {
+                            alignment: start;
+
+                            Segmented {
+                                options: [@tr("Off"), @tr("Changed files"), @tr("Whole zone")];
+                                label: @tr("Purge CDN");
+                                current <=> root.purge;
+                            }
+                        }
+                        if root.draft.cdn-note != "": Text {
+                            text: root.draft.cdn-note;
                             color: Theme.label2;
                             font-size: Theme.font-small;
                             wrap: word-wrap;
-                            vertical-alignment: center;
                         }
-                        CapsuleButton {
-                            text: @tr("Add Account Key…");
-                            icon: Icons.key;
-                            clicked => { root.add-key(); }
+                        if root.draft.cdn-note == "": HorizontalLayout {
+                            spacing: 8px;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: @tr("Purging needs your Bunny account key.");
+                                color: Theme.label2;
+                                font-size: Theme.font-small;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                            CapsuleButton {
+                                text: @tr("Add Account Key…");
+                                icon: Icons.key;
+                                clicked => { root.add-key(); }
+                            }
                         }
                     }
-                }
-                FormRow {
-                    label: @tr("Delete guard");
+                    FormRow {
+                        label: @tr("Delete guard");
 
-                    HorizontalLayout {
-                        alignment: start;
-                        spacing: 6px;
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 6px;
 
-                        files-field := Field {
-                            width: 70px;
-                            label: @tr("Files");
+                            files-field := Field {
+                                width: 70px;
+                                label: @tr("Files");
+                                accepted => { root.submit(); }
+                            }
+                            Text {
+                                text: @tr("files or");
+                                color: Theme.label;
+                                font-size: Theme.font-body;
+                                vertical-alignment: center;
+                            }
+                            percent-field := Field {
+                                width: 50px;
+                                label: @tr("Percent of the files on the site");
+                                accepted => { root.submit(); }
+                            }
+                            Text {
+                                text: @tr("% of the site");
+                                color: Theme.label;
+                                font-size: Theme.font-body;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Text {
+                            text: @tr("A publish that would delete more than this asks you to confirm first.");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            wrap: word-wrap;
+                        }
+                    }
+                    FormRow {
+                        label: @tr("Cache-Control");
+
+                        cache-field := Field {
+                            label: @tr("Cache-Control header");
+                            placeholder: @tr("public, max-age=3600");
+                            enabled: root.draft.cache-control-enabled;
                             accepted => { root.submit(); }
                         }
                         Text {
-                            text: @tr("files or");
-                            color: Theme.label;
-                            font-size: Theme.font-body;
-                            vertical-alignment: center;
+                            text: root.draft.cache-control-note != "" ? root.draft.cache-control-note : @tr("Sent with every file this profile uploads. Leave it empty for none.");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            wrap: word-wrap;
                         }
-                        percent-field := Field {
-                            width: 50px;
-                            label: @tr("Percent of the files on the site");
-                            accepted => { root.submit(); }
+                    }
+                    // I6 (T4): publishing without being asked. Watching lasts as long as HTTPorter
+                    // runs (the tray keeps it only while transfers run), which the help says. Deleting
+                    // without asking only means something when the profile removes files at all.
+                    FormRow {
+                        label: @tr("Automatic");
+
+                        CheckLine {
+                            text: @tr("Publish changes automatically while HTTPorter is open");
+                            checked: root.watch;
+                            toggled(on) => { root.watch = on; }
                         }
                         Text {
-                            text: @tr("% of the site");
-                            color: Theme.label;
-                            font-size: Theme.font-body;
-                            vertical-alignment: center;
+                            text: @tr("Uploads 10 seconds after the folder changes. Watching stops when HTTPorter quits.");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            wrap: word-wrap;
+                        }
+                        CheckLine {
+                            text: @tr("Delete without asking when publishing automatically");
+                            enabled: root.remove-extras;
+                            checked: root.unattended-deletes && root.remove-extras;
+                            toggled(on) => { root.unattended-deletes = on; }
+                        }
+                        Text {
+                            text: root.remove-extras ? @tr("Files removed from the folder are deleted from the site without a review.") : @tr("Applies only when files that aren't in the folder are removed from {}.", root.draft.site-name);
+                            color: root.remove-extras ? Theme.red : Theme.label2;
+                            font-size: Theme.font-small;
+                            wrap: word-wrap;
                         }
                     }
-                    Text {
-                        text: @tr("A publish that would delete more than this asks you to confirm first.");
-                        color: Theme.label2;
-                        font-size: Theme.font-small;
-                        wrap: word-wrap;
+                    if root.draft.error != "": ErrorLine {
+                        text: root.draft.error;
                     }
-                }
-                FormRow {
-                    label: @tr("Cache-Control");
-
-                    cache-field := Field {
-                        label: @tr("Cache-Control header");
-                        placeholder: @tr("public, max-age=3600");
-                        enabled: root.draft.cache-control-enabled;
-                        accepted => { root.submit(); }
-                    }
-                    Text {
-                        text: root.draft.cache-control-note != "" ? root.draft.cache-control-note : @tr("Sent with every file this profile uploads. Leave it empty for none.");
-                        color: Theme.label2;
-                        font-size: Theme.font-small;
-                        wrap: word-wrap;
-                    }
-                }
-                // I6 (T4): publishing without being asked.
-                FormRow {
-                    label: @tr("Automatic");
-
-                    CheckLine {
-                        text: @tr("Publish changes automatically while HTTPorter is open");
-                        checked: root.watch;
-                        toggled(on) => { root.watch = on; }
-                    }
-                    Text {
-                        text: @tr("Uploads 10 seconds after the folder changes.");
-                        color: Theme.label2;
-                        font-size: Theme.font-small;
-                        wrap: word-wrap;
-                    }
-                    CheckLine {
-                        text: @tr("Delete without asking when publishing automatically");
-                        checked: root.unattended-deletes;
-                        toggled(on) => { root.unattended-deletes = on; }
-                    }
-                    Text {
-                        text: @tr("Files removed from the folder are deleted from the site without a review.");
-                        color: Theme.red;
-                        font-size: Theme.font-small;
-                        wrap: word-wrap;
-                    }
-                }
-                if root.draft.error != "": ErrorLine {
-                    text: root.draft.error;
                 }
             }
             Rectangle {
                 height: 1px;
                 background: Theme.sep;
             }
-            HorizontalLayout {
+            footer := HorizontalLayout {
                 padding-left: 22px;
                 padding-right: 22px;
                 padding-top: 14px;

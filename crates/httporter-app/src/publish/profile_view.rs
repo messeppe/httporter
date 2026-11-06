@@ -131,6 +131,11 @@ fn lock(state: &Mutex<ProfileState>) -> MutexGuard<'_, ProfileState> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The profile the page shows (the watch folder's note is that profile's).
+pub(super) fn shown(p: &Publisher) -> Option<ProfileId> {
+    lock(&p.profile).shown.clone()
+}
+
 /// Wires the profile page and profile sheet callbacks, the Settings window's Publish tab and the
 /// profile of a `.env` import. Runs at startup: must not start anything.
 pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
@@ -240,6 +245,7 @@ fn select(p: &Arc<Publisher>, ui: &AppWindow, index: i32) {
         ui.set_history_detail(HistoryDetail::default());
     }
     ui.set_history_search(SharedString::new());
+    super::watch::show_note(p, ui);
     load(p, ui);
 }
 
@@ -346,6 +352,7 @@ fn show_page(p: &Arc<Publisher>, ui: &AppWindow, serial: u64, page: Option<Page>
         state.page = None;
         drop(state);
         ui.set_selected_profile(-1);
+        super::watch::show_note(p, ui);
         return;
     };
     let now = Local::now();
@@ -547,8 +554,10 @@ fn change_folder(p: &Arc<Publisher>, _ui: &AppWindow) {
         record.local_dir = folder;
         let p2 = p.clone();
         p.link.rt().spawn(async move {
-            match p2.session.save_profile(record).await {
+            match p2.session.save_profile(record.clone()).await {
                 Ok(()) => {
+                    // I6: a watched profile watches the new folder.
+                    super::watch::profile_saved(&p2, &record);
                     let ui = p2.link.ui().clone();
                     let _ = ui.upgrade_in_event_loop(move |ui| load(&p2, &ui));
                 }
@@ -859,6 +868,8 @@ fn sheet_saved(
         Err(message) if current => show_sheet_error(ui, draft, message),
         Err(_) => {}
         Ok(()) => {
+            // I6: watching starts, follows the folder, or stops, as the profile now says.
+            super::watch::profile_saved(p, record);
             refresh_sidebar(p);
             if !current {
                 return;
@@ -893,6 +904,7 @@ fn delete(p: &Arc<Publisher>, _ui: &AppWindow, id: ProfileId) {
                 }
             }
             Ok(()) => {
+                super::watch::profile_removed(&p2, &id);
                 let shown = {
                     let mut state = lock(&p2.profile);
                     state.sheet = None;
@@ -998,8 +1010,7 @@ pub(super) fn refresh_sidebar(p: &Arc<Publisher>) {
                 id: r.id.0.as_str().into(),
                 name: r.name.as_str().into(),
                 meta: copy::profile_meta(r.last_published_at, now).into(),
-                // The watch folder sets it (T4).
-                watching: false,
+                watching: super::watch::watching(&p2, &r.id),
             })
             .collect();
         let _ = p2

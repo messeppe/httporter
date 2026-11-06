@@ -755,3 +755,91 @@ pub const CACHE_CONTROL_INVALID: &str = "The Cache-Control header can hold only 
 //
 //
 //
+
+// ---- watch folder (I6, T4) ----
+
+/// The toast after a watched publish: "Published 3 changed files from “Blog”."
+pub fn watch_published(profile: &str, files: u64, purge_failed: bool) -> String {
+    let what = if files == 1 {
+        "1 changed file".to_owned()
+    } else {
+        format!("{} changed files", format_count(files))
+    };
+    let purge = if purge_failed {
+        " The CDN purge failed, Retry Purge on the profile page."
+    } else {
+        ""
+    };
+    format!("Published {what} from “{profile}”.{purge}")
+}
+
+/// The warning toast after a watched publish in which some files failed.
+pub fn watch_failed(profile: &str, failed: u64, files: u64) -> String {
+    format!(
+        "Published {} from “{profile}”, but {} failed. Retry them on the profile page.",
+        sheet_files(files),
+        format_count(failed)
+    )
+}
+
+/// The warning toast when a watched publish couldn't run (`why`: the headless publish's words).
+pub fn watch_not_published(profile: &str, why: &str) -> String {
+    format!("“{profile}” wasn't published: {why}")
+}
+
+/// A watched publish whose task broke off (a bug).
+pub const WATCH_RUN_BROKE: &str = "the publish stopped unexpectedly.";
+
+/// A watched publish asked for while HTTPorter closes.
+pub const WATCH_CLOSING: &str = "HTTPorter is closing.";
+
+/// The profile page's note when files removed from the folder wait for a review to be deleted
+/// from the site (Review… follows it).
+pub fn watch_held_back(n: u64) -> String {
+    if n == 1 {
+        "1 file was removed from the folder.".to_owned()
+    } else {
+        format!("{} files were removed from the folder.", format_count(n))
+    }
+}
+
+/// Why watching stopped, after "Watching stopped: " or "Stopped watching “Blog”: ".
+fn watch_stop_reason(stop: &super::watch::Stop) -> String {
+    use super::watch::Stop;
+    match stop {
+        Stop::Off => String::new(),
+        Stop::FolderGone => "the folder is gone or was renamed.".to_owned(),
+        Stop::Overflow => "the folder changed faster than it could be followed.".to_owned(),
+        Stop::ReadOnly(site) => format!("{site} is read-only."),
+        Stop::SiteGone => "its site was removed.".to_owned(),
+        Stop::WatchFailed(why) => format!("the folder couldn't be watched ({why})."),
+    }
+}
+
+/// The profile page's note once watching stopped, with what starts it again.
+pub fn watch_stopped_note(stop: &super::watch::Stop) -> String {
+    use super::watch::Stop;
+    let reason = watch_stop_reason(stop);
+    match stop {
+        Stop::Off => String::new(),
+        Stop::ReadOnly(_) => format!("Watching is off: {reason}"),
+        Stop::FolderGone => {
+            format!("Watching stopped: {reason} Choose it with Change Folder… to watch again.")
+        }
+        Stop::Overflow => format!(
+            "Watching stopped: {reason} The whole folder was compared once. Save the profile to \
+             watch again."
+        ),
+        Stop::SiteGone | Stop::WatchFailed(_) => format!("Watching stopped: {reason}"),
+    }
+}
+
+/// The toast and the activity log's line when watching stopped.
+pub fn watch_stopped(profile: &str, stop: &super::watch::Stop) -> String {
+    use super::watch::Stop;
+    let reason = watch_stop_reason(stop);
+    match stop {
+        Stop::ReadOnly(_) => format!("Not watching “{profile}”: {reason}"),
+        _ => format!("Stopped watching “{profile}”: {reason}"),
+    }
+}
