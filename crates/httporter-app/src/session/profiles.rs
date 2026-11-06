@@ -30,6 +30,16 @@ impl Session {
         blocking(move || lock(&store).list_profiles().unwrap_or_default()).await
     }
 
+    /// The ids of the stored profiles, or why they couldn't be read: unlike [`Self::profiles`], a
+    /// failed read is not "none" (I6: the scheduled-task clean-up must never take it for that).
+    /// Blocks: call it from a blocking thread.
+    pub fn profile_ids(&self) -> Result<Vec<ProfileId>, String> {
+        lock(&self.store)
+            .list_profiles()
+            .map(|profiles| profiles.into_iter().map(|p| p.id).collect())
+            .map_err(|e| e.to_string())
+    }
+
     /// Adds the profile, or updates it.
     pub async fn save_profile(&self, p: ProfileRecord) -> Result<(), String> {
         let store = self.store.clone();

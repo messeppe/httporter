@@ -25,6 +25,8 @@ mod schedule_view;
 mod sheet_view;
 mod watch;
 
+pub(crate) use schedule_view::remove_orphan_tasks;
+
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use httporter_core::{CdnPurger, ProfileId, ProviderKind, SiteRecord};

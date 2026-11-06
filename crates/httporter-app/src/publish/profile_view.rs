@@ -238,6 +238,7 @@ fn select(p: &Arc<Publisher>, ui: &AppWindow, index: i32) {
         });
         ui.set_history_rows(ModelRc::default());
         ui.set_history_detail(HistoryDetail::default());
+        super::schedule_view::page_shown(p, ui, None);
     }
     ui.set_history_search(SharedString::new());
     load(p, ui);
@@ -346,6 +347,7 @@ fn show_page(p: &Arc<Publisher>, ui: &AppWindow, serial: u64, page: Option<Page>
         state.page = None;
         drop(state);
         ui.set_selected_profile(-1);
+        super::schedule_view::page_shown(p, ui, None);
         return;
     };
     let now = Local::now();
@@ -366,11 +368,14 @@ fn show_page(p: &Arc<Publisher>, ui: &AppWindow, serial: u64, page: Option<Page>
         .or_else(|| page.found.iter().find(|h| went_wrong(h)).map(|h| h.id));
     state.detail = detail;
     state.history = page.found;
+    let record = page.facts.record.clone();
     state.page = Some(page.facts);
     drop(state);
 
     ui.set_profile(view);
     ui.set_history_rows(ModelRc::new(VecModel::from(rows)));
+    // I6 (T3): the Schedule card.
+    super::schedule_view::page_shown(p, ui, Some((&record, &page.all)));
     match detail {
         Some(id) => show_detail(p, ui, id, false),
         None => ui.set_history_detail(HistoryDetail::default()),
@@ -818,6 +823,10 @@ fn save(p: &Arc<Publisher>, ui: &AppWindow, draft: ProfileDraft) {
         } else {
             Err(copy::PROFILE_FOLDER_NOT_FOUND.to_owned())
         };
+        if saved.is_ok() && !target.new {
+            // I6 (T3): a scheduled profile's task names it.
+            super::schedule_view::profile_saved(&p2, &target.record, &record);
+        }
         if saved.is_ok() && target.site.provider == ProviderKind::S3 {
             // The engine's Cache-Control rule follows the profile (the old folder's goes).
             let engine = p2.transfers.engine();
@@ -893,6 +902,8 @@ fn delete(p: &Arc<Publisher>, _ui: &AppWindow, id: ProfileId) {
                 }
             }
             Ok(()) => {
+                // I6 (T3): its scheduled task goes too.
+                super::schedule_view::profile_deleted(&p2, &id);
                 let shown = {
                     let mut state = lock(&p2.profile);
                     state.sheet = None;
