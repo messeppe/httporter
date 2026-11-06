@@ -31,7 +31,7 @@ use tokio::sync::oneshot;
 use super::{Publisher, PurgerAnswer, copy, lock};
 use crate::AppWindow;
 use crate::comfort::toast;
-use crate::session::blocking;
+use crate::session::{Session, blocking};
 use crate::transfers::DeletePurge;
 
 /// How long a purge waiting for the engine's late checks waits, at most, before it looks again.
@@ -50,24 +50,26 @@ async fn account(key: String, settings: TransferSettings) -> Result<BunnyAccount
     blocking(move || BunnyAccount::with_settings(key, &settings)).await
 }
 
-pub(super) async fn purger_for(p: &Publisher, site: &SiteRecord) -> PurgerAnswer {
+/// `site`'s CDN purger, never asking for anything: what [`Publisher::purger_for`] answers, and
+/// the headless publish (the CLI, a schedule, the watch folder) purges with.
+pub(crate) async fn purger_for(session: &Session, site: &SiteRecord) -> PurgerAnswer {
     if site.provider != ProviderKind::Bunny {
         return PurgerAnswer::Unavailable(copy::PURGE_NEEDS_BUNNY.to_owned());
     }
-    let settings = p.session.settings();
-    if let Some(link) = p.session.cdn_link(site.id.clone()).await
-        && let Some(key) = p.session.account_key(link.account.clone()).await
+    let settings = session.settings();
+    if let Some(link) = session.cdn_link(site.id.clone()).await
+        && let Some(key) = session.account_key(link.account.clone()).await
     {
         return match account(key, settings).await {
             Ok(account) => PurgerAnswer::Ready(Arc::new(BunnyCdn::new(account, link.zones))),
             Err(e) => PurgerAnswer::Unavailable(copy::account_unreachable(e)),
         };
     }
-    for record in p.session.bunny_accounts().await {
+    for record in session.bunny_accounts().await {
         if record.provider != ProviderKind::Bunny {
             continue;
         }
-        let Some(key) = p.session.account_key(record.id.clone()).await else {
+        let Some(key) = session.account_key(record.id.clone()).await else {
             continue;
         };
         let Ok(account) = account(key, settings.clone()).await else {
@@ -82,7 +84,7 @@ pub(super) async fn purger_for(p: &Publisher, site: &SiteRecord) -> PurgerAnswer
             checked_at: Utc::now(),
         };
         // Kept for next time; if it can't be, the next purge asks Bunny again.
-        let _ = p.session.save_cdn_link(site.id.clone(), link, None).await;
+        let _ = session.save_cdn_link(site.id.clone(), link, None).await;
         return PurgerAnswer::Ready(Arc::new(BunnyCdn::new(account, zones)));
     }
     PurgerAnswer::NeedKey

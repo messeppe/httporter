@@ -69,6 +69,8 @@ pub use local::LocalView;
 #[allow(unused_imports)] // T8 uses it.
 pub use places::ImportReport;
 pub use remote::{RemotePlace, RemoteView};
+/// I6: the command line's `ls` says why a listing failed as the panes do.
+pub(crate) use sites::listing_error_text;
 pub use sites::{SiteItemData, SiteProvider, TestResult, endpoint_preview, hub_error_text};
 
 use local::LocalPane;

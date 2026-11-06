@@ -831,7 +831,7 @@ fn keep_account_key(
 
 /// Why listing `dir` of `site` failed, in words. A 404 on the root names the zone (or bucket) and
 /// its region, the fields that can be wrong.
-pub(super) fn listing_error_text(
+pub(crate) fn listing_error_text(
     site: &SiteRecord,
     error: &ProviderError,
     dir: &RemotePath,

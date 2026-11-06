@@ -410,6 +410,12 @@ impl Transfers {
         &self.engine
     }
 
+    /// The journal the engine writes: the headless publish run from the window (I6, the watch
+    /// folder) records its batches in it too.
+    pub fn journal(&self) -> Arc<dyn Journal> {
+        self.journal.clone()
+    }
+
     /// Where a publish's batches for `site` go: the site with the client a batch for it should
     /// use (as [`Self::target`] picks it), or `None` when no client can be made. A read-only
     /// site (I4) gets none: every batch sent this way writes (a publish, an edit, a move).

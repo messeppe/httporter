@@ -9,13 +9,15 @@
 //! - [`sheet_view`] and [`cdn`] (T7): the Publish sheet, its runs, the CDN key sheet and the
 //!   delete alert's purge;
 //! - [`profile_view`] (T8): the profile page, Edit Profile and the history;
-//! - I6: [`headless`] (T2), the publish without a window that the CLI and the watch folder run;
+//! - I6: [`headless`] (T2), the publish without a window that the CLI and the watch folder run,
+//!   and [`flow`] (T2), the steps of a publish it and the Publish sheet share;
 //!   [`schedule_view`] (T3), the Schedule card and sheet; [`watch`] (T4), the watch folder;
 //! - [`copy`]: the words of all of the above, one section per task.
 
 mod cdn;
 mod compare_view;
 mod copy;
+pub(crate) mod flow;
 pub mod headless;
 mod profile_view;
 mod purge_now;
@@ -55,8 +57,8 @@ pub struct Publisher {
     session: Arc<Session>,
     transfers: Arc<Transfers>,
     link: Link,
-    /// Local digests, kept across compares.
-    hashes: HashCache,
+    /// Local digests, kept across compares (shared with the watch folder's headless runs).
+    hashes: Arc<HashCache>,
     state: Mutex<State>,
     /// Each view's own state, in its own file.
     compare: Mutex<compare_view::CompareState>,
@@ -70,7 +72,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Publisher {
     pub fn new(session: Arc<Session>, transfers: Arc<Transfers>, link: Link) -> Arc<Self> {
-        let hashes = HashCache::with_store(session.hash_store());
+        let hashes = Arc::new(HashCache::with_store(session.hash_store()));
         Arc::new(Self {
             session,
             transfers,
@@ -105,7 +107,7 @@ impl Publisher {
     }
 
     pub async fn purger_for(&self, site: &SiteRecord) -> PurgerAnswer {
-        cdn::purger_for(self, site).await
+        cdn::purger_for(&self.session, site).await
     }
 
     /// Opens the CDN key sheet for `site` (Edit Profile uses it too).

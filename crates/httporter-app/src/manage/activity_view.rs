@@ -126,6 +126,14 @@ pub fn event(kind: ActivityKind, site: &str, path: &str, ok: bool, detail: Strin
     });
 }
 
+/// A transfer job that ended, as the window logs the engine's (I6: the command line logs its own
+/// engine's this way).
+pub fn job_ended(e: JobEvent) {
+    if let Some(event) = event_of(e) {
+        log(event);
+    }
+}
+
 /// A site was added (Add Site, Find Zones, Duplicate).
 pub fn site_added(name: &str) {
     event(
