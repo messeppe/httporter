@@ -52,6 +52,8 @@ mod keyboard_tests;
 mod lint_tests;
 #[cfg(test)]
 mod pane_tests;
+#[cfg(test)]
+mod toolbar_tests;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // `httporter.exe --cli <args…>` (I6, `cli`): one command without a window, and its exit code.

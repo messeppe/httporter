@@ -1,0 +1,200 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+// The toolbar's search field (mockup `.search`): a capsule as tall as a control in `field`, with
+// the hairline `control-border`, the 14 px magnifier inside it at the left in `label2`, then the
+// text, borderless, with its placeholder in `label2`. While there is text a clear button (×) sits
+// at the right end. The mockup's `shadow-control` is left out, as on the toolbar's other
+// capsules: Slint's software renderer draws no drop shadows.
+//
+// Return submits; Escape empties the field and ends the search (`cancelled`, then `dismissed`);
+// so does emptying it by hand or with the clear button. The keyboard focus ring follows the
+// capsule, 3 px outside it like the buttons' rings.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+
+export component SearchField inherits Rectangle {
+    in property <string> placeholder;
+    in property <bool> enabled: true;
+    in-out property <string> text <=> input.text;
+    out property <bool> has-focus: input.has-focus;
+    // The mockup's width, and the least the toolbar narrows it to before it folds the field into
+    // a button. Both grow with Windows' text size, as the placeholder does.
+    out property <length> full-width: 220px * Theme.text-scale;
+    out property <length> least-width: 140px * Theme.text-scale;
+    // Return (not auto-repeat), with the text.
+    callback submitted(string);
+    // The text was emptied: by Escape, by hand or with the clear button. The search ends.
+    callback cancelled();
+    // Escape was pressed (after `cancelled`): a folded field closes again.
+    callback dismissed();
+
+    // The mockup's 10 px at either end and 6 px after the magnifier.
+    property <length> inset: 10px;
+    property <length> icon-gap: 6px;
+
+    height: Theme.control-height;
+    border-radius: self.height / 2;
+    background: Theme.field;
+    border-width: 0.5px;
+    border-color: Theme.control-border;
+    forward-focus: input;
+
+    magnifier := Image {
+        x: root.inset;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        source: Icons.search;
+        colorize: Theme.label2;
+        accessible-role: none;
+    }
+
+    // Where the text may be drawn, clipped so that a long query scrolls instead of spilling out.
+    Rectangle {
+        x: magnifier.x + magnifier.width + root.icon-gap;
+        width: (root.text != "" ? clear.x : parent.width - root.inset) - self.x;
+        clip: true;
+
+        Text {
+            width: 100%;
+            height: 100%;
+            text: root.placeholder;
+            visible: input.text == "" && input.preedit-text == "";
+            color: Theme.label2;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            // The input carries the placeholder for assistive technology.
+            accessible-role: none;
+        }
+
+        ContextMenuArea {
+            enabled: root.enabled;
+
+            Menu {
+                MenuItem {
+                    title: @tr("Undo");
+                    activated => { input.undo(); }
+                }
+                MenuItem {
+                    title: @tr("Redo");
+                    activated => { input.redo(); }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: @tr("Cut");
+                    enabled: input.text != "";
+                    activated => { input.cut(); }
+                }
+                MenuItem {
+                    title: @tr("Copy");
+                    enabled: input.text != "";
+                    activated => { input.copy(); }
+                }
+                MenuItem {
+                    title: @tr("Paste");
+                    activated => { input.paste(); }
+                }
+                MenuItem {
+                    title: @tr("Select All");
+                    enabled: input.text != "";
+                    activated => { input.select-all(); }
+                }
+            }
+
+            input := TextInput {
+                property <length> scroll-x;
+
+                x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.scroll-x));
+                width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                single-line: true;
+                enabled: root.enabled;
+                vertical-alignment: center;
+                color: Theme.label;
+                font-size: Theme.font-body;
+                selection-background-color: Theme.accent;
+                selection-foreground-color: Theme.on-accent;
+                accessible-role: text-input;
+                accessible-label: root.placeholder;
+                accessible-placeholder-text: root.placeholder;
+                accessible-value: self.text;
+
+                cursor-position-changed(position) => {
+                    if (position.x + self.scroll-x < 0px) {
+                        self.scroll-x = -position.x;
+                    } else if (position.x + self.scroll-x > parent.width - self.text-cursor-width) {
+                        self.scroll-x = parent.width - position.x - self.text-cursor-width;
+                    }
+                }
+                accepted => { root.submitted(self.text); }
+                edited => {
+                    if (self.text == "") {
+                        root.cancelled();
+                    }
+                }
+                key-pressed(event) => {
+                    // A held Return searches once.
+                    if (event.text == Key.Return && event.repeat) {
+                        return accept;
+                    }
+                    if (event.text == Key.Escape) {
+                        self.text = "";
+                        root.cancelled();
+                        root.dismissed();
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+    }
+
+    // The clear button: a circle round the ×, concentric with the capsule's right end. Not a Tab
+    // stop (Escape does the same from the keyboard), as in a macOS search field.
+    clear := Rectangle {
+        width: root.height - 8px;
+        height: self.width;
+        x: parent.width - root.height / 2 - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        visible: root.text != "";
+        border-radius: self.height / 2;
+        background: clear-area.pressed ? Theme.sel-quiet : (clear-area.has-hover ? Theme.hover : transparent);
+        accessible-role: button;
+        accessible-label: @tr("Clear search");
+        accessible-action-default => { root.clear-text(); }
+
+        Image {
+            width: 14px;
+            height: 14px;
+            source: Icons.x;
+            colorize: Theme.label2;
+            accessible-role: none;
+        }
+
+        clear-area := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.clear-text(); }
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside the capsule like the buttons' rings.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: self.height / 2;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.enabled;
+    }
+
+    // Empties the field, ends the search and keeps the focus in it.
+    function clear-text() {
+        root.text = "";
+        root.cancelled();
+        input.focus();
+    }
+}

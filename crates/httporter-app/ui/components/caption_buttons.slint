@@ -67,16 +67,14 @@ export component CaptionButtons inherits Rectangle {
         active: root.active;
         clicked => { root.minimize(); }
 
-        Path {
+        // The dash, as a 10 × 1 px bar on a whole pixel: a path with no height (`M 0 5 L 10 5`)
+        // is a 1 px stroke centred on a pixel edge, which smears into two faint rows.
+        Rectangle {
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            y: Math.floor((parent.height - self.height) / 2 / 1px) * 1px;
             width: 10px;
-            height: 10px;
-            viewbox-width: 10;
-            viewbox-height: 10;
-            commands: "M 0 5 L 10 5";
-            stroke: parent.glyph;
-            stroke-width: 1px;
+            height: 1px;
+            background: parent.glyph;
         }
     }
 

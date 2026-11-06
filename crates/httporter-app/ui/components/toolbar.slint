@@ -2,14 +2,24 @@
 
 // The toolbar row (mockup `.titlebar`), which is also the window's title bar (I5, T2): the caption
 // buttons sit at its right end, and its empty background drags the window.
+//
+// A narrow window (or larger text) never pushes the row under the caption buttons: the row gives
+// way, in this order, from the widest window down to the narrowest (960 px):
+//   1. the title and subtitle elide, down to `title-min`;
+//   2. the search field narrows from its full width (220 px) to its least (140 px);
+//   3. the connection pill goes;
+//   4. the search field folds into a magnifier button, which opens the field in the title's place
+//      (a click, Ctrl+F) and folds it again on Escape, or when it loses the focus empty.
+// The thresholds come from what the parts measure (`lead`, `trail`, `conn-probe` and the field's
+// widths), and the row is clipped at the caption buttons should even the folded row not fit.
 
-import { LineEdit } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { ToolButton, CapsuleButton } from "buttons.slint";
 import { ConnectionPill } from "chips.slint";
 import { VCenter } from "layout.slint";
 import { CaptionButtons } from "caption_buttons.slint";
+import { SearchField } from "search_field.slint";
 
 export component Toolbar inherits Rectangle {
     in property <string> title;
@@ -66,8 +76,8 @@ export component Toolbar inherits Rectangle {
     callback toggle-sync();
     // The inspector view's Refresh (T5).
     callback refresh();
-    // The search field ("Search {site}"): shown once the app has wired search (T7). Return
-    // searches; Escape, or clearing it, ends the search.
+    // The search field ("Search {site}", mockup `.search`, after Publish): shown once the app has
+    // wired search (T7). Return searches; Escape, or emptying it, ends the search.
     in property <bool> search-available: false;
     in property <string> search-placeholder;
     in-out property <string> search-text;
@@ -98,10 +108,56 @@ export component Toolbar inherits Rectangle {
     callback caption-drag();
     callback caption-menu(length, length);
 
-    // Ctrl+F.
+    // Ctrl+F: the search field, opened first where it is folded into its button.
     public function focus-search() {
-        if (root.search-available && !root.profile-page) {
-            search-edit.focus();
+        if (root.search-shown) {
+            if (root.search-folded) {
+                root.search-open = true;
+            }
+            search-field.focus();
+        }
+    }
+
+    // ---- How the row gives way (see the top of the file) ----
+    property <bool> search-shown: root.search-available && !root.profile-page;
+    // The mockup's 10 px between the row's parts and its 14 px at the left; at the right the gap
+    // and the caption buttons' 6 px margin.
+    property <length> gap: 10px;
+    property <length> pad-left: 14px;
+    property <length> pad-right: 16px;
+    // The least the title and subtitle elide to before anything else gives way.
+    property <length> title-min: 4 * Theme.font-title;
+    // The row: the toolbar less the caption buttons.
+    property <length> row-width: root.width - captions.width;
+    // What never gives way: the paddings, the buttons at either end and the gaps either side of
+    // the spacer (which shrinks to nothing).
+    property <length> rigid-width: root.pad-left + lead.preferred-width + 2 * root.gap + trail.preferred-width + root.pad-right;
+    // The title at `title-min`, and the connection pill, each with its gap.
+    property <length> title-part: root.gap + root.title-min;
+    property <length> conn-part: root.connection-text == "" ? 0px : root.gap + conn-probe.preferred-width;
+    // What is left for the search field and its gap, with the title at `title-min` and the pill.
+    property <length> room-with-conn: root.row-width - root.rigid-width - root.title-part - root.conn-part;
+    // The pill stays while the search field still fits at its least beside it.
+    property <bool> conn-shown: root.connection-text != "" && root.room-with-conn >= (root.search-shown ? root.gap + search-field.least-width : 0px);
+    // The search field's width while it fits.
+    property <length> search-room: root.row-width - root.rigid-width - root.title-part - (root.conn-shown ? root.conn-part : 0px) - root.gap;
+    // Not even the least field fits: it folds into its button.
+    property <bool> search-folded: root.search-shown && root.search-room < search-field.least-width;
+    // Opened from its button or with Ctrl+F while folded.
+    property <bool> search-open: false;
+    property <bool> field-shown: root.search-shown && (!root.search-folded || root.search-open || search-field.has-focus || root.search-text != "");
+    // Folded and open, the field takes the title's place (the pill has gone already).
+    property <bool> title-shown: !(root.search-folded && root.field-shown);
+    property <length> field-width: root.search-folded
+        ? min(search-field.full-width, max(search-button.width, root.row-width - root.rigid-width - root.gap))
+        : min(search-field.full-width, root.search-room);
+    property <length> slot-width: root.field-shown ? root.field-width : (root.search-folded ? search-button.width : 0px);
+
+    // The search ended elsewhere (the filter bar's close button, another site): a folded field
+    // that was opened folds again.
+    changed search-text => {
+        if (root.search-text == "" && !search-field.has-focus) {
+            root.search-open = false;
         }
     }
 
@@ -130,291 +186,323 @@ export component Toolbar inherits Rectangle {
         }
     }
 
-    HorizontalLayout {
-        width: parent.width - captions.width;
-        padding-left: 14px;
-        // The mockup's 10 px gap and the caption buttons' 6 px margin.
-        padding-right: 16px;
-        spacing: 10px;
+    // Measures the connection pill for the sums above; never shown.
+    conn-probe := ConnectionPill {
+        visible: false;
+        text: root.connection-text;
+        ok: root.connection-ok;
+    }
 
-        VCenter {
-            ToolButton {
-                icon: Icons.sidebar;
-                label: @tr("Toggle sidebar");
-                accessible-checkable: true;
-                accessible-checked: root.sidebar-visible;
-                clicked => { root.toggle-sidebar(); }
-            }
-        }
+    // The row ends where the caption buttons begin, and draws nothing past that.
+    Rectangle {
+        x: 0px;
+        width: root.row-width;
+        height: parent.height;
+        clip: true;
 
-        // Back / forward capsule group (mockup `.tgroup`).
-        VCenter {
-            Rectangle {
-                background: Theme.control;
-                border-radius: self.height / 2;
-                border-width: 0.5px;
-                border-color: Theme.control-border;
-                height: 32px;
+        HorizontalLayout {
+            padding-left: root.pad-left;
+            // A hidden search field still has its gap before it: the padding gives it back.
+            padding-right: root.search-shown ? root.pad-right : root.pad-right - root.gap;
+            spacing: root.gap;
 
-                HorizontalLayout {
-                    padding: 2px;
-                    spacing: 2px;
-                    ToolButton {
-                        icon: Icons.chev-l;
-                        label: @tr("Back");
-                        enabled: root.can-go-back;
-                        clicked => { root.go-back(); }
-                    }
-                    ToolButton {
-                        icon: Icons.chev-r;
-                        label: @tr("Forward");
-                        enabled: root.can-go-forward;
-                        clicked => { root.go-forward(); }
-                    }
-                }
-            }
-        }
-
-        // Title over subtitle (mockup `.wtitle`).
-        VerticalLayout {
-            alignment: center;
-            Text {
-                text: root.title;
-                color: Theme.label;
-                font-size: Theme.font-title;
-                font-weight: Theme.weight-semibold;
-                overflow: elide;
-            }
-            if root.subtitle != "": Text {
-                text: root.subtitle;
-                color: Theme.label2;
-                font-size: Theme.font-small;
-                overflow: elide;
-            }
-        }
-
-        if root.connection-text != "": VCenter {
-            ConnectionPill {
-                text: root.connection-text;
-                ok: root.connection-ok;
-            }
-        }
-
-        Rectangle { horizontal-stretch: 1; }
-
-        // Search the open site (mockup "Search {site}").
-        VCenter {
-            visible: root.search-available && !root.profile-page;
-
-            HorizontalLayout {
-                spacing: 6px;
+            lead := HorizontalLayout {
+                horizontal-stretch: 0;
+                spacing: root.gap;
 
                 VCenter {
-                    Image {
-                        source: Icons.search;
-                        colorize: Theme.label2;
-                        width: 14px;
-                        height: 14px;
-                        accessible-role: none;
+                    ToolButton {
+                        icon: Icons.sidebar;
+                        label: @tr("Toggle sidebar");
+                        accessible-checkable: true;
+                        accessible-checked: root.sidebar-visible;
+                        clicked => { root.toggle-sidebar(); }
                     }
                 }
-                search-edit := LineEdit {
-                    width: 200px;
-                    enabled: root.search-available && !root.profile-page;
-                    placeholder-text: root.search-placeholder;
+
+                // Back / forward capsule group (mockup `.tgroup`).
+                VCenter {
+                    Rectangle {
+                        background: Theme.control;
+                        border-radius: self.height / 2;
+                        border-width: 0.5px;
+                        border-color: Theme.control-border;
+                        height: 32px;
+
+                        HorizontalLayout {
+                            padding: 2px;
+                            spacing: 2px;
+                            ToolButton {
+                                icon: Icons.chev-l;
+                                label: @tr("Back");
+                                enabled: root.can-go-back;
+                                clicked => { root.go-back(); }
+                            }
+                            ToolButton {
+                                icon: Icons.chev-r;
+                                label: @tr("Forward");
+                                enabled: root.can-go-forward;
+                                clicked => { root.go-forward(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Title over subtitle (mockup `.wtitle`): the first to give way, eliding. It never
+            // grows (the spacer does).
+            if root.title-shown: VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                min-width: 0px;
+
+                Text {
+                    text: root.title;
+                    color: Theme.label;
+                    font-size: Theme.font-title;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                }
+                if root.subtitle != "": Text {
+                    text: root.subtitle;
+                    color: Theme.label2;
+                    font-size: Theme.font-small;
+                    overflow: elide;
+                }
+            }
+
+            if root.conn-shown: VCenter {
+                ConnectionPill {
+                    text: root.connection-text;
+                    ok: root.connection-ok;
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            trail := HorizontalLayout {
+                horizontal-stretch: 0;
+                spacing: root.gap;
+
+                // In the inspector view: the rows as a list or as thumbnails (mockup
+                // `Inspector.dc.html`, `.tgroup` "Layout").
+                if !root.profile-page && root.view-mode == 1: VCenter {
+                    Rectangle {
+                        background: Theme.control;
+                        border-radius: self.height / 2;
+                        border-width: 0.5px;
+                        border-color: Theme.control-border;
+                        height: 32px;
+                        accessible-role: groupbox;
+                        accessible-label: @tr("Layout");
+
+                        HorizontalLayout {
+                            padding: 2px;
+                            spacing: 2px;
+                            ToolButton {
+                                icon: Icons.list;
+                                label: @tr("List");
+                                description: !root.grid ? @tr("On") : "";
+                                active: !root.grid;
+                                clicked => { root.set-grid(false); }
+                            }
+                            ToolButton {
+                                icon: Icons.grid;
+                                label: @tr("Thumbnails");
+                                description: root.grid ? @tr("On") : "";
+                                active: root.grid;
+                                clicked => { root.set-grid(true); }
+                            }
+                        }
+                    }
+                }
+
+                // The view (mockup `.tgroup` "View"): two panes, or a single pane with the
+                // inspector; in two panes, Compare and synchronized browsing as well.
+                if !root.profile-page: VCenter {
+                    Rectangle {
+                        background: Theme.control;
+                        border-radius: self.height / 2;
+                        border-width: 0.5px;
+                        border-color: Theme.control-border;
+                        height: 32px;
+                        accessible-role: groupbox;
+                        accessible-label: @tr("View");
+
+                        HorizontalLayout {
+                            padding: 2px;
+                            spacing: 2px;
+                            ToolButton {
+                                icon: Icons.columns;
+                                label: @tr("Two panes");
+                                description: root.view-mode == 0 ? @tr("On") : "";
+                                active: root.view-mode == 0;
+                                clicked => { root.set-view(0); }
+                            }
+                            ToolButton {
+                                icon: Icons.inspector;
+                                label: @tr("Single pane with inspector");
+                                description: root.view-mode == 1 ? @tr("On") : "";
+                                active: root.view-mode == 1;
+                                clicked => { root.set-view(1); }
+                            }
+                            // Compare and synchronized browsing are toggles: assistive technology
+                            // reads them as on or off.
+                            if root.view-mode == 0: ToolButton {
+                                icon: Icons.compare;
+                                label: @tr("Compare panes");
+                                description: root.can-compare || root.comparing ? "" : @tr("Open a folder on This PC and a site folder to compare them");
+                                active: root.comparing;
+                                enabled: root.can-compare || root.comparing;
+                                accessible-checkable: true;
+                                accessible-checked: root.comparing;
+                                clicked => { root.toggle-compare(); }
+                            }
+                            // Opening a folder in one pane opens the same folder in the other.
+                            if root.view-mode == 0: ToolButton {
+                                icon: Icons.lock;
+                                label: @tr("Synchronized browsing");
+                                active: root.sync-browsing;
+                                accessible-checkable: true;
+                                accessible-checked: root.sync-browsing;
+                                clicked => { root.toggle-sync(); }
+                            }
+                        }
+                    }
+                }
+
+                // Lists the folder of the single pane again (the inspector view's Refresh).
+                if !root.profile-page && root.view-mode == 1: VCenter {
+                    Rectangle {
+                        background: Theme.control;
+                        border-radius: self.height / 2;
+                        border-width: 0.5px;
+                        border-color: Theme.control-border;
+                        height: 32px;
+
+                        HorizontalLayout {
+                            padding: 2px;
+                            ToolButton {
+                                icon: Icons.refresh;
+                                label: @tr("Refresh");
+                                clicked => { root.refresh(); }
+                            }
+                        }
+                    }
+                }
+
+                // Upload, Download, New folder and Delete (mockup `.tgroup` "File actions").
+                if !root.profile-page: VCenter {
+                    Rectangle {
+                        background: Theme.control;
+                        border-radius: self.height / 2;
+                        border-width: 0.5px;
+                        border-color: Theme.control-border;
+                        height: 32px;
+
+                        HorizontalLayout {
+                            padding: 2px;
+                            spacing: 2px;
+                            ToolButton {
+                                icon: Icons.up;
+                                label: @tr("Upload");
+                                description: root.can-upload ? "" : root.actions-note;
+                                enabled: root.can-upload;
+                                clicked => { root.upload(); }
+                            }
+                            ToolButton {
+                                icon: Icons.down;
+                                label: @tr("Download");
+                                description: root.can-download ? "" : root.actions-note;
+                                enabled: root.can-download;
+                                clicked => { root.download(); }
+                            }
+                            ToolButton {
+                                icon: Icons.newfolder;
+                                label: @tr("New folder");
+                                description: root.can-new-folder ? "" : root.actions-note;
+                                enabled: root.can-new-folder;
+                                clicked => { root.new-folder(); }
+                            }
+                            ToolButton {
+                                icon: Icons.trash;
+                                label: @tr("Delete");
+                                description: root.delete-note != "" ? root.delete-note : (root.can-delete ? "" : root.actions-note);
+                                enabled: root.can-delete;
+                                clicked => { root.delete(); }
+                            }
+                            // The cloud selection's URLs, from a Bunny site's pull zones.
+                            ToolButton {
+                                icon: Icons.purge;
+                                label: @tr("Purge from CDN");
+                                description: root.can-purge ? "" : @tr("Select files of a Bunny site to purge them");
+                                enabled: root.can-purge;
+                                clicked => { root.purge(); }
+                            }
+                        }
+                    }
+                }
+
+                if root.profile-page: VCenter {
+                    CapsuleButton {
+                        text: @tr("Edit Profile");
+                        icon: Icons.pencil;
+                        clicked => { root.edit-profile(); }
+                    }
+                }
+
+                VCenter {
+                    CapsuleButton {
+                        text: @tr("Publish");
+                        icon: Icons.send;
+                        primary: true;
+                        enabled: root.can-publish || root.profile-page;
+                        clicked => { root.publish(); }
+                    }
+                }
+            }
+
+            // Search the open site (mockup "Search {site}"): the capsule, or the button it folds
+            // into. Always here (Ctrl+F reaches it), 0 px wide while there is no search.
+            Rectangle {
+                width: root.slot-width;
+
+                search-field := SearchField {
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width;
+                    visible: root.field-shown;
+                    enabled: root.search-shown;
+                    placeholder: root.search-placeholder;
                     text <=> root.search-text;
-                    accepted(text) => { root.search-submitted(text); }
-                    edited(text) => {
-                        if (text == "") {
-                            root.search-cancel();
+                    submitted(text) => { root.search-submitted(text); }
+                    cancelled => { root.search-cancel(); }
+                    // Escape folds an opened field again, and leaves the focus on its button.
+                    dismissed => {
+                        if (root.search-folded) {
+                            root.search-open = false;
+                            search-button.focus();
                         }
                     }
-                    key-pressed(event) => {
-                        if (event.text == Key.Escape) {
-                            self.text = "";
-                            root.search-cancel();
-                            return accept;
+                    changed has-focus => {
+                        if (!self.has-focus && root.search-text == "") {
+                            root.search-open = false;
                         }
-                        return reject;
                     }
                 }
-            }
-        }
 
-        // In the inspector view: the rows as a list or as thumbnails (mockup `Inspector.dc.html`,
-        // `.tgroup` "Layout").
-        if !root.profile-page && root.view-mode == 1: VCenter {
-            Rectangle {
-                background: Theme.control;
-                border-radius: self.height / 2;
-                border-width: 0.5px;
-                border-color: Theme.control-border;
-                height: 32px;
-                accessible-role: groupbox;
-                accessible-label: @tr("Layout");
-
-                HorizontalLayout {
-                    padding: 2px;
-                    spacing: 2px;
-                    ToolButton {
-                        icon: Icons.list;
-                        label: @tr("List");
-                        description: !root.grid ? @tr("On") : "";
-                        active: !root.grid;
-                        clicked => { root.set-grid(false); }
-                    }
-                    ToolButton {
-                        icon: Icons.grid;
-                        label: @tr("Thumbnails");
-                        description: root.grid ? @tr("On") : "";
-                        active: root.grid;
-                        clicked => { root.set-grid(true); }
+                search-button := ToolButton {
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    visible: root.search-folded && !root.field-shown;
+                    icon: Icons.search;
+                    label: @tr("Search");
+                    description: root.search-placeholder;
+                    clicked => {
+                        root.search-open = true;
+                        search-field.focus();
                     }
                 }
-            }
-        }
-
-        // The view (mockup `.tgroup` "View"): two panes, or a single pane with the inspector;
-        // in two panes, Compare and synchronized browsing as well.
-        if !root.profile-page: VCenter {
-            Rectangle {
-                background: Theme.control;
-                border-radius: self.height / 2;
-                border-width: 0.5px;
-                border-color: Theme.control-border;
-                height: 32px;
-                accessible-role: groupbox;
-                accessible-label: @tr("View");
-
-                HorizontalLayout {
-                    padding: 2px;
-                    spacing: 2px;
-                    ToolButton {
-                        icon: Icons.columns;
-                        label: @tr("Two panes");
-                        description: root.view-mode == 0 ? @tr("On") : "";
-                        active: root.view-mode == 0;
-                        clicked => { root.set-view(0); }
-                    }
-                    ToolButton {
-                        icon: Icons.inspector;
-                        label: @tr("Single pane with inspector");
-                        description: root.view-mode == 1 ? @tr("On") : "";
-                        active: root.view-mode == 1;
-                        clicked => { root.set-view(1); }
-                    }
-                    // Compare and synchronized browsing are toggles: assistive technology reads
-                    // them as on or off.
-                    if root.view-mode == 0: ToolButton {
-                        icon: Icons.compare;
-                        label: @tr("Compare panes");
-                        description: root.can-compare || root.comparing ? "" : @tr("Open a folder on This PC and a site folder to compare them");
-                        active: root.comparing;
-                        enabled: root.can-compare || root.comparing;
-                        accessible-checkable: true;
-                        accessible-checked: root.comparing;
-                        clicked => { root.toggle-compare(); }
-                    }
-                    // Opening a folder in one pane opens the same folder in the other.
-                    if root.view-mode == 0: ToolButton {
-                        icon: Icons.lock;
-                        label: @tr("Synchronized browsing");
-                        active: root.sync-browsing;
-                        accessible-checkable: true;
-                        accessible-checked: root.sync-browsing;
-                        clicked => { root.toggle-sync(); }
-                    }
-                }
-            }
-        }
-
-        // Lists the folder of the single pane again (the inspector view's Refresh).
-        if !root.profile-page && root.view-mode == 1: VCenter {
-            Rectangle {
-                background: Theme.control;
-                border-radius: self.height / 2;
-                border-width: 0.5px;
-                border-color: Theme.control-border;
-                height: 32px;
-
-                HorizontalLayout {
-                    padding: 2px;
-                    ToolButton {
-                        icon: Icons.refresh;
-                        label: @tr("Refresh");
-                        clicked => { root.refresh(); }
-                    }
-                }
-            }
-        }
-
-        // Upload, Download, New folder and Delete (mockup `.tgroup` "File actions").
-        if !root.profile-page: VCenter {
-            Rectangle {
-                background: Theme.control;
-                border-radius: self.height / 2;
-                border-width: 0.5px;
-                border-color: Theme.control-border;
-                height: 32px;
-
-                HorizontalLayout {
-                    padding: 2px;
-                    spacing: 2px;
-                    ToolButton {
-                        icon: Icons.up;
-                        label: @tr("Upload");
-                        description: root.can-upload ? "" : root.actions-note;
-                        enabled: root.can-upload;
-                        clicked => { root.upload(); }
-                    }
-                    ToolButton {
-                        icon: Icons.down;
-                        label: @tr("Download");
-                        description: root.can-download ? "" : root.actions-note;
-                        enabled: root.can-download;
-                        clicked => { root.download(); }
-                    }
-                    ToolButton {
-                        icon: Icons.newfolder;
-                        label: @tr("New folder");
-                        description: root.can-new-folder ? "" : root.actions-note;
-                        enabled: root.can-new-folder;
-                        clicked => { root.new-folder(); }
-                    }
-                    ToolButton {
-                        icon: Icons.trash;
-                        label: @tr("Delete");
-                        description: root.delete-note != "" ? root.delete-note : (root.can-delete ? "" : root.actions-note);
-                        enabled: root.can-delete;
-                        clicked => { root.delete(); }
-                    }
-                    // The cloud selection's URLs, from a Bunny site's pull zones.
-                    ToolButton {
-                        icon: Icons.purge;
-                        label: @tr("Purge from CDN");
-                        description: root.can-purge ? "" : @tr("Select files of a Bunny site to purge them");
-                        enabled: root.can-purge;
-                        clicked => { root.purge(); }
-                    }
-                }
-            }
-        }
-
-        if root.profile-page: VCenter {
-            CapsuleButton {
-                text: @tr("Edit Profile");
-                icon: Icons.pencil;
-                clicked => { root.edit-profile(); }
-            }
-        }
-
-        VCenter {
-            CapsuleButton {
-                text: @tr("Publish");
-                icon: Icons.send;
-                primary: true;
-                enabled: root.can-publish || root.profile-page;
-                clicked => { root.publish(); }
             }
         }
     }
