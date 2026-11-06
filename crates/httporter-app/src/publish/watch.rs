@@ -128,7 +128,10 @@ pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
 
 /// Whether profile `id`'s folder is watched now (the sidebar's "Watching" mark).
 pub(super) fn watching(p: &Publisher, id: &ProfileId) -> bool {
-    lock(&p.watch).loops.get(id).is_some_and(|entry| entry.active)
+    lock(&p.watch)
+        .loops
+        .get(id)
+        .is_some_and(|entry| entry.active)
 }
 
 /// A profile was saved (the profile sheet, Change Folder…): watching starts, follows the new
@@ -185,7 +188,10 @@ pub(super) fn show_note(p: &Arc<Publisher>, ui: &AppWindow) {
 /// The page's note: why watching stopped, then the deletes that wait; and whether Review… shows.
 fn note_text(notes: &Notes) -> (String, bool) {
     let held = (notes.held > 0).then(|| copy::watch_held_back(notes.held));
-    let text: Vec<String> = [notes.stopped.clone(), held].into_iter().flatten().collect();
+    let text: Vec<String> = [notes.stopped.clone(), held]
+        .into_iter()
+        .flatten()
+        .collect();
     (text.join(" "), notes.held > 0)
 }
 
@@ -288,15 +294,19 @@ enum News {
     Watching,
     /// A run published `files` changed files (uploads and deletes); `purge_failed`: its CDN purge
     /// didn't go.
-    Published { files: u64, purge_failed: bool },
+    Published {
+        files: u64,
+        purge_failed: bool,
+    },
     /// A run's `failed` files didn't go; `files` did.
-    Failed { failed: u64, files: u64 },
+    Failed {
+        failed: u64,
+        files: u64,
+    },
     /// A run couldn't happen, in the headless publish's words.
     Error(String),
     /// `n` files removed from the folder wait for a review to be deleted (0: none any more).
     HeldBack(u64),
-    /// A run ended: the page reads its history again.
-    Ran,
     Stopped(Stop),
 }
 
@@ -307,8 +317,10 @@ trait Host: Send + Sync + 'static {
     /// Whether `dir` is there.
     fn folder(&self, dir: PathBuf) -> impl Future<Output = Folder> + Send + 'static;
     /// The profile as saved now, or why it can't be watched any more.
-    fn check(&self, id: ProfileId)
-    -> impl Future<Output = Result<ProfileRecord, Stop>> + Send + 'static;
+    fn check(
+        &self,
+        id: ProfileId,
+    ) -> impl Future<Output = Result<ProfileRecord, Stop>> + Send + 'static;
     /// One headless publish of `profile`.
     fn publish(
         &self,
@@ -643,14 +655,12 @@ impl<H: Host> Loop<H> {
                 }
             }
             Ok(HeadlessOutcome::DryRun { .. }) => {}
-            Err(HeadlessError::Config(why) | HeadlessError::Auth(why) | HeadlessError::Io(why)) => {
-                host.tell(profile, News::Error(why));
-            }
+            Err(e) => host.tell(profile, News::Error(e.text().to_owned())),
         }
+        // The headless publish has brought the profile page and its history up to date.
         if let Some(n) = end.held {
             host.tell(profile, News::HeldBack(n));
         }
-        host.tell(profile, News::Ran);
     }
 
     /// Every [`TICK`]: is the folder still there, and still watched? A folder gone for
@@ -884,10 +894,13 @@ fn show_news(p: &Arc<Publisher>, ui: &AppWindow, about: &About, news: News) {
             toast::show(ui, ToastKind::Warning, text, None);
         }
         News::HeldBack(n) => {
-            lock(&p.watch).notes.entry(about.id.clone()).or_default().held = n;
+            lock(&p.watch)
+                .notes
+                .entry(about.id.clone())
+                .or_default()
+                .held = n;
             show_note(p, ui);
         }
-        News::Ran => super::profile_view::refresh(p),
         News::Stopped(Stop::Off) => show_marks(p, ui),
         News::Stopped(stop) => {
             let note = copy::watch_stopped_note(&stop);
@@ -1051,7 +1064,12 @@ mod tests {
     }
 
     impl Host for Fake {
-        fn watch(&self, _dir: &Path, _rules: SkipRules, _tx: Sender) -> io::Result<Box<dyn Source>> {
+        fn watch(
+            &self,
+            _dir: &Path,
+            _rules: SkipRules,
+            _tx: Sender,
+        ) -> io::Result<Box<dyn Source>> {
             self.watches.fetch_add(1, Ordering::SeqCst);
             self.alive.store(true, Ordering::SeqCst);
             Ok(Box::new(FakeSource(self.alive.clone())))
@@ -1091,12 +1109,7 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| done(1));
-            let gate = self
-                .gate
-                .lock()
-                .unwrap()
-                .clone()
-                .filter(|_| !opts.dry_run);
+            let gate = self.gate.lock().unwrap().clone().filter(|_| !opts.dry_run);
             async move {
                 if let Some(gate) = gate {
                     gate.notified().await;
@@ -1155,7 +1168,6 @@ mod tests {
                     files: 1,
                     purge_failed: false
                 },
-                News::Ran
             ]
         );
         sleep(secs(60.0)).await;
@@ -1190,7 +1202,11 @@ mod tests {
         assert_eq!(fake.runs().len(), 1, "one run at a time");
         gate.notify_one();
         sleep(secs(0.1)).await;
-        assert_eq!(fake.runs().len(), 2, "the queued changes are long quiet: at once");
+        assert_eq!(
+            fake.runs().len(),
+            2,
+            "the queued changes are long quiet: at once"
+        );
         gate.notify_one();
         sleep(secs(60.0)).await;
         assert_eq!(fake.runs().len(), 2, "exactly one more");
@@ -1410,10 +1426,7 @@ mod tests {
         assert_eq!(at("node_modules"), None);
         assert_eq!(at(r"blog\Thumbs.db"), None);
         assert_eq!(at("draft.tmp"), None);
-        assert_eq!(
-            classify(root, &rules, Path::new(r"D:\elsewhere\x")),
-            None
-        );
+        assert_eq!(classify(root, &rules, Path::new(r"D:\elsewhere\x")), None);
     }
 
     #[test]
@@ -1490,6 +1503,18 @@ mod sheet_tests {
             .unwrap_or_else(|| panic!("no {role:?} labelled {label:?}"))
     }
 
+    /// The checkbox, when it is on screen (the test search skips what a scroll view clips).
+    fn unattended(w: &AppWindow) -> Option<ElementHandle> {
+        ElementQuery::from_root(w)
+            .match_accessible_role(AccessibleRole::Checkbox)
+            .match_predicate(|e| {
+                e.accessible_label().is_some_and(|l| {
+                    l.as_str() == "Delete without asking when publishing automatically"
+                })
+            })
+            .find_first()
+    }
+
     #[test]
     fn the_profile_sheet_fits_the_smallest_window() {
         for (width, height) in [(960.0, 600.0), (760.0, 600.0)] {
@@ -1502,12 +1527,26 @@ mod sheet_tests {
                     "{width}×{height}: {label} is cut off: {p:?} {s:?}"
                 );
             }
+            // The fields scroll: the last ones come into view as Tab reaches them.
+            assert!(
+                unattended(&w).is_none(),
+                "{width}×{height}: nothing to scroll"
+            );
+            let mut tabs = 0;
+            while unattended(&w).is_none() && tabs < 30 {
+                crate::keyboard_tests::tab(&w, 1);
+                tabs += 1;
+            }
+            assert!(
+                unattended(&w).is_some(),
+                "{width}×{height}: Tab never showed the last option"
+            );
         }
     }
 
     #[test]
     fn deleting_without_asking_needs_removing_files() {
-        let w = sheet_at(960.0, 700.0, false);
+        let w = sheet_at(960.0, 1000.0, false);
         let check = labelled(
             &w,
             AccessibleRole::Checkbox,
@@ -1515,7 +1554,7 @@ mod sheet_tests {
         );
         assert_eq!(check.accessible_enabled(), Some(false));
         assert_eq!(check.accessible_checked(), Some(false));
-        let w = sheet_at(960.0, 700.0, true);
+        let w = sheet_at(960.0, 1000.0, true);
         let check = labelled(
             &w,
             AccessibleRole::Checkbox,

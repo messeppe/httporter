@@ -99,7 +99,9 @@ impl DirWatcher {
     /// Whether the thread still reads changes. It ends by itself when the folder can't be read
     /// any more (deleted, or its drive gone), without a last call to `on_change`.
     pub fn is_running(&self) -> bool {
-        self.thread.as_ref().is_some_and(|thread| !thread.is_finished())
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
     }
 }
 
