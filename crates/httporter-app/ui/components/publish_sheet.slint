@@ -86,7 +86,7 @@ component SheetHead inherits HorizontalLayout {
         Text {
             text: root.title;
             color: Theme.label;
-            font-size: 17px;
+            font-size: Theme.font-headline;
             font-weight: Theme.weight-semibold;
             wrap: word-wrap;
         }
@@ -136,7 +136,7 @@ component PlanItem inherits Rectangle {
     // A tree folder row's disclosure triangle.
     callback expand();
 
-    height: 30px;
+    height: 30px + Theme.grow;
     background: root.entry.header ? Theme.row-alt : (area.has-hover ? Theme.hover : transparent);
     accessible-role: checkbox;
     accessible-label: root.entry.path;
@@ -194,7 +194,7 @@ component PlanItem inherits Rectangle {
             text: root.entry.path;
             color: Theme.label;
             font-size: root.entry.header ? Theme.font-small : Theme.font-body;
-            font-weight: root.entry.header ? Theme.weight-semibold : 400;
+            font-weight: root.entry.header ? Theme.weight-semibold : Theme.weight-regular;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
@@ -227,7 +227,7 @@ component PlanItem inherits Rectangle {
             width: 90px;
             text: root.entry.size;
             color: Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             horizontal-alignment: right;
             vertical-alignment: center;
             accessible-role: none;
@@ -262,9 +262,9 @@ export component PublishSheet inherits Rectangle {
     callback plan-filter-changed(string);
     callback plan-expand(int);
 
-    // As many rows as fit under the toolbar with the rest of the sheet (about 460 px), and at least
-    // four.
-    property <length> list-height: min(max(root.rows.length, 4) * 30px, max(120px, root.height - Theme.toolbar-height - 460px));
+    // As many rows as fit under the toolbar with the rest of the sheet (about 460 px, and its dozen
+    // lines of text grow with the text size), and at least four.
+    property <length> list-height: min(max(root.rows.length, 4) * (30px + Theme.grow), max(4 * (30px + Theme.grow), root.height - Theme.toolbar-height - 460px - 12 * Theme.grow));
     property <bool> busy: root.data.busy;
     property <bool> has-plan: !root.data.busy && root.data.error == "";
 
@@ -399,7 +399,7 @@ export component PublishSheet inherits Rectangle {
                                     text: root.data.destination;
                                     color: Theme.label;
                                     font-family: Theme.font-mono;
-                                    font-size: 12px;
+                                    font-size: Theme.font-caption;
                                     overflow: elide;
                                 }
                                 Text {
@@ -415,7 +415,7 @@ export component PublishSheet inherits Rectangle {
                 // What the compare found, and what will go up.
                 HorizontalLayout {
                     spacing: 8px;
-                    height: 20px;
+                    height: Theme.chip-height;
 
                     if root.has-plan && root.data.changed > 0: Chip {
                         text: @tr("{} changed", Counts.grouped(root.data.changed));
@@ -575,7 +575,7 @@ export component PublishSheet inherits Rectangle {
                         horizontal-stretch: 1;
                         text: root.data.warning;
                         color: Theme.orange;
-                        font-size: 12px;
+                        font-size: Theme.font-caption;
                         wrap: word-wrap;
                     }
                 }

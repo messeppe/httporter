@@ -71,8 +71,8 @@ component Tab inherits Rectangle {
             height: parent.height;
             text: root.item.title;
             color: root.current ? Theme.label : Theme.label2;
-            font-size: 12px;
-            font-weight: root.current ? Theme.weight-semibold : 400;
+            font-size: Theme.font-caption;
+            font-weight: root.current ? Theme.weight-semibold : Theme.weight-regular;
             horizontal-alignment: center;
             vertical-alignment: center;
             overflow: elide;
@@ -96,7 +96,7 @@ export component TabStrip inherits Rectangle {
     callback close(int);
     callback new-tab();
 
-    height: 32px;
+    height: 32px + Theme.grow;
     background: Theme.chrome;
     accessible-role: tab-list;
     accessible-label: @tr("Tabs");

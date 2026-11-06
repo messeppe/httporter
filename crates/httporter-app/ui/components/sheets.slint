@@ -27,6 +27,12 @@ global Cols {
     out property <length> action: 150px;
 }
 
+// The heights of the conflict table's heading row and rows, which hold a line of text each.
+global ConflictSizes {
+    out property <length> head: 27px + Theme.grow-small;
+    out property <length> row: 36px + Theme.grow;
+}
+
 // The scrim and the keyboard trap of a modal dialog. The dialog goes in as the children and
 // places itself in the window. It reports the keys it takes: Escape (`cancel`), Return when no
 // control took it (`confirm`, the default button) and Tab and Shift+Tab at the ends of the Tab
@@ -183,7 +189,7 @@ export component AlertCard inherits Rectangle {
             Text {
                 text: root.body;
                 color: Theme.label2;
-                font-size: 12px;
+                font-size: Theme.font-caption;
                 horizontal-alignment: center;
                 wrap: word-wrap;
                 accessible-role: none;
@@ -210,7 +216,7 @@ component CheckRow inherits Rectangle {
         }
     }
 
-    height: 20px;
+    height: 20px + Theme.grow;
     forward-focus: key-focus;
     opacity: root.enabled ? 1 : 0.5;
     accessible-role: checkbox;
@@ -261,8 +267,8 @@ component CheckRow inherits Rectangle {
         height: parent.height + 6px;
         border-radius: 8px;
         border-width: 2px;
-        border-color: Theme.accent;
-        visible: root.has-focus;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.enabled;
     }
 
     // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
@@ -305,7 +311,7 @@ export component Segmented inherits Rectangle {
         }
     }
 
-    height: 28px;
+    height: Theme.control-height;
     background: Theme.chip;
     border-radius: 8px;
     forward-focus: key-focus;
@@ -335,7 +341,7 @@ export component Segmented inherits Rectangle {
                     text: option;
                     color: Theme.label;
                     font-size: Theme.font-body;
-                    font-weight: i == root.current ? Theme.weight-semibold : 400;
+                    font-weight: i == root.current ? Theme.weight-semibold : Theme.weight-regular;
                     vertical-alignment: center;
                     accessible-role: none;
                 }
@@ -358,7 +364,7 @@ export component Segmented inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -394,7 +400,7 @@ component ActionPicker inherits Rectangle {
     // The user chose an action.
     callback chosen(int);
 
-    height: 26px;
+    height: 26px + Theme.grow;
 
     init => { picker.current-index = root.action; }
     changed action => { picker.current-index = root.action; }
@@ -418,7 +424,7 @@ component ConflictItem inherits Rectangle {
     in property <int> mode;
     callback chosen(int);
 
-    height: 36px;
+    height: ConflictSizes.row;
     background: Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent;
     accessible-role: list-item;
     accessible-label: root.item.name;
@@ -460,7 +466,7 @@ component ConflictItem inherits Rectangle {
             width: Cols.date;
             text: root.item.source;
             color: Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -468,7 +474,7 @@ component ConflictItem inherits Rectangle {
             width: Cols.date;
             text: root.item.target;
             color: Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -526,7 +532,7 @@ export component ConflictSheet inherits Rectangle {
     property <bool> remember: true;
     // As many rows as fit under the toolbar with the rest of the sheet (about 330 px), and at
     // least three.
-    property <length> table-height: min(root.rows.length * 36px, max(108px, root.height - Theme.toolbar-height - 330px));
+    property <length> table-height: min(root.rows.length * ConflictSizes.row, max(3 * ConflictSizes.row, root.height - Theme.toolbar-height - 330px - 10 * Theme.grow));
 
     init => { mode-control.focus(); }
 
@@ -573,7 +579,7 @@ export component ConflictSheet inherits Rectangle {
                     Text {
                         text: root.title;
                         color: Theme.label;
-                        font-size: 17px;
+                        font-size: Theme.font-headline;
                         font-weight: Theme.weight-semibold;
                         wrap: word-wrap;
                     }
@@ -616,14 +622,14 @@ export component ConflictSheet inherits Rectangle {
                         Text {
                             text: root.summary;
                             color: Theme.label2;
-                            font-size: 12px;
+                            font-size: Theme.font-caption;
                             horizontal-alignment: right;
                         }
                     }
                 }
 
                 Rectangle {
-                    height: 27px + root.table-height;
+                    height: ConflictSizes.head + root.table-height;
                     background: Theme.content;
                     border-radius: Theme.radius-md;
                     border-width: 0.5px;
@@ -632,7 +638,7 @@ export component ConflictSheet inherits Rectangle {
 
                     // Column headings.
                     Rectangle {
-                        height: 27px;
+                        height: ConflictSizes.head;
 
                         HorizontalLayout {
                             padding-left: 14px;
@@ -693,8 +699,8 @@ export component ConflictSheet inherits Rectangle {
                     // The rows. The list view insets its content by 2 px on every side; it reaches
                     // out by that much so that the rows run edge to edge.
                     Rectangle {
-                        y: 27px;
-                        height: parent.height - 27px;
+                        y: ConflictSizes.head;
+                        height: parent.height - ConflictSizes.head;
                         clip: true;
 
                         ListView {
@@ -797,7 +803,7 @@ export component NewFolderSheet inherits Rectangle {
                 Text {
                     text: @tr("New Folder");
                     color: Theme.label;
-                    font-size: 17px;
+                    font-size: Theme.font-headline;
                     font-weight: Theme.weight-semibold;
                     accessible-role: none;
                 }
@@ -892,7 +898,7 @@ export component DeleteAlert inherits Rectangle {
 
                     purge-check := CheckRow {
                         text: @tr("Also purge these URLs from the CDN");
-                        font-size: 12px;
+                        font-size: Theme.font-caption;
                         enabled: root.purge-available;
                         checked <=> root.purge;
                     }
@@ -1032,7 +1038,7 @@ export component ImportSheet inherits Rectangle {
                 Text {
                     text: @tr("Import a Site");
                     color: Theme.label;
-                    font-size: 17px;
+                    font-size: Theme.font-headline;
                     font-weight: Theme.weight-semibold;
                     accessible-role: none;
                 }

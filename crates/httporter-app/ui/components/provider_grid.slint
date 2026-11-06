@@ -27,7 +27,7 @@ component ProviderChoice inherits Rectangle {
     horizontal-stretch: 1;
     preferred-width: 0px;
     min-width: 0px;
-    height: 44px;
+    height: 44px + Theme.grow + Theme.grow-small;
     border-radius: Theme.radius-md;
     background: root.available ? Theme.content : Theme.chip;
     border-width: root.selected ? 2px : 0.5px;
@@ -84,7 +84,7 @@ component ProviderChoice inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.ringed;
     }
 

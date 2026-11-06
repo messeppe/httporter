@@ -36,7 +36,7 @@ component FeatureRow inherits HorizontalLayout {
         Text {
             text: root.heading;
             color: Theme.label;
-            font-size: 14px;
+            font-size: Theme.font-callout;
             font-weight: Theme.weight-bold;
             wrap: word-wrap;
         }
@@ -60,7 +60,7 @@ component QuietAction inherits Rectangle {
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
-    height: 28px;
+    height: Theme.control-height;
     border-radius: self.height / 2;
     background: area.has-hover && root.enabled ? Theme.hover : transparent;
     opacity: root.enabled ? 1 : 0.45;
@@ -107,8 +107,8 @@ component QuietAction inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
-        visible: root.has-focus;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.enabled;
     }
 
     // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
@@ -192,14 +192,14 @@ export component WelcomeView inherits Rectangle {
                             Text {
                                 text: @tr("HTTP");
                                 color: Theme.accent-text;
-                                font-size: 34px;
+                                font-size: Theme.font-display;
                                 font-weight: Theme.weight-bold;
                                 accessible-role: none;
                             }
                             Text {
                                 text: @tr("orter");
                                 color: Theme.label;
-                                font-size: 34px;
+                                font-size: Theme.font-display;
                                 font-weight: Theme.weight-bold;
                                 accessible-role: none;
                             }
@@ -208,7 +208,7 @@ export component WelcomeView inherits Rectangle {
                     Text {
                         text: @tr("Fast, safe file transfers to cloud storage over HTTP.");
                         color: Theme.label2;
-                        font-size: 15px;
+                        font-size: Theme.font-title;
                         horizontal-alignment: center;
                         wrap: word-wrap;
                     }
@@ -243,7 +243,7 @@ export component WelcomeView inherits Rectangle {
                         alignment: center;
                         CapsuleButton {
                             width: min(280px, root.width - 48px);
-                            height: 32px;
+                            height: 32px + Theme.grow;
                             text: @tr("Add Your First Site");
                             icon: Icons.plus;
                             primary: true;
