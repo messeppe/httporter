@@ -148,8 +148,9 @@ Exported sites (Settings › Sites) are a separate JSON file that never holds a 
 ## Building and releasing
 
 - `cargo build --release -p httporter-app` builds `httporter.exe`. The release profile is
-  built for speed: the default `opt-level = 3`, fat LTO, one codegen unit, stripped. There is
-  no exe-size budget.
+  built for size (`opt-level = "s"`) except the busy code, which gets `opt-level = 3`
+  (hashing, TLS crypto, the renderers); fat LTO, one codegen unit, stripped. There is no exe-size
+  budget: no feature or behaviour is dropped for size.
   Never `panic = "abort"`: the app relies on unwinding.
 - `tools/check.ps1` is the local gate and `.github/workflows/ci.yml` its CI twin: format,
   clippy, tests, `cargo deny` (licences and bans, `deny.toml`), SPDX headers
