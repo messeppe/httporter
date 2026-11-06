@@ -11,12 +11,9 @@ pub fn cache_dir(kind: &str) -> PathBuf {
     cache_root().join(kind)
 }
 
-/// `%LOCALAPPDATA%\HTTPorter\cache`.
+/// `%LOCALAPPDATA%\HTTPorter\cache`, or under `HTTPORTER_DATA_DIR` (see [`crate::paths`]).
 fn cache_root() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_default()
-        .join("HTTPorter")
-        .join("cache")
+    crate::paths::local_dir().join("cache")
 }
 
 /// Deletes the cached files not changed for `older_than`, and the folders that leaves empty

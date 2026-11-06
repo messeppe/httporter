@@ -25,6 +25,20 @@ cargo run -p httporter-app        # build and start it
 
 Debug builds keep a console window for `println!` and panics; release builds have none.
 
+### Running a build without touching your own data
+
+A debug or test build opens the same database as the installed HTTPorter, and a newer build
+migrates it to a schema the installed release can't read. Point it at a scratch folder instead:
+
+```powershell
+$env:HTTPORTER_DATA_DIR = 'D:\Temp\httporter-scratch'   # any absolute path
+cargo run -p httporter-app
+```
+
+The database and logs then live in `<dir>\Roaming\HTTPorter`, the cache in
+`<dir>\Local\HTTPorter` (`crates/httporter-platform/src/paths.rs`). Passwords and keys still go
+to Windows Credential Manager, so use test sites in a scratch profile.
+
 ## Checks
 
 Run the local gate before every commit:

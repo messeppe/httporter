@@ -230,14 +230,12 @@ fn decode_setting<T: DeserializeOwned + Serialize + Default>(text: &str) -> T {
     T::deserialize(&Value::Object(kept)).unwrap_or_default()
 }
 
-/// `%APPDATA%\HTTPorter\httporter.db` (the per-user roaming config folder).
+/// `%APPDATA%\HTTPorter\httporter.db` (the per-user roaming config folder), or under
+/// `HTTPORTER_DATA_DIR` (see [`crate::paths`]).
 ///
 /// If the platform reports no config folder the path is relative to the working directory.
 pub fn default_db_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_default()
-        .join("HTTPorter")
-        .join("httporter.db")
+    crate::paths::roaming_dir().join("httporter.db")
 }
 
 /// The sites that could be read, and how many rows could not.

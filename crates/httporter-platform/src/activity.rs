@@ -18,12 +18,9 @@ pub const LOG_FILES: usize = 10;
 /// A log file is rotated once it reaches this size.
 pub const LOG_FILE_BYTES: u64 = 5 << 20;
 
-/// `%APPDATA%\HTTPorter\logs`.
+/// `%APPDATA%\HTTPorter\logs`, or under `HTTPORTER_DATA_DIR` (see [`crate::paths`]).
 pub fn default_log_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_default()
-        .join("HTTPorter")
-        .join("logs")
+    crate::paths::roaming_dir().join("logs")
 }
 
 /// The activity log, open for appending.

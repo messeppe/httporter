@@ -4,6 +4,7 @@ pub mod activity;
 pub mod cache;
 pub mod creds;
 pub mod journal;
+pub mod paths;
 pub mod store;
 pub mod win;
 
