@@ -38,13 +38,16 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-# The app draws with the software renderer only (main.rs), so the OpenGL renderer
-# (femtovg, glutin) and the tray icon stay out of the exe (S8: ≤ 25 MB).
+# Two renderers on the winit backend: the software one by default (lowest memory, S7),
+# and the GPU one (FemtoVG on OpenGL, through glutin) when chosen in Settings › Advanced
+# (I5; the app picks one at start in `renderer.rs`). There is no exe-size budget any
+# more (user, 2026-11-05).
 slint = { version = "1.18", default-features = false, features = [
     "std",
     "compat-1-2",
     "backend-winit",
     "renderer-software",
+    "renderer-femtovg",
     "accessibility",
 ] }
 # Build only: compiles the .slint files; same version as `slint`.
@@ -62,7 +65,7 @@ wiremock = "0.6.5"
 
 # Never set `panic = "abort"`: the app relies on unwinding.
 # Full speed (opt-level 3) for the code that is busy while transferring (checksums, TLS crypto)
-# or drawing (the software renderer and its rasterizers); everything else is built for size
+# or drawing (the software and GPU renderers and their rasterizers); everything else is built for size
 # (opt-level "s"), where full speed would only make the exe bigger (user choice 2026-11-06:
 # "busy parts only"). No feature or behaviour is dropped for size.
 [profile.release]
@@ -87,4 +90,13 @@ opt-level = 3
 opt-level = 3
 
 [profile.release.package.zeno]
+opt-level = 3
+
+[profile.release.package.i-slint-renderer-femtovg]
+opt-level = 3
+
+[profile.release.package.femtovg]
+opt-level = 3
+
+[profile.release.package.glow]
 opt-level = 3

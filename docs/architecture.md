@@ -8,7 +8,7 @@ describes the code that exists. Module doc comments (`//!`) go into more detail,
 
 ```
 +------------------------------- httporter.exe -------------------------------+
-|  UI: Slint (Cupertino style, software renderer, winit)        main thread    |
+|  UI: Slint (Cupertino style, software or GPU renderer, winit) main thread    |
 |    window, sidebar, panes, tabs, transfer drawer, sheets, Quick Look,        |
 |    Settings; the Explorer drop hook                                          |
 |        ^ views, at most ~10 a second              | callbacks                |
@@ -66,8 +66,9 @@ Adding a provider: [CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-storage-provide
 
 ## Threads
 
-- **Main thread:** Slint's event loop (winit backend, software renderer, chosen in `main.rs`
-  unless `SLINT_BACKEND` says otherwise). It runs the callbacks and applies views, and does no
+- **Main thread:** Slint's event loop (winit backend; the software renderer, or the GPU one
+  (femtovg/OpenGL) when chosen in Settings › Advanced, picked in `renderer.rs` unless
+  `SLINT_BACKEND` says otherwise). It runs the callbacks and applies views, and does no
   network or disk work.
 - **tokio runtime** (multi-threaded, built in `main.rs`): listings, connection tests, planning,
   compares and every transfer run as tasks on it. Tasks are spawned boxed (`rt.rs`), so the exe

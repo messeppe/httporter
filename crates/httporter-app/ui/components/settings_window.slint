@@ -656,6 +656,10 @@ export component SettingsWindow inherits Window {
     callback clear-hash-cache();
     callback show-activity();
     callback open-log-folder();
+    // The renderer (I5, see `AdvancedTab`).
+    in-out property <int> renderer: 0;
+    in property <bool> renderer-fell-back: false;
+    callback renderer-edited();
     // A tab was opened (its number), for the app to refresh what it shows.
     callback tab-shown(int);
 
@@ -863,6 +867,9 @@ export component SettingsWindow inherits Window {
             clear-hash-cache => { root.clear-hash-cache(); }
             show-activity => { root.show-activity(); }
             open-log-folder => { root.open-log-folder(); }
+            renderer <=> root.renderer;
+            renderer-fell-back: root.renderer-fell-back;
+            renderer-edited => { root.renderer-edited(); }
         }
 
         if root.current-tab == 4: PublishTab {

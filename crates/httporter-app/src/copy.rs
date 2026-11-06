@@ -594,6 +594,15 @@ pub fn startup_error_text(error: &dyn Error) -> String {
     format!("HTTPorter couldn't start.\n\n{error}")
 }
 
+/// The error the app ends with when the GPU renderer failed once the window was being made or
+/// drawn (`renderer.rs`); the message box puts [`startup_error_text`]'s words before it.
+pub fn gpu_renderer_failed(error: impl Display) -> String {
+    format!(
+        "The GPU renderer failed: {error}\n\nStart HTTPorter again: it will use the software \
+         renderer. You can choose the renderer in Settings › Advanced."
+    )
+}
+
 // ---- The transfer drawer ----
 
 use chrono::{DateTime, Utc};
