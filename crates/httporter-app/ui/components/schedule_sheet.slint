@@ -1,0 +1,422 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+// Publish on a Schedule… (I6, T3; spec §8.8.2): a Windows Task Scheduler task publishes the
+// profile while the user is signed in, even with HTTPorter closed. It hangs from the toolbar like
+// the profile sheet and is modal in the same way (Escape cancels, Tab and Shift+Tab stay inside).
+//
+// The sheet shows an On switch, then how often: Hourly (every N hours), Daily or Weekly (the
+// weekday chips), the time of day, and what to purge. The fields start from `draft`; Save hands
+// them back as edited, and the app checks them, then shows `draft.error` or closes the sheet.
+// T1 is the skeleton: T3 fills in the checks and the app's side.
+
+import { Theme } from "../theme.slint";
+import { ScheduleDraft } from "../types.slint";
+import { Activation, CapsuleButton } from "buttons.slint";
+import { ErrorLine, Field, FormRow } from "form_controls.slint";
+import { AttachedSheet, Modal, Segmented } from "sheets.slint";
+import { Switch } from "settings_tabs.slint";
+import { VCenter } from "layout.slint";
+
+// A weekday of the weekly repeat: a small capsule, filled while it is on. Space (or a click)
+// toggles it.
+component DayChip inherits Rectangle {
+    // The short name on the chip ("Mon") and the full one for assistive technology ("Monday").
+    in property <string> text;
+    in property <string> label;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: key-focus.has-focus;
+    // The user asked for this state.
+    callback toggled(bool);
+
+    height: Theme.control-small-height;
+    border-radius: self.height / 2;
+    background: root.checked ? Theme.accent : Theme.chip;
+    border-width: 1px;
+    border-color: root.checked ? Theme.accent : Theme.field-border;
+    opacity: root.enabled ? 1 : 0.45;
+    forward-focus: key-focus;
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.toggled(!root.checked);
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        Text {
+            text: root.text;
+            color: root.checked ? Theme.on-accent : Theme.label;
+            font-size: Theme.font-small;
+            font-weight: root.checked ? Theme.weight-semibold : Theme.weight-regular;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside.
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.enabled;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && Activation.triggers(event) && event.text == Key.Space) {
+                root.toggled(!root.checked);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggled(!root.checked); }
+    }
+}
+
+export component ScheduleSheet inherits Rectangle {
+    in property <ScheduleDraft> draft;
+    // The fields as edited.
+    callback save(ScheduleDraft);
+    callback cancelled();
+
+    // The draft the fields last took over (only the fields it changed are taken over again, so
+    // what was typed meanwhile stays).
+    property <ScheduleDraft> seen;
+    property <bool> enabled;
+    property <int> repeat: 1;
+    property <int> purge: 0;
+    property <string> every-hours;
+    property <string> time;
+    // The weekdays, Monday first.
+    property <bool> d0;
+    property <bool> d1;
+    property <bool> d2;
+    property <bool> d3;
+    property <bool> d4;
+    property <bool> d5;
+    property <bool> d6;
+
+    function take-changes() {
+        if (root.draft.enabled != root.seen.enabled) {
+            root.enabled = root.draft.enabled;
+        }
+        if (root.draft.repeat != root.seen.repeat) {
+            root.repeat = root.draft.repeat;
+        }
+        if (root.draft.every-hours != root.seen.every-hours) {
+            root.every-hours = root.draft.every-hours;
+        }
+        if (root.draft.time != root.seen.time) {
+            root.time = root.draft.time;
+        }
+        if (root.draft.purge != root.seen.purge) {
+            root.purge = root.draft.purge;
+        }
+        if (root.draft.days[0] != root.seen.days[0]) {
+            root.d0 = root.draft.days[0];
+        }
+        if (root.draft.days[1] != root.seen.days[1]) {
+            root.d1 = root.draft.days[1];
+        }
+        if (root.draft.days[2] != root.seen.days[2]) {
+            root.d2 = root.draft.days[2];
+        }
+        if (root.draft.days[3] != root.seen.days[3]) {
+            root.d3 = root.draft.days[3];
+        }
+        if (root.draft.days[4] != root.seen.days[4]) {
+            root.d4 = root.draft.days[4];
+        }
+        if (root.draft.days[5] != root.seen.days[5]) {
+            root.d5 = root.draft.days[5];
+        }
+        if (root.draft.days[6] != root.seen.days[6]) {
+            root.d6 = root.draft.days[6];
+        }
+        root.seen = root.draft;
+    }
+
+    // The fields as they are now.
+    function edited() -> ScheduleDraft {
+        return {
+            profile-name: root.draft.profile-name,
+            enabled: root.enabled,
+            repeat: root.repeat,
+            every-hours: root.every-hours,
+            time: root.time,
+            days: [root.d0, root.d1, root.d2, root.d3, root.d4, root.d5, root.d6],
+            purge: root.purge,
+            purge-enabled: root.draft.purge-enabled,
+            error: "",
+        };
+    }
+
+    function submit() {
+        root.save(root.edited());
+    }
+
+    changed draft => { root.take-changes(); }
+
+    init => {
+        // Every field is taken over the first time, whatever `seen` (all defaults) says.
+        root.enabled = root.draft.enabled;
+        root.repeat = root.draft.repeat;
+        root.every-hours = root.draft.every-hours;
+        root.time = root.draft.time;
+        root.purge = root.draft.purge;
+        root.d0 = root.draft.days[0];
+        root.d1 = root.draft.days[1];
+        root.d2 = root.draft.days[2];
+        root.d3 = root.draft.days[3];
+        root.d4 = root.draft.days[4];
+        root.d5 = root.draft.days[5];
+        root.d6 = root.draft.days[6];
+        root.seen = root.draft;
+        on-switch.focus();
+    }
+
+    Modal {
+        at-first-stop: on-switch.has-focus;
+        at-last-stop: save-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.submit(); }
+        focus-first => { on-switch.focus(); }
+        focus-last => { save-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 520px;
+            label: @tr("Publish on a Schedule");
+
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 20px;
+                spacing: 4px;
+
+                Text {
+                    text: @tr("Publish on a Schedule");
+                    color: Theme.label;
+                    font-size: Theme.font-headline;
+                    font-weight: Theme.weight-semibold;
+                    accessible-role: none;
+                }
+                if root.draft.profile-name != "": Text {
+                    text: root.draft.profile-name;
+                    color: Theme.label2;
+                    font-size: Theme.font-caption;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 16px;
+                padding-bottom: 14px;
+                spacing: 10px;
+
+                FormRow {
+                    label: @tr("Scheduled");
+
+                    HorizontalLayout {
+                        alignment: start;
+
+                        VCenter {
+                            on-switch := Switch {
+                                label: @tr("Publish on a schedule");
+                                checked <=> root.enabled;
+                            }
+                        }
+                    }
+                }
+                FormRow {
+                    label: @tr("Repeat");
+
+                    HorizontalLayout {
+                        alignment: start;
+
+                        Segmented {
+                            options: [@tr("Hourly"), @tr("Daily"), @tr("Weekly")];
+                            label: @tr("Repeat");
+                            enabled: root.enabled;
+                            current <=> root.repeat;
+                        }
+                    }
+                }
+                if root.repeat == 0: FormRow {
+                    label: @tr("Every");
+
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 6px;
+
+                        Field {
+                            width: 60px;
+                            text <=> root.every-hours;
+                            label: @tr("Every how many hours");
+                            placeholder: @tr("1");
+                            enabled: root.enabled;
+                            accepted => { root.submit(); }
+                        }
+                        Text {
+                            text: @tr("hours");
+                            color: Theme.label;
+                            font-size: Theme.font-body;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                FormRow {
+                    label: root.repeat == 0 ? @tr("Starting at") : @tr("At");
+
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 6px;
+
+                        Field {
+                            width: 80px;
+                            text <=> root.time;
+                            label: @tr("Time of day");
+                            placeholder: @tr("06:00");
+                            enabled: root.enabled;
+                            accepted => { root.submit(); }
+                        }
+                        Text {
+                            text: @tr("local time");
+                            color: Theme.label2;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                if root.repeat == 2: FormRow {
+                    label: @tr("On");
+
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 6px;
+
+                        DayChip {
+                            text: @tr("Mon");
+                            label: @tr("Monday");
+                            checked: root.d0;
+                            enabled: root.enabled;
+                            toggled(on) => { root.d0 = on; }
+                        }
+                        DayChip {
+                            text: @tr("Tue");
+                            label: @tr("Tuesday");
+                            checked: root.d1;
+                            enabled: root.enabled;
+                            toggled(on) => { root.d1 = on; }
+                        }
+                        DayChip {
+                            text: @tr("Wed");
+                            label: @tr("Wednesday");
+                            checked: root.d2;
+                            enabled: root.enabled;
+                            toggled(on) => { root.d2 = on; }
+                        }
+                        DayChip {
+                            text: @tr("Thu");
+                            label: @tr("Thursday");
+                            checked: root.d3;
+                            enabled: root.enabled;
+                            toggled(on) => { root.d3 = on; }
+                        }
+                        DayChip {
+                            text: @tr("Fri");
+                            label: @tr("Friday");
+                            checked: root.d4;
+                            enabled: root.enabled;
+                            toggled(on) => { root.d4 = on; }
+                        }
+                        DayChip {
+                            text: @tr("Sat");
+                            label: @tr("Saturday");
+                            checked: root.d5;
+                            enabled: root.enabled;
+                            toggled(on) => { root.d5 = on; }
+                        }
+                        DayChip {
+                            text: @tr("Sun");
+                            label: @tr("Sunday");
+                            checked: root.d6;
+                            enabled: root.enabled;
+                            toggled(on) => { root.d6 = on; }
+                        }
+                    }
+                }
+                FormRow {
+                    label: @tr("Purge CDN");
+
+                    HorizontalLayout {
+                        alignment: start;
+
+                        Segmented {
+                            options: [@tr("As the profile"), @tr("Off"), @tr("Changed files"), @tr("Whole zone")];
+                            label: @tr("Purge CDN after a scheduled publish");
+                            enabled: root.enabled && root.draft.purge-enabled;
+                            current <=> root.purge;
+                        }
+                    }
+                }
+                FormRow {
+                    label: "";
+
+                    Text {
+                        text: @tr("Runs while you're signed in to Windows, even if HTTPorter is closed.");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+                if root.draft.error != "": ErrorLine {
+                    text: root.draft.error;
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.sep;
+            }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+                alignment: end;
+
+                CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                save-button := CapsuleButton {
+                    text: @tr("Save");
+                    primary: true;
+                    clicked => { root.submit(); }
+                }
+            }
+        }
+    }
+}

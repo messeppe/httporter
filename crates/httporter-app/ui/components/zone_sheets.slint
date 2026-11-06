@@ -1,0 +1,310 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+// Create New Zone… and Create Bucket… (I6, T5; spec §8.8.4), reached from the Add Site sheet:
+// Create New Zone… from the account-key sign-in, Create Bucket… from the bucket picker. Each opens
+// over the Add Site sheet and is modal in the same way (Escape cancels, Return in a field
+// creates, Tab and Shift+Tab stay inside).
+//
+// The app checks the name (Bunny: lowercase letters, digits and hyphens), creates the zone or the
+// bucket, and either shows `error` or closes the sheet; `busy` while it is at work. T1 is the
+// skeleton: T5 fills in the app's side.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { NewZoneDraft } from "../types.slint";
+import { CapsuleButton } from "buttons.slint";
+import { CheckLine, ErrorLine, Field, FormRow, RegionPicker } from "form_controls.slint";
+import { AttachedSheet, Modal } from "sheets.slint";
+import { VCenter } from "layout.slint";
+
+// The title and the line under it.
+component SheetHead inherits VerticalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+
+    padding-left: 22px;
+    padding-right: 22px;
+    padding-top: 20px;
+    spacing: 4px;
+
+    Text {
+        text: root.title;
+        color: Theme.label;
+        font-size: Theme.font-headline;
+        font-weight: Theme.weight-semibold;
+        accessible-role: none;
+    }
+    Text {
+        text: root.subtitle;
+        color: Theme.label2;
+        font-size: Theme.font-caption;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+}
+
+// The line between a sheet's fields and its buttons.
+component FootRule inherits Rectangle {
+    height: 1px;
+    background: Theme.sep;
+}
+
+// A new Bunny storage zone: its name, main region, replication regions and, if wanted, a pull zone
+// in front of it.
+export component CreateZoneSheet inherits Rectangle {
+    // Bunny's regions, in the order the app maps to codes (the Add Site sheet's list).
+    in property <[string]> region-names;
+    // Which regions to replicate to (one entry per region name; the app sizes it).
+    in-out property <[bool]> replication;
+    in property <bool> busy;
+    in property <string> error;
+    callback create(NewZoneDraft);
+    callback cancelled();
+
+    property <int> region: 0;
+    property <bool> pull-zone: true;
+
+    function submit() {
+        if (!root.busy) {
+            root.create({
+                name: name-field.text,
+                region-index: root.region,
+                replication: root.replication,
+                pull-zone: root.pull-zone,
+                pull-zone-name: pull-field.text,
+            });
+        }
+    }
+
+    init => { name-field.focus(); }
+
+    Modal {
+        at-first-stop: name-field.has-focus;
+        at-last-stop: create-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.submit(); }
+        focus-first => { name-field.focus(); }
+        focus-last => { create-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 520px;
+            label: @tr("Create New Zone");
+
+            SheetHead {
+                title: @tr("Create New Zone");
+                subtitle: @tr("A new Bunny storage zone in your account, added as a site.");
+            }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 16px;
+                padding-bottom: 14px;
+                spacing: 10px;
+
+                FormRow {
+                    label: @tr("Name");
+
+                    name-field := Field {
+                        label: @tr("Zone name");
+                        placeholder: @tr("my-site");
+                        enabled: !root.busy;
+                        accepted => { root.submit(); }
+                    }
+                    Text {
+                        text: @tr("Lowercase letters, digits and hyphens.");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+                FormRow {
+                    label: @tr("Region");
+
+                    RegionPicker {
+                        model: root.region-names;
+                        label: @tr("Main region");
+                        current-index <=> root.region;
+                    }
+                }
+                FormRow {
+                    label: @tr("Replicate to");
+
+                    Rectangle {
+                        height: min(root.region-names.length * (26px + Theme.grow) + 8px, 94px + 3 * Theme.grow);
+                        border-radius: 7px;
+                        background: Theme.field;
+                        border-width: 1px;
+                        border-color: Theme.field-border;
+                        accessible-role: list;
+                        accessible-label: @tr("Replication regions");
+
+                        ScrollView {
+                            x: 4px;
+                            y: 4px;
+                            width: parent.width - 8px;
+                            height: parent.height - 8px;
+
+                            VerticalLayout {
+                                alignment: start;
+
+                                for name[i] in root.region-names: HorizontalLayout {
+                                    height: 26px + Theme.grow;
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+
+                                    VCenter {
+                                        CheckLine {
+                                            text: name;
+                                            checked: root.replication[i];
+                                            enabled: !root.busy && i != root.region;
+                                            toggled(now) => { root.replication[i] = now; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: @tr("Copies of the files are kept in each region you tick. Regions can be added later but never removed.");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+                FormRow {
+                    label: "";
+
+                    CheckLine {
+                        text: @tr("Also create a pull zone");
+                        checked: root.pull-zone;
+                        enabled: !root.busy;
+                        toggled(on) => { root.pull-zone = on; }
+                    }
+                    if root.pull-zone: Text {
+                        text: @tr("A pull zone serves the files over Bunny's CDN, and HTTPorter can purge it after a publish.");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+                FormRow {
+                    label: @tr("Pull zone");
+
+                    pull-field := Field {
+                        label: @tr("Pull zone name");
+                        placeholder: name-field.text != "" ? name-field.text : @tr("The zone's name");
+                        enabled: root.pull-zone && !root.busy;
+                        accepted => { root.submit(); }
+                    }
+                }
+                if root.error != "": ErrorLine {
+                    text: root.error;
+                }
+            }
+            FootRule { }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+                alignment: end;
+
+                CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                create-button := CapsuleButton {
+                    text: root.busy ? @tr("Creating…") : @tr("Create Zone");
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => { root.submit(); }
+                }
+            }
+        }
+    }
+}
+
+// A new S3 bucket, on the service and with the key the Add Site sheet has.
+export component CreateBucketSheet inherits Rectangle {
+    // The service's name, for the line under the title ("Cloudflare R2").
+    in property <string> service;
+    in property <bool> busy;
+    in property <string> error;
+    callback create(string);
+    callback cancelled();
+
+    function submit() {
+        if (!root.busy) {
+            root.create(name-field.text);
+        }
+    }
+
+    init => { name-field.focus(); }
+
+    Modal {
+        at-first-stop: name-field.has-focus;
+        at-last-stop: create-button.has-focus;
+        cancel => { root.cancelled(); }
+        confirm => { root.submit(); }
+        focus-first => { name-field.focus(); }
+        focus-last => { create-button.focus(); }
+
+        AttachedSheet {
+            sheet-width: 460px;
+            label: @tr("Create Bucket");
+
+            SheetHead {
+                title: @tr("Create Bucket");
+                subtitle: root.service != "" ? @tr("A new bucket on {}, with the access key you entered.", root.service) : @tr("A new bucket, with the access key you entered.");
+            }
+            VerticalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 16px;
+                padding-bottom: 14px;
+                spacing: 10px;
+
+                FormRow {
+                    label: @tr("Name");
+
+                    name-field := Field {
+                        label: @tr("Bucket name");
+                        placeholder: @tr("my-site");
+                        enabled: !root.busy;
+                        accepted => { root.submit(); }
+                    }
+                    Text {
+                        text: @tr("Bucket names are unique across the service: lowercase letters, digits, dots and hyphens.");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+                if root.error != "": ErrorLine {
+                    text: root.error;
+                }
+            }
+            FootRule { }
+            HorizontalLayout {
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 14px;
+                padding-bottom: 18px;
+                spacing: 8px;
+                alignment: end;
+
+                CapsuleButton {
+                    text: @tr("Cancel");
+                    clicked => { root.cancelled(); }
+                }
+                create-button := CapsuleButton {
+                    text: root.busy ? @tr("Creating…") : @tr("Create Bucket");
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => { root.submit(); }
+                }
+            }
+        }
+    }
+}

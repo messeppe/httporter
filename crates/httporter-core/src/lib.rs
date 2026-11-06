@@ -40,8 +40,9 @@ pub use provider::{
     ObjectInfo, PartJournal, RequestInfo, StorageProvider, UploadOptions, UploadSource,
 };
 pub use publish::{
-    CompareStatus, DeleteGuard, FileAction, FileOutcome, HISTORY_KEEP, HistoryFile, HistoryRecord,
-    ProfileId, ProfileRecord, PublishResult, PurgeMode, PurgeResult,
+    CompareStatus, DeleteGuard, FileAction, FileOutcome, HISTORY_KEEP, HeadlessOptions,
+    HeadlessOutcome, HistoryFile, HistoryRecord, HistorySource, ProfileExtras, ProfileId,
+    ProfileRecord, PublishResult, PurgeMode, PurgeResult, Schedule, ScheduleRepeat, exit,
 };
 pub use retry::{MAX_RETRY_AFTER, RetryPolicy, with_retry};
 pub use settings::{ConflictPolicy, HttpProtocol, ProxyMode, TransferSettings};

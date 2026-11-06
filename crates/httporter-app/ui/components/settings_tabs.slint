@@ -15,7 +15,7 @@ import { Activation, CapsuleButton } from "buttons.slint";
 import { ErrorLine, Field, RegionPicker } from "form_controls.slint";
 import { Segmented } from "sheets.slint";
 import { VCenter } from "layout.slint";
-import { SiteSettingsData, SiteSettingsRow } from "../types.slint";
+import { BucketSettingsData, SiteSettingsData, SiteSettingsRow, ZoneSettingsData } from "../types.slint";
 
 // The pieces below are the Transfers tab's (`settings_window.slint`), which that file keeps to
 // itself: it imports this one, so this one cannot import from it. They are exported for
@@ -528,6 +528,14 @@ export component SitesTab inherits Rectangle {
     callback export-sites();
     callback import-sites();
     in property <string> message;
+    // I6 (T5): the chosen site's Zone section (Bunny, with a kept account key) and Bucket section
+    // (S3), each hidden while its `shown` is false. They change the zone or the bucket on the
+    // service, so each applies with its own Save; Add Regions… asks which regions to add.
+    in-out property <ZoneSettingsData> zone;
+    in-out property <BucketSettingsData> bucket;
+    callback zone-save(ZoneSettingsData);
+    callback zone-add-regions();
+    callback bucket-save(BucketSettingsData);
 
     // How long a pre-signed link lasts, in the order the app maps to seconds.
     property <[string]> expiry-options: [@tr("15 minutes"), @tr("1 hour"), @tr("1 day"), @tr("7 days")];
@@ -540,6 +548,15 @@ export component SitesTab inherits Rectangle {
     property <int> expiry: 1;
     // The form as last drawn, to tell which of its values the app changed.
     property <SiteSettingsData> drawn;
+    // The Zone and Bucket sections' controls, and what they last drew (as the form's).
+    property <string> zone-404;
+    property <bool> zone-rewrite;
+    property <ZoneSettingsData> zone-drawn;
+    property <string> cors-origins;
+    property <string> cors-methods;
+    property <string> website-index;
+    property <string> website-error;
+    property <BucketSettingsData> bucket-drawn;
     property <bool> has-site: root.current >= 0 && root.current < root.rows.length && root.form.id != "";
 
     function draw-form() {
@@ -570,8 +587,72 @@ export component SitesTab inherits Rectangle {
         });
     }
 
-    init => { root.draw-form(); }
+    function draw-zone() {
+        if (root.zone.id != root.zone-drawn.id || root.zone.custom-404 != root.zone-drawn.custom-404) {
+            root.zone-404 = root.zone.custom-404;
+        }
+        if (root.zone.id != root.zone-drawn.id || root.zone.rewrite-404 != root.zone-drawn.rewrite-404) {
+            root.zone-rewrite = root.zone.rewrite-404;
+        }
+        root.zone-drawn = root.zone;
+    }
+
+    function draw-bucket() {
+        if (root.bucket.id != root.bucket-drawn.id || root.bucket.cors-origins != root.bucket-drawn.cors-origins) {
+            root.cors-origins = root.bucket.cors-origins;
+        }
+        if (root.bucket.id != root.bucket-drawn.id || root.bucket.cors-methods != root.bucket-drawn.cors-methods) {
+            root.cors-methods = root.bucket.cors-methods;
+        }
+        if (root.bucket.id != root.bucket-drawn.id || root.bucket.website-index != root.bucket-drawn.website-index) {
+            root.website-index = root.bucket.website-index;
+        }
+        if (root.bucket.id != root.bucket-drawn.id || root.bucket.website-error != root.bucket-drawn.website-error) {
+            root.website-error = root.bucket.website-error;
+        }
+        root.bucket-drawn = root.bucket;
+    }
+
+    function save-zone() {
+        if (!root.zone.busy) {
+            root.zone-save({
+                id: root.zone.id,
+                shown: root.zone.shown,
+                custom-404: root.zone-404,
+                rewrite-404: root.zone-rewrite,
+                regions: root.zone.regions,
+                busy: root.zone.busy,
+                error: "",
+            });
+        }
+    }
+
+    function save-bucket() {
+        if (!root.bucket.busy) {
+            root.bucket-save({
+                id: root.bucket.id,
+                shown: root.bucket.shown,
+                cors-shown: root.bucket.cors-shown,
+                cors-origins: root.cors-origins,
+                cors-methods: root.cors-methods,
+                website-shown: root.bucket.website-shown,
+                website-index: root.website-index,
+                website-error: root.website-error,
+                note: root.bucket.note,
+                busy: root.bucket.busy,
+                error: "",
+            });
+        }
+    }
+
+    init => {
+        root.draw-form();
+        root.draw-zone();
+        root.draw-bucket();
+    }
     changed form => { root.draw-form(); }
+    changed zone => { root.draw-zone(); }
+    changed bucket => { root.draw-bucket(); }
 
     VerticalLayout {
         padding-left: 24px;
@@ -731,6 +812,142 @@ export component SitesTab inherits Rectangle {
                                         text: @tr("Forget");
                                         enabled: root.form.download-choice != "";
                                         clicked => { root.forget-choice(false); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // I6 (T5): the storage zone's settings, through the kept account key.
+                        if root.zone.shown: Section {
+                            title: @tr("Zone");
+
+                            Group {
+                                GroupRow {
+                                    title: @tr("404 page");
+                                    help: @tr("The file served for a path that doesn't exist, such as /404.html. Empty for Bunny's own page.");
+
+                                    VCenter {
+                                        Field {
+                                            width: 220px;
+                                            text <=> root.zone-404;
+                                            placeholder: @tr("/404.html");
+                                            label: @tr("404 page path");
+                                            enabled: !root.zone.busy;
+                                            accepted => { root.save-zone(); }
+                                        }
+                                    }
+                                }
+                                GroupRow {
+                                    title: @tr("Return status 200 for the 404 page");
+                                    help: @tr("For a single-page app that handles its own paths.");
+
+                                    Switch {
+                                        label: @tr("Return status 200 for the 404 page");
+                                        checked <=> root.zone-rewrite;
+                                        enabled: !root.zone.busy;
+                                    }
+                                }
+                                GroupRow {
+                                    title: @tr("Replication regions");
+                                    help: root.zone.regions != "" ? @tr("{}. Regions can be added but never removed.", root.zone.regions) : @tr("None. Regions can be added but never removed.");
+
+                                    CapsuleButton {
+                                        text: @tr("Add Regions…");
+                                        enabled: !root.zone.busy;
+                                        clicked => { root.zone-add-regions(); }
+                                    }
+                                }
+                                GroupRow {
+                                    title: @tr("Apply to the zone");
+                                    help: @tr("The 404 settings change on Bunny when you save.");
+                                    error: root.zone.error;
+                                    last: true;
+
+                                    CapsuleButton {
+                                        text: root.zone.busy ? @tr("Saving…") : @tr("Save");
+                                        enabled: !root.zone.busy;
+                                        clicked => { root.save-zone(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // I6 (T5): the bucket's CORS rule and static website, where the service
+                        // offers them through its S3 API.
+                        if root.bucket.shown: Section {
+                            title: @tr("Bucket");
+
+                            Group {
+                                if root.bucket.cors-shown: GroupRow {
+                                    title: @tr("CORS origins");
+                                    help: @tr("The sites whose pages may fetch these files, comma-separated (* for any).");
+
+                                    VCenter {
+                                        Field {
+                                            width: 220px;
+                                            text <=> root.cors-origins;
+                                            placeholder: @tr("https://example.com");
+                                            label: @tr("CORS origins");
+                                            enabled: !root.bucket.busy;
+                                            accepted => { root.save-bucket(); }
+                                        }
+                                    }
+                                }
+                                if root.bucket.cors-shown: GroupRow {
+                                    title: @tr("CORS methods");
+                                    help: @tr("Comma-separated, such as GET, HEAD.");
+
+                                    VCenter {
+                                        Field {
+                                            width: 220px;
+                                            text <=> root.cors-methods;
+                                            placeholder: @tr("GET, HEAD");
+                                            label: @tr("CORS methods");
+                                            enabled: !root.bucket.busy;
+                                            accepted => { root.save-bucket(); }
+                                        }
+                                    }
+                                }
+                                if root.bucket.website-shown: GroupRow {
+                                    title: @tr("Website index document");
+                                    help: @tr("Served for a folder's address. Empty turns the static website off.");
+
+                                    VCenter {
+                                        Field {
+                                            width: 220px;
+                                            text <=> root.website-index;
+                                            placeholder: @tr("index.html");
+                                            label: @tr("Website index document");
+                                            enabled: !root.bucket.busy;
+                                            accepted => { root.save-bucket(); }
+                                        }
+                                    }
+                                }
+                                if root.bucket.website-shown: GroupRow {
+                                    title: @tr("Website error document");
+                                    help: @tr("Served for a path that doesn't exist.");
+
+                                    VCenter {
+                                        Field {
+                                            width: 220px;
+                                            text <=> root.website-error;
+                                            placeholder: @tr("404.html");
+                                            label: @tr("Website error document");
+                                            enabled: !root.bucket.busy;
+                                            accepted => { root.save-bucket(); }
+                                        }
+                                    }
+                                }
+                                GroupRow {
+                                    title: @tr("Apply to the bucket");
+                                    help: root.bucket.note != "" ? root.bucket.note : @tr("These settings change on the service when you save.");
+                                    error: root.bucket.error;
+                                    last: true;
+
+                                    CapsuleButton {
+                                        text: root.bucket.busy ? @tr("Saving…") : @tr("Save");
+                                        enabled: !root.bucket.busy && (root.bucket.cors-shown || root.bucket.website-shown);
+                                        clicked => { root.save-bucket(); }
                                     }
                                 }
                             }

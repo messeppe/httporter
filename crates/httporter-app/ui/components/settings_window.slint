@@ -15,7 +15,7 @@ import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { ErrorLine, Field, RegionPicker } from "form_controls.slint";
 import { Segmented } from "sheets.slint";
 import { VCenter } from "layout.slint";
-import { ProfileItem, SiteSettingsData, SiteSettingsRow } from "../types.slint";
+import { BucketSettingsData, ProfileItem, SiteSettingsData, SiteSettingsRow, ZoneSettingsData } from "../types.slint";
 import { AdvancedTab, GeneralTab, SitesTab } from "settings_tabs.slint";
 import { SecurityTab } from "security_tab.slint";
 import { CaptionButtons } from "caption_buttons.slint";
@@ -654,6 +654,12 @@ export component SettingsWindow inherits Window {
     callback export-sites();
     callback import-sites();
     in property <string> sites-message;
+    // I6 (T5): the chosen site's Zone and Bucket sections (see `SitesTab`).
+    in-out property <ZoneSettingsData> site-zone;
+    in-out property <BucketSettingsData> site-bucket;
+    callback site-zone-save(ZoneSettingsData);
+    callback site-zone-add-regions();
+    callback site-bucket-save(BucketSettingsData);
     // Advanced.
     in property <string> hash-cache-text;
     callback clear-hash-cache();
@@ -860,6 +866,11 @@ export component SettingsWindow inherits Window {
             forget-choice(upload) => { root.site-forget-choice(upload); }
             export-sites => { root.export-sites(); }
             import-sites => { root.import-sites(); }
+            zone <=> root.site-zone;
+            bucket <=> root.site-bucket;
+            zone-save(zone) => { root.site-zone-save(zone); }
+            zone-add-regions => { root.site-zone-add-regions(); }
+            bucket-save(bucket) => { root.site-bucket-save(bucket); }
         }
 
         if root.current-tab == 5: AdvancedTab {

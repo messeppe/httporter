@@ -13,7 +13,7 @@ pub use creds::{
     CredError, CredentialKey, CredentialKind, CredentialStore, KeyringStore, MemoryStore,
     SiteSecret,
 };
-pub use journal::SqliteJournal;
+pub use journal::{SqliteJournal, owner_alive, process_owner};
 pub use store::{
     AccountRecord, SETTINGS_TRANSFERS, SiteList, Store, StoreError, default_db_path,
     site_conflicts_key, site_extras_key,

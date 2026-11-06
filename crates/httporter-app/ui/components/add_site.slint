@@ -321,6 +321,10 @@ export component AddSiteSheet inherits Rectangle {
     callback zones-chosen([bool], bool);
     // Choose… beside the bucket: list the buckets that these fields and this secret can see.
     callback list-buckets(SiteDraft, string);
+    // I6 (T5): Create New Zone…, with the account key typed, and Create Bucket…, with these fields
+    // and this secret. The window opens their sheets.
+    callback create-zone(string);
+    callback create-bucket(SiteDraft, string);
     // An eye button was pressed (any secret field).
     callback reveal();
     callback cancel();
@@ -741,6 +745,20 @@ export component AddSiteSheet inherits Rectangle {
                             if root.key-error != "": ErrorLine { text: root.key-error; }
                         }
 
+                        FormRow {
+                            label: "";
+                            HorizontalLayout {
+                                alignment: start;
+
+                                CapsuleButton {
+                                    text: @tr("Create New Zone…");
+                                    icon: Icons.plus;
+                                    enabled: !root.busy && key-field.text != "";
+                                    clicked => { root.create-zone(key-field.text); }
+                                }
+                            }
+                        }
+
                         if root.zones.length > 0: FormRow {
                             label: @tr("Storage zones");
                             Rectangle {
@@ -1023,6 +1041,19 @@ export component AddSiteSheet inherits Rectangle {
                                                     bucket-field.focus();
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+                                if root.buckets-open && !root.buckets-busy: HorizontalLayout {
+                                    alignment: start;
+
+                                    CapsuleButton {
+                                        text: @tr("Create Bucket…");
+                                        icon: Icons.plus;
+                                        enabled: !root.busy;
+                                        clicked => {
+                                            root.buckets-open = false;
+                                            root.create-bucket(root.draft-now(), secret-field.text);
                                         }
                                     }
                                 }

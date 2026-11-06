@@ -1,0 +1,16 @@
+[package]
+name = "httporter-com"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The console companion: cargo names it `httporter-com.exe`; packaging (tools/package.ps1) copies it
+# beside `httporter.exe` as `httporter.com`, which cmd and PowerShell find first (PATHEXT).
+[[bin]]
+name = "httporter-com"
+path = "src/main.rs"
+
+[dependencies]
+# Only for the Ctrl+C relay: the console control handler and the named cancel event.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }

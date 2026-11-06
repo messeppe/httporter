@@ -5,8 +5,8 @@
 //
 // - the header: the folder and where it is published to, the profile's settings as chips, and
 //   Change Folder…, Edit Profile and Publish;
-// - three cards: the last publish, what the site holds now and the schedule (which arrives in a
-//   later version, so its link is shown turned off);
+// - three cards: the last publish, what the site holds now and the schedule (I6: what it is, the
+//   last scheduled run, and Publish on a Schedule…, which opens the Schedule sheet);
 // - the history of the profile's publishes, with a search field, and under it the detail of the
 //   publish chosen: what failed, with Retry N Failed, Retry Purge and Show All N Files.
 //
@@ -17,7 +17,7 @@ import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { HistoryDetail, HistoryRow, ProfileView } from "../types.slint";
-import { CapsuleButton } from "buttons.slint";
+import { Activation, CapsuleButton } from "buttons.slint";
 import { Chip } from "chips.slint";
 import { Field } from "form_controls.slint";
 import { VCenter } from "layout.slint";
@@ -73,6 +73,63 @@ component StatCard inherits Card {
             overflow: elide;
         }
         @children
+    }
+}
+
+// A link on a card (Publish on a Schedule…): accent text, underlined under the pointer. Reachable
+// with Tab, activated with Space or Return.
+component CardLink inherits Rectangle {
+    in property <string> text;
+    out property <bool> has-focus: key-focus.has-focus;
+    callback clicked();
+
+    height: link-text.preferred-height + 2px;
+    width: link-text.preferred-width;
+    forward-focus: key-focus;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    link-text := Text {
+        text: root.text;
+        color: Theme.accent-text;
+        font-size: Theme.font-caption;
+        overflow: elide;
+        accessible-role: none;
+    }
+    if area.has-hover: Rectangle {
+        y: link-text.preferred-height;
+        height: 1px;
+        background: Theme.accent-text;
+    }
+
+    Rectangle {
+        x: -3px;
+        y: -2px;
+        width: parent.width + 6px;
+        height: parent.height + 4px;
+        border-radius: 4px;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus;
+    }
+
+    // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (Activation.triggers(event)) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -194,6 +251,20 @@ export component ProfilePage inherits Rectangle {
     callback change-folder();
     callback edit-profile();
     callback publish();
+    // I6 (T3): the Schedule card. `schedule-text`: "Daily at 06:00 · next Tue 06:00" or "Off";
+    // `schedule-last`: "Last run: today 06:00 · 3 uploaded", empty before the first run;
+    // `schedule-missing`: the schedule is on but its task was deleted in Task Scheduler.
+    in property <string> schedule-text;
+    in property <string> schedule-last;
+    in property <bool> schedule-missing;
+    // Publish on a Schedule… (the window opens the Schedule sheet), and Recreate.
+    callback open-schedule();
+    callback schedule-recreate();
+    // I6 (T4): the watch folder's note ("3 files were removed from the folder", "Watching stopped:
+    // the folder is gone"), empty for none, and its Review… (the Publish sheet).
+    in property <string> watch-note;
+    in property <bool> watch-can-review;
+    callback watch-review();
 
     // The detail is shown for a publish (ids start at 1).
     property <bool> has-detail: root.history-detail.id > 0;
@@ -333,6 +404,33 @@ export component ProfilePage inherits Rectangle {
                             vertical-alignment: center;
                         }
                     }
+                    if root.watch-note != "": HorizontalLayout {
+                        spacing: 6px;
+
+                        VCenter {
+                            Image {
+                                source: Icons.eye;
+                                colorize: Theme.label2;
+                                width: 14px;
+                                height: 14px;
+                                accessible-role: none;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.watch-note;
+                            color: Theme.label;
+                            font-size: Theme.font-caption;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                        if root.watch-can-review: VCenter {
+                            CardLink {
+                                text: @tr("Review…");
+                                clicked => { root.watch-review(); }
+                            }
+                        }
+                    }
                 }
                 VCenter {
                     HorizontalLayout {
@@ -386,33 +484,49 @@ export component ProfilePage inherits Rectangle {
                     overflow: elide;
                 }
             }
-            // Scheduled publishing arrives in a later version (I6): its link is shown, turned off.
+            // The schedule (I6): what it is, the last scheduled run, and the link to the sheet.
             StatCard {
                 horizontal-stretch: 1;
                 caption: @tr("Schedule");
-                value: root.profile.schedule;
+                value: root.schedule-text;
 
-                HorizontalLayout {
+                if root.schedule-last != "": Text {
+                    text: root.schedule-last;
+                    color: Theme.label2;
+                    font-size: Theme.font-caption;
+                    overflow: elide;
+                }
+                if root.schedule-missing: HorizontalLayout {
                     spacing: 6px;
-                    accessible-role: AccessibleRole.text;
-                    accessible-label: @tr("Publish on a schedule… arrives in a later version");
 
-                    Text {
-                        text: @tr("Publish on a schedule…");
-                        color: Theme.accent-text;
-                        opacity: 0.45;
-                        font-size: Theme.font-caption;
-                        overflow: elide;
-                        accessible-role: none;
+                    VCenter {
+                        Image {
+                            source: Icons.warn;
+                            colorize: Theme.orange;
+                            width: 12px;
+                            height: 12px;
+                            accessible-role: none;
+                        }
                     }
                     Text {
                         horizontal-stretch: 1;
-                        text: @tr("Arrives in a later version");
-                        color: Theme.label2;
-                        font-size: Theme.font-small;
+                        text: @tr("The scheduled task is missing");
+                        color: Theme.orange;
+                        font-size: Theme.font-caption;
                         vertical-alignment: center;
                         overflow: elide;
-                        accessible-role: none;
+                    }
+                    CardLink {
+                        text: @tr("Recreate");
+                        clicked => { root.schedule-recreate(); }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: start;
+
+                    CardLink {
+                        text: @tr("Publish on a Schedule…");
+                        clicked => { root.open-schedule(); }
                     }
                 }
             }

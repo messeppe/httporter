@@ -149,7 +149,9 @@ component SiteRow inherits Rectangle {
 }
 
 // One publish profile (mockup `.sb-item` in the Publish section): the send icon, its name and when
-// it last published ("2h ago", "Never"). Reachable with Tab, chosen with Space or Return.
+// it last published ("2h ago", "Never"). Reachable with Tab, chosen with Space or Return. While
+// the watch folder publishes its changes (I6, T4), a "Watching" mark (an eye and the word, not a
+// colour alone) takes the place of the time.
 component ProfileRow inherits Rectangle {
     in property <ProfileItem> profile;
     in property <bool> selected;
@@ -161,7 +163,7 @@ component ProfileRow inherits Rectangle {
     background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
     forward-focus: key-focus;
     accessible-role: list-item;
-    accessible-label: @tr("{}, last published {}", root.profile.name, root.profile.meta);
+    accessible-label: root.profile.watching ? @tr("{}, last published {}, watching the folder", root.profile.name, root.profile.meta) : @tr("{}, last published {}", root.profile.name, root.profile.meta);
     accessible-item-selected: root.selected;
     accessible-action-default => { root.clicked(); }
 
@@ -189,12 +191,32 @@ component ProfileRow inherits Rectangle {
             overflow: elide;
             accessible-role: none;
         }
-        Text {
+        if !root.profile.watching: Text {
             text: root.profile.meta;
             color: Theme.label2;
             font-size: Theme.font-small;
             vertical-alignment: center;
             accessible-role: none;
+        }
+        if root.profile.watching: HorizontalLayout {
+            spacing: 3px;
+
+            VCenter {
+                Image {
+                    source: Icons.eye;
+                    colorize: Theme.accent-text;
+                    width: 12px;
+                    height: 12px;
+                    accessible-role: none;
+                }
+            }
+            Text {
+                text: @tr("Watching");
+                color: Theme.accent-text;
+                font-size: Theme.font-small;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
         }
     }
 

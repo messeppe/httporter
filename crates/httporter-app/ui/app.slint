@@ -36,6 +36,9 @@ import { MoveSheet, MoveWarningSheet, PresignSheet, RenameSheet } from "componen
 import { ActivitySheet } from "components/activity.slint";
 import { ToastData } from "types.slint";
 import { ToastStack } from "components/toast.slint";
+import { BucketSettingsData, NewZoneDraft, ScheduleDraft, ZoneSettingsData } from "types.slint";
+import { ScheduleSheet } from "components/schedule_sheet.slint";
+import { CreateBucketSheet, CreateZoneSheet } from "components/zone_sheets.slint";
 
 export { FileKind, FileRow, PaneBounds, ProviderTile, S3Errors, SiteDraft, SiteItem, Theme, ZoneChoice }
 export { TransferRow }
@@ -44,6 +47,7 @@ export { SettingsWindow }
 export { CompareStatus, CompareSummary, HistoryDetail, HistoryRow, PlanGroup, PlanRow, ProfileDraft, ProfileItem, ProfileView, PublishSheetData }
 export { ActivityFilterData, ActivityRow, CodeLine, CodeSpan, EditConflictData, EditItem, InspectorData, MoveData, MoveWarningData, PaletteIcon, PaletteItem, PlaceItem, PresignData, QuickLookData, RenameData, SearchFilters, SiteSettingsData, SiteSettingsRow, TabItem }
 export { ToastData }
+export { BucketSettingsData, NewZoneDraft, ScheduleDraft, ZoneSettingsData }
 
 // Error message shown above the panes. When the open site's error is one editing the site fixes
 // (no password saved, a sign-in that failed), it offers Edit Site… and Remove Site….
@@ -680,6 +684,45 @@ export component AppWindow inherits Window {
     callback columns-resized();
     // M11 (T9): Retry Selected on the drawer's Failed tab.
     callback transfers-retry-selected([int]);
+
+    // ---- I6 ----
+    // Scheduled publish (T3): the profile page's Schedule card ("Daily at 06:00 · next Tue 06:00"
+    // or "Off"; the last scheduled run; the task deleted in Task Scheduler, with Recreate), and the
+    // Schedule sheet. Publish on a Schedule… opens the sheet and tells the app (`open-schedule`),
+    // which fills `schedule-draft`. Cancel closes it; Save leaves closing it to the app.
+    in property <string> schedule-text: @tr("Off");
+    in property <string> schedule-last;
+    in property <bool> schedule-missing: false;
+    callback open-schedule();
+    callback schedule-recreate();
+    in-out property <bool> schedule-sheet-open: false;
+    in property <ScheduleDraft> schedule-draft;
+    callback schedule-save(ScheduleDraft);
+    callback schedule-cancel();
+    // The watch folder (T4): a note on the profile page ("3 files were removed from the folder",
+    // "Watching stopped: the folder is gone"), empty for none, and its Review… (the Publish sheet).
+    // The sidebar's mark is `ProfileItem.watching`; the options are in `ProfileDraft`.
+    in property <string> watch-note;
+    in property <bool> watch-can-review: false;
+    callback watch-review();
+    // Create New Zone… and Create Bucket… (T5), from the Add Site sheet: the window opens their
+    // sheets and tells the app (`add-site-create-zone` with the account key typed,
+    // `add-site-create-bucket` with the S3 fields and secret). Cancel closes them; Create leaves
+    // closing them to the app. `create-zone-replication` has one entry per region name.
+    in-out property <bool> create-zone-open: false;
+    in-out property <[bool]> create-zone-replication;
+    in property <bool> create-zone-busy: false;
+    in property <string> create-zone-error;
+    callback add-site-create-zone(string);
+    callback create-zone(NewZoneDraft);
+    callback create-zone-cancel();
+    in-out property <bool> create-bucket-open: false;
+    in property <string> create-bucket-service;
+    in property <bool> create-bucket-busy: false;
+    in property <string> create-bucket-error;
+    callback add-site-create-bucket(SiteDraft, string);
+    callback create-bucket(string);
+    callback create-bucket-cancel();
     // The Publish sheet's Flat (0) | Tree (1), its filter and a tree folder opened or closed (T9).
     callback plan-view(int);
     callback plan-filter-changed(string);
@@ -1312,6 +1355,17 @@ export component AppWindow inherits Window {
                                     change-folder => { root.profile-change-folder(); }
                                     edit-profile => { root.edit-profile(); }
                                     publish => { root.profile-publish(); }
+                                    schedule-text: root.schedule-text;
+                                    schedule-last: root.schedule-last;
+                                    schedule-missing: root.schedule-missing;
+                                    open-schedule => {
+                                        root.schedule-sheet-open = true;
+                                        root.open-schedule();
+                                    }
+                                    schedule-recreate => { root.schedule-recreate(); }
+                                    watch-note: root.watch-note;
+                                    watch-can-review: root.watch-can-review;
+                                    watch-review => { root.watch-review(); }
                                 }
                             }
 
@@ -1448,10 +1502,49 @@ export component AppWindow inherits Window {
         find-zones(key) => { root.add-site-find-zones(key); }
         zones-chosen(checked, keep) => { root.add-site-zones-chosen(checked, keep); }
         list-buckets(draft, secret) => { root.add-site-list-buckets(draft, secret); }
+        create-zone(key) => {
+            root.create-zone-open = true;
+            root.add-site-create-zone(key);
+        }
+        create-bucket(draft, secret) => {
+            root.create-bucket-open = true;
+            root.add-site-create-bucket(draft, secret);
+        }
         reveal => { root.add-site-reveal(); }
         cancel => {
             root.add-site-open = false;
             root.add-site-cancel();
+        }
+    }
+
+    // Create New Zone… and Create Bucket… (I6, T5), over the Add Site sheet they come from.
+    if root.create-zone-open: CreateZoneSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        region-names: root.region-names;
+        replication <=> root.create-zone-replication;
+        busy: root.create-zone-busy;
+        error: root.create-zone-error;
+        create(zone) => { root.create-zone(zone); }
+        cancelled => {
+            root.create-zone-open = false;
+            root.create-zone-cancel();
+        }
+    }
+    if root.create-bucket-open: CreateBucketSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        service: root.create-bucket-service;
+        busy: root.create-bucket-busy;
+        error: root.create-bucket-error;
+        create(name) => { root.create-bucket(name); }
+        cancelled => {
+            root.create-bucket-open = false;
+            root.create-bucket-cancel();
         }
     }
 
@@ -1623,6 +1716,19 @@ export component AppWindow inherits Window {
         pick-folder => { root.profile-pick-folder(); }
         add-key => { root.profile-add-key(); }
         cancelled => { root.profile-sheet-open = false; }
+    }
+    // Publish on a Schedule… (I6, T3).
+    if root.schedule-sheet-open: ScheduleSheet {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        draft: root.schedule-draft;
+        save(draft) => { root.schedule-save(draft); }
+        cancelled => {
+            root.schedule-sheet-open = false;
+            root.schedule-cancel();
+        }
     }
     if root.cdn-key-open: CdnKeySheet {
         x: 0px;

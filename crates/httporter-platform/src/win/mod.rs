@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Windows services: taskbar progress, notifications, file pickers, clipboard files, the title
-//! bar, window placement, the tray icon and the accessibility settings.
+//! bar, window placement, the tray icon and the accessibility settings; for I6, the per-profile
+//! publish lock and the Task Scheduler.
 //!
 //! The test suite covers only the pure parts (state-to-flag mapping, toast XML, the
 //! registration values). Anything that touches the real desktop (a toast, a picker, the
@@ -10,9 +11,11 @@
 
 mod a11y;
 mod clipboard;
+mod lock;
 mod notify;
 mod pickers;
 mod placement;
+mod scheduler;
 mod shell;
 mod taskbar;
 mod titlebar;
@@ -21,9 +24,13 @@ mod watch;
 
 pub use a11y::{animations_enabled, text_scale};
 pub use clipboard::{clipboard_files, set_clipboard_text};
+pub use lock::{PROFILE_LOCK_PREFIX, ProfileLock};
 pub use notify::{ensure_app_identity, notify, notify_or_flash};
 pub use pickers::{pick_file, pick_files, pick_folder, pick_save_file, set_dialog_owner};
 pub use placement::{client_logical_size, default_placement, placement, visible_placement};
+pub use scheduler::{
+    FakeScheduler, ScheduledTask, Scheduler, TASK_FOLDER, TaskSchedulerCom, task_name,
+};
 pub use shell::{mono_font_family, open_default, open_url, open_with};
 pub use taskbar::{TaskbarProgress, TaskbarState, flash, is_foreground};
 pub use titlebar::{

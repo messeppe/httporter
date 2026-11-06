@@ -84,6 +84,29 @@ pub const REGIONS_B2: &[&str] = &[
     "ca-east-006",
 ];
 
+/// Which bucket settings (§8.8.5) a service offers through its S3 API (B8). `S3Preset` lives in
+/// `httporter-core`, so these are a trait here rather than methods there: bring it into scope
+/// (`use httporter_s3::presets::PresetFeatures`) and call `preset.supports_cors()`. Settings ›
+/// Sites hides a section the service doesn't offer.
+pub trait PresetFeatures {
+    /// `Get/Put/DeleteBucketCors` work.
+    fn supports_cors(&self) -> bool;
+    /// `Get/Put/DeleteBucketWebsite` work.
+    fn supports_website(&self) -> bool;
+}
+
+impl PresetFeatures for S3Preset {
+    /// None until T5 confirms each service from its documentation.
+    fn supports_cors(&self) -> bool {
+        false
+    }
+
+    /// None until T5 confirms each service from its documentation.
+    fn supports_website(&self) -> bool {
+        false
+    }
+}
+
 /// Where an S3 service answers: its address without the bucket, how buckets are addressed, and
 /// the region requests are signed for.
 #[derive(Debug, Clone, PartialEq, Eq)]

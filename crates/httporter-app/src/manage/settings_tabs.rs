@@ -137,6 +137,8 @@ pub fn wire(window: &SettingsWindow) {
             forget_choice(&window, &m, upload);
         }
     });
+    // I6 (T5): Settings › Sites › Zone and Bucket.
+    super::zones::wire_settings(window);
 }
 
 /// The Settings window is being opened (`transfers.rs`): the tab on show, if it is one of these,

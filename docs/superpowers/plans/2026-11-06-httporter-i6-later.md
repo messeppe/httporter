@@ -223,6 +223,100 @@ pub enum HeadlessError { Config(String), Auth(String), Io(String) }   // → exi
   - **"Bucket" section** (S3, when the preset supports it): CORS origins and methods (simple editor); static website
     index and error document.
 
+### 0.6 T1 as built
+Every §0 name and signature above is as written, except where noted here.
+
+**Cargo:**
+- New member `crates/httporter-com` (`[[bin]] name = "httporter-com"`, std + `windows-sys` with `Win32_Foundation`,
+  `Win32_System_Console`, `Win32_System_Threading`). `Cargo.lock` gained only that member.
+- Features added now so no track rebuilds `windows`/`windows-sys`: platform `windows` + `Win32_System_TaskScheduler`,
+  `Win32_System_Variant` (T3's COM); app `windows-sys` + `Win32_System_Console` (T2's `GetConsoleMode`/`AttachConsole`).
+
+**Core (§0.1):** as written. Extras: `HistorySource` also derives `Hash`, has `as_str()` / `parse()` (stored words `app`,
+`cli`, `scheduled`, `watch`; unknown → `App`). `ScheduleRepeat` is `snake_case` in JSON. `exit` is re-exported from the
+crate root with the other new types. `PublishOutcome::into_record` sets `source: App`; the headless run sets its own.
+
+**Platform (§0.2):**
+- The history table is `publish_history`, so the column is `publish_history.source`. Schema v5 is one migration:
+  `journal.owner TEXT`, `publish_history.source TEXT NOT NULL DEFAULT 'app'`, `profiles.extras TEXT NOT NULL DEFAULT
+  '{}'`. `profiles.extras` that isn't JSON reads as `ProfileExtras::default()` (the profile is never lost).
+  `update_profile` writes `extras`. Test `migration_v4_to_v5_keeps_rows_and_extras_round_trip`; `no_secret_columns_exact`
+  pins the new columns.
+- `SqliteJournal::with_owner(self, owner: String) -> Self` (a builder on an opened journal). **Deviation:**
+  `unfinished()` leaves out only rows of *another* owner still alive: NULL, this journal's own owner and dead owners
+  are returned (the engine's `forget_site` / `discard_journal` / resume need its own rows and filter what it holds).
+  `clear_finished` and `discard_unfinished` also leave live other owners' rows alone. The filter is SQL
+  `owner NOT IN (SELECT value FROM json_each(?))` after one `SELECT DISTINCT owner`.
+- `process_owner()` / `owner_alive()` are real, in `journal.rs`, re-exported at the crate root. `owner_alive`:
+  `OpenProcess(QUERY_LIMITED)` + `GetExitCodeProcess == STILL_ACTIVE` + creation `FILETIME` match; unparsable or
+  unopenable → gone.
+- **main.rs already opens the window's journal `with_owner(process_owner())`.** T2 does the CLI side.
+- `ProfileLock` is real. A Windows mutex is owned by the thread that took it, so each lock runs a small thread that takes
+  `Local\HTTPorter.Profile.<id>`, holds it until the lock is dropped, then releases it (abandoned = free).
+  `try_acquire` = wait 0; `acquire_wait` blocks the caller (call it off the UI thread). `PROFILE_LOCK_PREFIX` exported.
+- `Scheduler` gained **`fn list(&self) -> Result<Vec<String>, String>`** (T3's start-up clean-up needs it), plus
+  `TASK_FOLDER` (`\HTTPorter`) and `task_name(&ProfileId)` (`"Publish <id>"`). `ScheduledTask` derives `Debug, Clone,
+  PartialEq, Eq`. `FakeScheduler` is real: `new()`, `tasks()`, `set_next_run(name, Option<DateTime<Local>>)`;
+  `next_run` is `None` for a disabled schedule. `TaskSchedulerCom` (unit struct) methods are `todo!("T3")`. All are
+  in `httporter_platform::win`.
+
+**Providers (§0.3):**
+- **Bunny zone ids are `u64`** (as `ZoneInfo.id`), not `i64`. `NewZone` / `ZoneSettings` derive `Debug, Clone,
+  PartialEq, Eq, Default`; re-exported from the crate root. Bodies `todo!("T5")`.
+- **`S3Preset` lives in core**, so its new methods can't be inherent in `httporter-s3`: they are the trait
+  **`httporter_s3::PresetFeatures`** (`presets.rs`, re-exported), implemented for `S3Preset`, both `false` for now. Call
+  `preset.supports_cors()` with the trait in scope.
+- `buckets.rs` is `pub mod buckets`; `CorsRule` (also `Default`) and `Website` re-exported; the `S3Storage` methods are
+  in `buckets.rs`, bodies `todo!("T5")`.
+
+**App (§0.4):**
+- `main()` starts with the `--cli` check (`args_os().nth(1) == "--cli"` → `std::process::exit(cli::run(rest))`),
+  before the reset, the single-instance check and Slint. `cli::run` prints `cli::copy::NOT_BUILT_YET` on stderr and
+  returns `exit::CONFIG` (2). `cli::CANCEL_EVENT_PREFIX` + `cancel_event_name(pid)` name the companion's event; T2
+  creates it (`CreateEventW`, manual reset) and waits on it.
+- `publish::headless` is `pub mod`. `HeadlessCtx { pub(crate) session: Arc<Session>, engine: Engine, journal:
+  Arc<dyn Journal> }`; `HeadlessCtx::open(rt: tokio::runtime::Handle) -> Result<_, HeadlessError>` and
+  `HeadlessCtx::from_publisher(&Arc<Publisher>)` are `todo!("T2")` (`Transfers` has no journal getter yet: T2 adds
+  one). `HeadlessError::exit_code()`. `HeadlessProgress` derives `Debug, Clone, Copy, PartialEq, Eq`.
+- `schedule_view::install` and `watch::install` (no-ops) run at the end of `publish::install`; `zones::install` at the
+  end of `manage::install`. **Extra hook:** `zones::wire_settings(&SettingsWindow)` (no-op), called at the end of
+  `manage::settings_tabs::wire`, for the Zone/Bucket sections.
+- Profile sheet Rust is wired: `draft_of` fills `watch` / `unattended_deletes` from `extras`; `checked` stores them
+  back (the schedule is kept). T4 starts/stops watching on save. The import (`session/places.rs`) gives new profiles
+  `ProfileExtras::default()`. Sidebar `ProfileItem.watching` is `false` everywhere (T4 sets it).
+- `lint_tests` requires `cli/copy.rs`. The companion's words are in `crates/httporter-com/src/copy.rs` (not scanned).
+
+**`httporter-com`:** finds `httporter.exe` beside itself; missing → message + exit 2. Runs `--cli <args…>` with
+inherited stdio, exits with the child's code. Console handler (Ctrl+C, Ctrl+Break, close): the first event sets
+`Local\HTTPorter.Cli.Cancel.<child pid>` if it exists; if it doesn't, or on a second event, `TerminateProcess(child,
+0xC000013A)` (STATUS_CONTROL_C_EXIT). Note: **debug** `httporter.exe` is console-subsystem (`windows_subsystem` only in
+release), so in debug the child shares the console and gets Ctrl+C itself too.
+
+**Slint (§0.5):** new types in `types.slint`, exported from `app.slint`: `ScheduleDraft { profile-name, enabled, repeat
+(0 hourly 1 daily 2 weekly), every-hours, time, days: [bool] (Mon first), purge (0 profile's 1 off 2 changed 3 zone),
+purge-enabled, error }`, `NewZoneDraft { name, region-index, replication: [bool], pull-zone, pull-zone-name }`,
+`ZoneSettingsData { id, shown, custom-404, rewrite-404, regions, busy, error }`, `BucketSettingsData { id, shown,
+cors-shown, cors-origins, cors-methods, website-shown, website-index, website-error, note, busy, error }`.
+`ProfileDraft` + `watch`, `unattended-deletes`; `ProfileItem` + `watching`.
+- **AppWindow, schedule (T3):** `schedule-text` (default `@tr("Off")`), `schedule-last`, `schedule-missing`,
+  `open-schedule()` (the window sets `schedule-sheet-open` first), `schedule-recreate()`, `schedule-sheet-open`,
+  `schedule-draft`, `schedule-save(ScheduleDraft)`, `schedule-cancel()` (after it closed). The card no longer shows
+  `ProfileView.schedule` (still set to "Off"). The card's link is a focusable `CardLink` (Space/Return).
+- **AppWindow, watch (T4):** `watch-note` (empty hides it; shown in the profile page header under the status),
+  `watch-can-review`, `watch-review()`. The ProfileSheet rows are under a "Automatic" label; the sheet is ~90 px taller
+  (check it at the 600 px minimum height).
+- **AppWindow, zones (T5):** `add-site-create-zone(string /* account key */)`, `add-site-create-bucket(SiteDraft,
+  string /* secret */)` (the window opens the sheet first), `create-zone-open`, `create-zone-replication: [bool]` (in-out;
+  the app sizes it to `region-names`, else the ticks do nothing), `create-zone-busy`, `create-zone-error`,
+  `create-zone(NewZoneDraft)`, `create-zone-cancel()`, `create-bucket-open`, `create-bucket-service`,
+  `create-bucket-busy`, `create-bucket-error`, `create-bucket(string)`, `create-bucket-cancel()`. In Add Site,
+  "Create New Zone…" sits under Find Zones (enabled with a key typed); "Create Bucket…" under the open bucket list.
+- **SettingsWindow (T5):** `site-zone`, `site-bucket` (in-out), `site-zone-save(ZoneSettingsData)`,
+  `site-zone-add-regions()`, `site-bucket-save(BucketSettingsData)`; on `SitesTab` as `zone`, `bucket`, `zone-save`,
+  `zone-add-regions`, `bucket-save`. The sections change the service, so each has its own Save row (not apply-on-edit).
+- Components: `schedule_sheet.slint` (`ScheduleSheet`, private `DayChip`), `zone_sheets.slint` (`CreateZoneSheet`,
+  `CreateBucketSheet`). No Rust handler is wired for any new callback yet: the sheets open and close in Slint only.
+
 ---
 
 ## Tasks

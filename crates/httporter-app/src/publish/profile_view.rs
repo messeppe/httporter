@@ -27,9 +27,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, Utc};
 use httporter_core::{
-    AccountId, DeleteGuard, FileOutcome, HISTORY_KEEP, HistoryFile, HistoryRecord, ProfileId,
-    ProfileRecord, ProviderKind, PublishResult, PurgeMode, PurgeResult, RemotePath, SiteRecord,
-    SkipRules,
+    AccountId, DeleteGuard, FileOutcome, HISTORY_KEEP, HistoryFile, HistoryRecord, ProfileExtras,
+    ProfileId, ProfileRecord, ProviderKind, PublishResult, PurgeMode, PurgeResult, RemotePath,
+    SiteRecord, SkipRules,
 };
 use httporter_platform::win;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, VecModel};
@@ -653,6 +653,7 @@ fn new_record(
         created_at: Utc::now(),
         last_published_at: None,
         cache_control: None,
+        extras: ProfileExtras::default(),
     }
 }
 
@@ -699,6 +700,8 @@ fn draft_of(target: &SheetTarget, cdn_note: String) -> ProfileDraft {
         } else {
             copy::CACHE_CONTROL_BUNNY.into()
         },
+        watch: r.extras.watch,
+        unattended_deletes: r.extras.unattended_deletes,
     }
 }
 
@@ -777,6 +780,13 @@ fn checked(target: &SheetTarget, d: &ProfileDraft) -> Result<ProfileRecord, Stri
         purge,
         guard: DeleteGuard { files, percent },
         cache_control,
+        // I6: the watch folder's two options (T4 starts and stops the watching); the schedule is
+        // the Schedule sheet's.
+        extras: ProfileExtras {
+            watch: d.watch,
+            unattended_deletes: d.unattended_deletes,
+            ..target.record.extras.clone()
+        },
         ..target.record.clone()
     })
 }
@@ -988,6 +998,8 @@ pub(super) fn refresh_sidebar(p: &Arc<Publisher>) {
                 id: r.id.0.as_str().into(),
                 name: r.name.as_str().into(),
                 meta: copy::profile_meta(r.last_published_at, now).into(),
+                // The watch folder sets it (T4).
+                watching: false,
             })
             .collect();
         let _ = p2
@@ -1049,6 +1061,7 @@ fn key_keeper(p: &Arc<Publisher>) -> settings_view::KeyKeeper {
                     id: account.id.0.as_str().into(),
                     name: account.name.as_str().into(),
                     meta: copy::key_meta(account.created_at).into(),
+                    watching: false,
                 })
                 .collect();
             let _ = weak.upgrade_in_event_loop(move |window| {

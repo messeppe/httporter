@@ -577,17 +577,17 @@ mod more_tests;
 }
 
 /// Every user-facing string that Rust builds lives in a `copy.rs`: the app's own, and one per
-/// module folder (`manage`, `publish`, and I5's `window`, `comfort` and `system`). A string
-/// literal passed to a `set_*` call, a `format!` feeding one, the field errors of the Add Site
-/// form and the functions that make the app's words are looked for in every other source file
-/// (tests and fakes excepted). This is a heuristic by design: it catches the usual ways a string
-/// reaches the window, not every way.
+/// module folder (`manage`, `publish`, I5's `window`, `comfort` and `system`, and I6's `cli`).
+/// A string literal passed to a `set_*` call, a `format!` feeding one, the field errors of the Add
+/// Site form and the functions that make the app's words are looked for in every other source
+/// file (tests and fakes excepted). This is a heuristic by design: it catches the usual ways a
+/// string reaches the window, not every way.
 #[test]
 fn copy_strings_live_only_in_copy_rs() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let files = files_under(&src, "rs");
     assert!(files.contains(&src.join("copy.rs")), "copy.rs is missing");
-    for folder in ["manage", "publish", "window", "comfort", "system"] {
+    for folder in ["manage", "publish", "window", "comfort", "system", "cli"] {
         assert!(
             files.contains(&src.join(folder).join("copy.rs")),
             "{folder}/copy.rs is missing"

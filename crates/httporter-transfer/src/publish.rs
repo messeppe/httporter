@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use httporter_core::{
-    CdnPurger, CompareStatus, FileAction, FileOutcome, HistoryFile, HistoryRecord, Job,
-    JournalError, ProfileId, PublishResult, PurgeMode, PurgeResult, RemotePath, SiteId,
+    CdnPurger, CompareStatus, FileAction, FileOutcome, HistoryFile, HistoryRecord, HistorySource,
+    Job, JournalError, ProfileId, PublishResult, PurgeMode, PurgeResult, RemotePath, SiteId,
     StorageProvider, run_purge,
 };
 
@@ -338,6 +338,8 @@ impl PublishOutcome {
             remote_folders: plan.remote_folders,
             regions: plan.regions,
             files: self.files,
+            // The window's; a headless publish sets its own (I6).
+            source: HistorySource::default(),
         }
     }
 }

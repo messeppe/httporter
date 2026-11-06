@@ -9,14 +9,19 @@
 //! - [`sheet_view`] and [`cdn`] (T7): the Publish sheet, its runs, the CDN key sheet and the
 //!   delete alert's purge;
 //! - [`profile_view`] (T8): the profile page, Edit Profile and the history;
+//! - I6: [`headless`] (T2), the publish without a window that the CLI and the watch folder run;
+//!   [`schedule_view`] (T3), the Schedule card and sheet; [`watch`] (T4), the watch folder;
 //! - [`copy`]: the words of all of the above, one section per task.
 
 mod cdn;
 mod compare_view;
 mod copy;
+pub mod headless;
 mod profile_view;
 mod purge_now;
+mod schedule_view;
 mod sheet_view;
+mod watch;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -110,12 +115,15 @@ impl Publisher {
 }
 
 /// Wires the window's Compare, Publish and profile callbacks to `p`, and registers each S3
-/// profile's Cache-Control with the engine.
+/// profile's Cache-Control with the engine; then I6's Schedule card and sheet, and the watch
+/// folder.
 pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
     compare_view::install(ui, p);
     sheet_view::install(ui, p);
     profile_view::install(ui, p);
     register_cache_control(p);
+    schedule_view::install(ui, p);
+    watch::install(ui, p);
 }
 
 /// Tells the engine every S3 profile's Cache-Control (at start, on a task of its own): uploads

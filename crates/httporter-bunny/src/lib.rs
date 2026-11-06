@@ -8,7 +8,9 @@ pub mod model;
 pub mod regions;
 mod transfer;
 
-pub use account::{BunnyAccount, PullZoneInfo, UnusableZone, ZoneInfo, ZoneList};
+pub use account::{
+    BunnyAccount, NewZone, PullZoneInfo, UnusableZone, ZoneInfo, ZoneList, ZoneSettings,
+};
 pub use cdn::BunnyCdn;
 pub use client::{BunnyConfig, BunnyStorage};
 pub use model::{BunnyObject, to_entry};

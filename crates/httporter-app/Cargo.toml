@@ -30,7 +30,7 @@ serde_json.workspace = true
 # raw-window-handle-06: the owner window of the file pickers.
 slint = { workspace = true, features = ["unstable-winit-030", "raw-window-handle-06"] }
 tokio = { workspace = true, features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 # The exe's icon, version info and manifest (assets/icon/httporter.rc).

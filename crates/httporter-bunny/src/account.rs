@@ -217,6 +217,56 @@ impl BunnyAccount {
     }
 }
 
+/// Zone tools (§8.8.4–8.8.5, I6). T5 confirms the fields from bunny.net's API reference (B6) and
+/// cites it here.
+impl BunnyAccount {
+    /// Creates a storage zone (`POST /storagezone`) and, when `z.pull_zone` names one, a pull zone
+    /// whose origin it is (`POST /pullzone`). The zone comes back as the zone list gives it, with
+    /// its pull zone.
+    pub async fn create_zone(&self, _z: &NewZone) -> Result<ZoneInfo, ProviderError> {
+        todo!("T5")
+    }
+
+    /// The zone's 404 handling and replication regions.
+    pub async fn zone_settings(&self, _zone_id: u64) -> Result<ZoneSettings, ProviderError> {
+        todo!("T5")
+    }
+
+    /// Changes the zone's 404 handling and adds replication regions (`POST /storagezone/{id}`).
+    /// Regions can only be added: Bunny doesn't remove one.
+    pub async fn update_zone_settings(
+        &self,
+        _zone_id: u64,
+        _s: &ZoneSettings,
+    ) -> Result<(), ProviderError> {
+        todo!("T5")
+    }
+}
+
+/// A storage zone to create.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NewZone {
+    /// Lowercase letters, digits and hyphens (checked before sending).
+    pub name: String,
+    /// The main region's code (`"de"`, `"sg"`, …).
+    pub region: String,
+    /// Replication region codes.
+    pub replication: Vec<String>,
+    /// The name of a pull zone to create in front of it, if any.
+    pub pull_zone: Option<String>,
+}
+
+/// A storage zone's settings that HTTPorter changes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ZoneSettings {
+    /// The file served for a missing path (`/404.html`), if any.
+    pub custom_404_path: Option<String>,
+    /// Serve that file with status 200 instead of 404.
+    pub rewrite_404_to_200: bool,
+    /// Replication region codes.
+    pub replication: Vec<String>,
+}
+
 impl fmt::Debug for BunnyAccount {
     /// Leaves the key out so a client can be logged safely.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -88,6 +88,136 @@ pub struct ProfileRecord {
     pub last_published_at: Option<DateTime<Utc>>,
     /// The `Cache-Control` the profile's uploads are sent with (S3), if any.
     pub cache_control: Option<String>,
+    /// I6: watching, unattended deletes and the schedule (stored as JSON, `profiles.extras`).
+    pub extras: ProfileExtras,
+}
+
+/// The I6 options of a profile, kept together as one JSON value so that a later option needs no
+/// new column. Every field has a default, so an older or partial value still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileExtras {
+    /// Publish changes automatically while HTTPorter is open (watch folder, §8.8.3).
+    pub watch: bool,
+    /// A watched or scheduled publish may delete without a review. Off by default.
+    pub unattended_deletes: bool,
+    /// The scheduled publish (§8.8.2), if one was ever set up (`enabled` says whether it runs).
+    pub schedule: Option<Schedule>,
+}
+
+/// How often a scheduled publish repeats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleRepeat {
+    /// Every `every` hours (1..=24), from `at_minutes` each day.
+    Hourly {
+        every: u8,
+    },
+    Daily,
+    /// On the days marked, Monday first.
+    Weekly {
+        days: [bool; 7],
+    },
+}
+
+/// A scheduled publish: a Windows Task Scheduler task runs the CLI for the profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub enabled: bool,
+    pub repeat: ScheduleRepeat,
+    /// Local time of day, in minutes after midnight (0..1440).
+    pub at_minutes: u16,
+    /// What the scheduled publish purges; `None` = what the profile says.
+    pub purge: Option<PurgeMode>,
+}
+
+/// Who started a publish (its history row says so).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorySource {
+    /// The Publish sheet in the window.
+    #[default]
+    App,
+    /// `httporter publish` in a terminal.
+    Cli,
+    /// The profile's scheduled task (`--scheduled`).
+    Scheduled,
+    /// The watch folder.
+    Watch,
+}
+
+impl HistorySource {
+    /// The stored form (`history.source`): `app`, `cli`, `scheduled` or `watch`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Cli => "cli",
+            Self::Scheduled => "scheduled",
+            Self::Watch => "watch",
+        }
+    }
+
+    /// The stored form back; anything unknown reads as [`HistorySource::App`].
+    pub fn parse(text: &str) -> Self {
+        match text {
+            "cli" => Self::Cli,
+            "scheduled" => Self::Scheduled,
+            "watch" => Self::Watch,
+            _ => Self::App,
+        }
+    }
+}
+
+/// What one headless publish should do (the CLI's flags map onto it; the scheduler and the watch
+/// folder fill it in themselves).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessOptions {
+    /// Compare and plan only; change nothing (`--dry-run`).
+    pub dry_run: bool,
+    /// Past the delete guard without a review (`--yes`).
+    pub yes: bool,
+    /// Upload only; delete nothing (`--no-delete`).
+    pub no_delete: bool,
+    /// The purge for this run; `None` = the profile's (`--purge changed|all|none`).
+    pub purge: Option<PurgeMode>,
+    pub source: HistorySource,
+}
+
+/// How a headless publish ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadlessOutcome {
+    Done {
+        uploaded: u64,
+        deleted: u64,
+        failed: u64,
+        bytes: u64,
+        purge: PurgeResult,
+    },
+    /// What a run would do (`--dry-run`).
+    DryRun {
+        new: u64,
+        changed: u64,
+        delete: u64,
+        bytes: u64,
+    },
+    /// The delete guard tripped: the uploads ran, the deletes were held back.
+    GuardTripped { would_delete: u64, uploaded: u64 },
+    /// Another publish of this profile holds its lock.
+    Busy,
+}
+
+/// The CLI's exit codes (§8.8.1), a stable promise from the release they first ship in.
+pub mod exit {
+    /// Everything went.
+    pub const OK: i32 = 0;
+    /// Some transfers failed.
+    pub const FAILURES: i32 = 1;
+    /// A configuration problem: an unknown or ambiguous site or profile, bad arguments.
+    pub const CONFIG: i32 = 2;
+    /// The site's credentials are missing or wrong.
+    pub const AUTH: i32 = 3;
+    /// The delete guard tripped; the deletes need `--yes`.
+    pub const GUARD: i32 = 4;
 }
 
 /// How a file on one side compares with the other side.
@@ -175,6 +305,8 @@ pub struct HistoryRecord {
     pub regions: u32,
     /// Empty from `list_history`.
     pub files: Vec<HistoryFile>,
+    /// Who started it (I6).
+    pub source: HistorySource,
 }
 
 /// How many publishes of a profile the history keeps.

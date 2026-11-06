@@ -140,11 +140,13 @@ export struct CompareSummary {
     error: string,
 }
 
-// A publish profile in the sidebar: its name and `meta` ("2h ago", "Never").
+// A publish profile in the sidebar: its name and `meta` ("2h ago", "Never"). I6 (T4): `watching`
+// while the watch folder publishes its changes (the row shows a "Watching" mark).
 export struct ProfileItem {
     id: string,
     name: string,
     meta: string,
+    watching: bool,
 }
 
 // The groups of the Publish sheet's plan list.
@@ -259,6 +261,67 @@ export struct ProfileDraft {
     cache-control: string,
     cache-control-enabled: bool,
     cache-control-note: string,
+    // I6 (T4): publish changes automatically while HTTPorter is open, and delete without a review
+    // when publishing automatically (off by default).
+    watch: bool,
+    unattended-deletes: bool,
+}
+
+// ---- I6 ----
+
+// The Schedule sheet (T3). `repeat`: 0 hourly, 1 daily, 2 weekly; `every-hours` and `time`
+// ("06:00", local) as typed; `days` Monday first (7 entries); `purge`: 0 the profile's, 1 off,
+// 2 changed files, 3 whole zone (`purge-enabled` false on S3, where there is nothing to purge).
+export struct ScheduleDraft {
+    profile-name: string,
+    enabled: bool,
+    repeat: int,
+    every-hours: string,
+    time: string,
+    days: [bool],
+    purge: int,
+    purge-enabled: bool,
+    error: string,
+}
+
+// Create New Zone… (T5): the zone's name, its main region (a position in the region names), the
+// replication regions ticked (one entry per region name), and the pull zone to create in front.
+export struct NewZoneDraft {
+    name: string,
+    region-index: int,
+    replication: [bool],
+    pull-zone: bool,
+    pull-zone-name: string,
+}
+
+// Settings › Sites › Zone (T5): a Bunny site with a kept account key. `shown` false hides the
+// section; `regions` are the replication regions it has now, by city (they can only be added:
+// Add Regions… offers the others). `id` is the site's, so that a newer site's data is told apart.
+export struct ZoneSettingsData {
+    id: string,
+    shown: bool,
+    custom-404: string,
+    rewrite-404: bool,
+    regions: string,
+    busy: bool,
+    error: string,
+}
+
+// Settings › Sites › Bucket (T5): an S3 site. Each part shows only where the service offers it;
+// `note` says when it doesn't ("{Service} doesn't offer this through its S3 API."). The CORS rule
+// is a simple editor: origins and methods, comma-separated.
+export struct BucketSettingsData {
+    id: string,
+    shown: bool,
+    cors-shown: bool,
+    cors-origins: string,
+    cors-methods: string,
+    website-shown: bool,
+    website-index: string,
+    website-error: string,
+    note: string,
+    busy: bool,
+    error: string,
 }
 
 // ---- Manage+ (I4) ----

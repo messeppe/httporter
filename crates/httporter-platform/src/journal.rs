@@ -22,12 +22,28 @@ use crate::store::{
 };
 
 /// A [`Journal`] kept in the HTTPorter database file (or, for tests, in memory).
+///
+/// **Owners (I6).** The window and the CLI can run at once, each with its own journal on the
+/// same file. A journal made [`with_owner`](Self::with_owner) writes its owner ([`process_owner`])
+/// into every row it inserts, and leaves alone the unfinished rows of *another process that is
+/// still running* ([`owner_alive`]): [`Journal::unfinished`] doesn't return them, and the two
+/// clean-ups don't delete them. Rows without an owner (written before schema v5, or by a journal
+/// without one) are "an old run, gone".
 #[derive(Debug)]
 pub struct SqliteJournal {
     conn: Mutex<Connection>,
+    /// This process's owner text, written into every row inserted; `None` writes NULL.
+    owner: Option<String>,
 }
 
 impl SqliteJournal {
+    /// Marks every row this journal inserts as this process's (`owner`, normally
+    /// [`process_owner`]). Rows of other owners still running are then left alone.
+    pub fn with_owner(mut self, owner: String) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+
     /// Opens the journal in the database file at `path`, creating the file and bringing its
     /// schema up to date if needed (the store may not have opened it yet).
     pub fn open(path: &Path) -> Result<Self, StoreError> {
@@ -49,7 +65,23 @@ impl SqliteJournal {
         conn.pragma_update(None, "synchronous", "FULL")?;
         Ok(Self {
             conn: Mutex::new(conn),
+            owner: None,
         })
+    }
+
+    /// The owners in the journal that are another process still running: a JSON array, for
+    /// `owner NOT IN (SELECT value FROM json_each(?))`. An owner that can't be read counts as gone.
+    fn live_others(&self, conn: &Connection) -> Result<String, JournalError> {
+        let mut stmt = conn
+            .prepare_cached("SELECT DISTINCT owner FROM journal WHERE owner IS NOT NULL")
+            .map_err(db)?;
+        let owners = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db)?
+            .filter_map(Result::ok)
+            .filter(|owner| self.owner.as_deref() != Some(owner.as_str()) && owner_alive(owner))
+            .collect::<Vec<String>>();
+        serde_json::to_string(&owners).map_err(|e| JournalError(e.to_string()))
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
@@ -244,8 +276,8 @@ impl Journal for SqliteJournal {
             let mut insert = tx
                 .prepare_cached(
                     "INSERT INTO journal (batch, site, kind, local, remote, size, folder,
-                                          state, error, multipart, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                          state, error, multipart, updated_at, owner)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )
                 .map_err(db)?;
             for record in records.iter() {
@@ -269,6 +301,7 @@ impl Journal for SqliteJournal {
                         record.error,
                         multipart,
                         now,
+                        self.owner,
                     ])
                     .map_err(db)?;
                 ids.push(tx.last_insert_rowid());
@@ -341,20 +374,25 @@ impl Journal for SqliteJournal {
         tx.commit().map_err(db)
     }
 
-    /// The Queued and Failed jobs, in id order. A row this build can't make sense of is left
-    /// out: it could never be resumed, and it must not hide the jobs around it.
+    /// The Queued and Failed jobs, in id order, except those of another process still running
+    /// (they are its to finish). A row this build can't make sense of is left out: it could
+    /// never be resumed, and it must not hide the jobs around it.
     fn unfinished(&self) -> Result<Vec<JobRecord>, JournalError> {
         let conn = self.lock();
+        let others = self.live_others(&conn)?;
         let mut stmt = conn
             .prepare_cached(&format!(
-                "SELECT {} FROM journal WHERE state IN (?1, ?2) ORDER BY id",
+                "SELECT {} FROM journal WHERE state IN (?1, ?2)
+                     AND (owner IS NULL OR owner NOT IN (SELECT value FROM json_each(?3)))
+                 ORDER BY id",
                 RawJob::COLUMNS
             ))
             .map_err(db)?;
         let mut rows = stmt
             .query(params![
                 state_to_text(JobState::Queued),
-                state_to_text(JobState::Failed)
+                state_to_text(JobState::Failed),
+                others
             ])
             .map_err(db)?;
         let mut records = Vec::new();
@@ -378,17 +416,87 @@ impl Journal for SqliteJournal {
 }
 
 impl SqliteJournal {
-    /// Deletes the rows in either of two states. `AUTOINCREMENT` keeps their ids from coming
-    /// back.
+    /// Deletes the rows in either of two states, but those of another process still running.
+    /// `AUTOINCREMENT` keeps their ids from coming back.
     fn delete_where_state_is(&self, a: JobState, b: JobState) -> Result<(), JournalError> {
-        self.lock()
-            .execute(
-                "DELETE FROM journal WHERE state IN (?1, ?2)",
-                params![state_to_text(a), state_to_text(b)],
-            )
-            .map(drop)
-            .map_err(db)
+        let conn = self.lock();
+        let others = self.live_others(&conn)?;
+        conn.execute(
+            "DELETE FROM journal WHERE state IN (?1, ?2)
+                 AND (owner IS NULL OR owner NOT IN (SELECT value FROM json_each(?3)))",
+            params![state_to_text(a), state_to_text(b), others],
+        )
+        .map(drop)
+        .map_err(db)
     }
+}
+
+/// This process as a journal owner: `"<pid>:<creation time>"`, the creation time as the 64-bit
+/// FILETIME Windows reports for it. A process id alone could be another process's later; with
+/// its start time it names one run. `"<pid>:0"` if Windows won't say when this process started.
+pub fn process_owner() -> String {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    // SAFETY: the pseudo handle of this process needs no closing.
+    let started = creation_time(unsafe { GetCurrentProcess() }).unwrap_or(0);
+    format!("{}:{started}", std::process::id())
+}
+
+/// Whether the process an owner text ([`process_owner`]) names is still running: a process with
+/// that id exists, hasn't exited, and started at that time. Text that isn't an owner, or a
+/// process that can't be looked at, counts as gone.
+pub fn owner_alive(owner: &str) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let Some((pid, started)) = owner
+        .split_once(':')
+        .and_then(|(pid, at)| Some((pid.parse::<u32>().ok()?, at.parse::<u64>().ok()?)))
+    else {
+        return false;
+    };
+    if pid == std::process::id() {
+        return started == process_owner_time();
+    }
+    // SAFETY: plain call; the handle is closed below.
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+    else {
+        return false;
+    };
+    let mut code = 0u32;
+    // SAFETY: a handle opened above with the right to query it; `code` outlives the call.
+    let running =
+        unsafe { GetExitCodeProcess(process, &mut code) }.is_ok() && code == STILL_ACTIVE.0 as u32;
+    let same = running && creation_time(process) == Some(started);
+    // SAFETY: opened above, not used again.
+    let _ = unsafe { CloseHandle(process) };
+    same
+}
+
+/// This process's creation time, as [`process_owner`] writes it.
+fn process_owner_time() -> u64 {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    // SAFETY: the pseudo handle of this process needs no closing.
+    creation_time(unsafe { GetCurrentProcess() }).unwrap_or(0)
+}
+
+/// When `process` started, as a 64-bit FILETIME.
+fn creation_time(process: windows::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetProcessTimes;
+
+    let (mut created, mut exited, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    // SAFETY: a process handle with query rights; the four out-parameters outlive the call.
+    unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
+    Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@
 //! - [`palette_view`], [`search_view`], [`tabs`] (T7);
 //! - [`settings_tabs`] (T8);
 //! - [`activity_view`], [`move_view`] (T9);
+//! - I6: [`zones`] (T5), Create New Zone…, Create Bucket… and Settings › Sites › Zone / Bucket;
 //! - [`copy`]: the words of all of the above, one section per task.
 //!
 //! The window owns the manager (through its callbacks); [`manager`] finds it on the UI thread.
@@ -31,6 +32,7 @@ mod search_view;
 pub mod settings_tabs;
 pub mod tabs;
 mod thumbs;
+pub mod zones;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -152,4 +154,5 @@ pub fn install(ui: &AppWindow, m: &Arc<Manager>) {
     settings_tabs::install(ui, m);
     activity_view::install(ui, m);
     move_view::install(ui, m);
+    zones::install(ui, m);
 }

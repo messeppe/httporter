@@ -20,6 +20,7 @@ use transfers::Transfers;
 
 mod add_site;
 mod binding;
+mod cli;
 mod comfort;
 mod copy;
 mod drawer_view;
@@ -53,6 +54,13 @@ mod lint_tests;
 mod pane_tests;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // `httporter.exe --cli <args…>` (I6, `cli`): one command without a window, and its exit code.
+    // Before anything else: no Slint, no single-instance check (the CLI runs beside the window)
+    // and no reset (the CLI refuses to run while one is pending).
+    let mut args = std::env::args_os();
+    if args.nth(1).is_some_and(|first| first == "--cli") {
+        std::process::exit(cli::run(args.collect()));
+    }
     // A reset confirmed last time (Settings › Security) wipes everything before anything opens it:
     // before the store, and before the single-instance check, since it waits for the instance
     // that asked for it to let go of the mutex. Without its marker it does nothing.
@@ -188,8 +196,10 @@ fn run() -> Result<(), Box<dyn Error>> {
 /// already says the database is unavailable). Jobs finished in an earlier run are let go.
 fn open_journal(session: &Session) -> Arc<dyn Journal> {
     let path = default_db_path();
+    // Its rows are this process's (I6): a CLI publish running beside the window leaves them alone,
+    // and the window leaves the CLI's alone.
     let journal = match SqliteJournal::open(&path) {
-        Ok(journal) => journal,
+        Ok(journal) => journal.with_owner(httporter_platform::process_owner()),
         Err(e) => {
             if session.notice().is_none() {
                 session.set_notice(copy::journal_unavailable(&path, e));

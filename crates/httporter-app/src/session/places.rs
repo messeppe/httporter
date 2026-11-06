@@ -20,8 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{TimeDelta, Utc};
 use httporter_core::sites_file::sites_file_text;
 use httporter_core::{
-    Favorite, ProfileId, ProfileRecord, SiteExtras, SiteId, SiteRecord, UI_STATE_KEY, UiState,
-    export_sites, parse_sites_file,
+    Favorite, ProfileExtras, ProfileId, ProfileRecord, SiteExtras, SiteId, SiteRecord,
+    UI_STATE_KEY, UiState, export_sites, parse_sites_file,
 };
 use httporter_platform::{Store, site_conflicts_key, site_extras_key};
 use httporter_transfer::{FileHashes, HashStore};
@@ -282,6 +282,8 @@ impl Session {
                         created_at: now,
                         last_published_at: None,
                         cache_control: p.cache_control,
+                        // Watching and schedules are this PC's: an import starts with them off.
+                        extras: ProfileExtras::default(),
                     };
                     let _ = store.add_profile(&profile);
                 }

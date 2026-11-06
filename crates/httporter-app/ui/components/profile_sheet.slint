@@ -39,6 +39,9 @@ export component ProfileSheet inherits Rectangle {
     property <ProfileDraft> seen;
     property <bool> remove-extras;
     property <int> purge;
+    // I6 (T4): the watch folder and unattended deletes.
+    property <bool> watch;
+    property <bool> unattended-deletes;
     // Delete Profile was pressed: the confirmation is shown over the sheet.
     property <bool> confirming: false;
     // The rules Restore Defaults puts back: DEFAULT_SKIP_RULES of httporter-core's `skip.rs`, one
@@ -74,6 +77,12 @@ export component ProfileSheet inherits Rectangle {
         if (root.draft.cache-control != root.seen.cache-control) {
             cache-field.text = root.draft.cache-control;
         }
+        if (root.draft.watch != root.seen.watch) {
+            root.watch = root.draft.watch;
+        }
+        if (root.draft.unattended-deletes != root.seen.unattended-deletes) {
+            root.unattended-deletes = root.draft.unattended-deletes;
+        }
         root.seen = root.draft;
     }
 
@@ -95,6 +104,8 @@ export component ProfileSheet inherits Rectangle {
             cache-control: cache-field.text,
             cache-control-enabled: root.draft.cache-control-enabled,
             cache-control-note: root.draft.cache-control-note,
+            watch: root.watch,
+            unattended-deletes: root.unattended-deletes,
         };
     }
 
@@ -317,6 +328,33 @@ export component ProfileSheet inherits Rectangle {
                     Text {
                         text: root.draft.cache-control-note != "" ? root.draft.cache-control-note : @tr("Sent with every file this profile uploads. Leave it empty for none.");
                         color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+                // I6 (T4): publishing without being asked.
+                FormRow {
+                    label: @tr("Automatic");
+
+                    CheckLine {
+                        text: @tr("Publish changes automatically while HTTPorter is open");
+                        checked: root.watch;
+                        toggled(on) => { root.watch = on; }
+                    }
+                    Text {
+                        text: @tr("Uploads 10 seconds after the folder changes.");
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                    CheckLine {
+                        text: @tr("Delete without asking when publishing automatically");
+                        checked: root.unattended-deletes;
+                        toggled(on) => { root.unattended-deletes = on; }
+                    }
+                    Text {
+                        text: @tr("Files removed from the folder are deleted from the site without a review.");
+                        color: Theme.red;
                         font-size: Theme.font-small;
                         wrap: word-wrap;
                     }

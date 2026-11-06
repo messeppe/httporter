@@ -16,6 +16,10 @@
 //! sidebar's favorites and each profile's Cache-Control header. Site extras and the window's UI
 //! state are JSON in the settings.
 //!
+//! Schema v5 (I6) adds each journal row's owner (`journal.owner`, see [`crate::journal`]), who
+//! started each publish (`publish_history.source`) and each profile's I6 options
+//! (`profiles.extras`, JSON [`httporter_core::ProfileExtras`]).
+//!
 //! The file is opened in WAL mode with a 5 s busy timeout, so the store and the transfer
 //! journal ([`crate::journal`]) can each hold their own connection to it.
 
@@ -27,8 +31,8 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, Utc};
 use httporter_core::{
     AccountId, CdnLink, CdnZone, DeleteGuard, Favorite, FileAction, FileOutcome, HISTORY_KEEP,
-    HistoryFile, HistoryRecord, PlaceKind, ProfileId, ProfileRecord, ProviderKind, PublishResult,
-    PurgeMode, PurgeResult, RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
+    HistoryFile, HistoryRecord, HistorySource, PlaceKind, ProfileId, ProfileRecord, ProviderKind,
+    PublishResult, PurgeMode, PurgeResult, RemotePath, S3Preset, S3Site, SiteId, SiteRecord,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
@@ -148,6 +152,11 @@ const MIGRATIONS: &[&str] = &[
         remote TEXT
     );
     ALTER TABLE profiles ADD COLUMN cache_control TEXT;",
+    // v5 (I6): who owns each journal row (the window and the CLI can run at once; NULL = an old
+    // run, gone), who started each publish, and each profile's I6 options as JSON.
+    "ALTER TABLE journal ADD COLUMN owner TEXT;
+    ALTER TABLE publish_history ADD COLUMN source TEXT NOT NULL DEFAULT 'app';
+    ALTER TABLE profiles ADD COLUMN extras TEXT NOT NULL DEFAULT '{}';",
 ];
 
 /// The Transfers settings (Settings window, Transfers tab) are stored under this key.
@@ -538,8 +547,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO profiles (id, site, name, local_dir, remote_dir, skip_rules,
                                    remove_extras, purge, guard_files, guard_percent,
-                                   created_at, last_published_at, cache_control)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                   created_at, last_published_at, cache_control, extras)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 p.id.0,
                 p.site.0,
@@ -554,6 +563,7 @@ impl Store {
                 stamp(p.created_at),
                 p.last_published_at.map(stamp),
                 p.cache_control,
+                cols.extras,
             ],
         )?;
         Ok(())
@@ -569,7 +579,7 @@ impl Store {
             "UPDATE profiles
              SET site = ?2, name = ?3, local_dir = ?4, remote_dir = ?5, skip_rules = ?6,
                  remove_extras = ?7, purge = ?8, guard_files = ?9, guard_percent = ?10,
-                 created_at = ?11, cache_control = ?12
+                 created_at = ?11, cache_control = ?12, extras = ?13
              WHERE id = ?1",
             params![
                 p.id.0,
@@ -584,6 +594,7 @@ impl Store {
                 p.guard.percent,
                 stamp(p.created_at),
                 p.cache_control,
+                cols.extras,
             ],
         )?;
         if changed == 0 {
@@ -614,7 +625,8 @@ impl Store {
     pub fn list_profiles(&self) -> Result<Vec<ProfileRecord>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, site, name, local_dir, remote_dir, skip_rules, remove_extras, purge,
-                    guard_files, guard_percent, created_at, last_published_at, cache_control
+                    guard_files, guard_percent, created_at, last_published_at, cache_control,
+                    extras
              FROM profiles ORDER BY name COLLATE NOCASE, id",
         )?;
         let mut rows = stmt.query([])?;
@@ -638,8 +650,8 @@ impl Store {
         tx.execute(
             "INSERT INTO publish_history (profile, started_at, finished_at, result, uploaded,
                                           deleted, skipped, failed, bytes, purge, verified,
-                                          remote_files, remote_folders, regions)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                          remote_files, remote_folders, regions, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 h.profile.0,
                 stamp(h.started_at),
@@ -655,6 +667,7 @@ impl Store {
                 int(h.remote_files)?,
                 int(h.remote_folders)?,
                 h.regions,
+                h.source.as_str(),
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -720,7 +733,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT h.id, h.profile, h.started_at, h.finished_at, h.result, h.uploaded,
                     h.deleted, h.skipped, h.failed, h.bytes, h.purge, h.verified,
-                    h.remote_files, h.remote_folders, h.regions
+                    h.remote_files, h.remote_folders, h.regions, h.source
              FROM publish_history h
              WHERE h.profile = ?1
                AND (?2 = ''
@@ -824,6 +837,7 @@ struct ProfileColumns<'a> {
     local_dir: &'a str,
     skip_rules: String,
     purge: String,
+    extras: String,
 }
 
 impl<'a> ProfileColumns<'a> {
@@ -836,6 +850,7 @@ impl<'a> ProfileColumns<'a> {
             })?,
             skip_rules: to_json(&p.skip_rules)?,
             purge: to_json(&p.purge)?,
+            extras: to_json(&p.extras)?,
         })
     }
 }
@@ -855,6 +870,7 @@ struct RawProfile {
     created_at: String,
     last_published_at: Option<String>,
     cache_control: Option<String>,
+    extras: String,
 }
 
 impl RawProfile {
@@ -873,6 +889,7 @@ impl RawProfile {
             created_at: row.get(10)?,
             last_published_at: row.get(11)?,
             cache_control: row.get(12)?,
+            extras: row.get(13)?,
         })
     }
 
@@ -897,6 +914,9 @@ impl RawProfile {
                 None => None,
             },
             cache_control: self.cache_control.filter(|value| !value.trim().is_empty()),
+            // Options this build can't read are off rather than the profile lost: each one
+            // missing reads as its default, and text that isn't JSON at all as all of them.
+            extras: serde_json::from_str(&self.extras).unwrap_or_default(),
         })
     }
 }
@@ -918,6 +938,7 @@ struct RawHistory {
     remote_files: i64,
     remote_folders: i64,
     regions: u32,
+    source: String,
 }
 
 impl RawHistory {
@@ -938,6 +959,7 @@ impl RawHistory {
             remote_files: row.get(12)?,
             remote_folders: row.get(13)?,
             regions: row.get(14)?,
+            source: row.get(15)?,
         })
     }
 
@@ -960,6 +982,7 @@ impl RawHistory {
             remote_folders: count(self.remote_folders)?,
             regions: self.regions,
             files: Vec::new(),
+            source: HistorySource::parse(&self.source),
         })
     }
 }
@@ -1727,6 +1750,71 @@ mod tests {
         assert_eq!(names(&st).len(), 3);
     }
 
+    /// I6: a v4 database (I5) moves to v5 with its rows intact: the profile's options are off,
+    /// the publish was the window's, and the journal row has no owner, so it is offered again.
+    /// The new fields then round-trip.
+    #[test]
+    fn migration_v4_to_v5_keeps_rows_and_extras_round_trip() {
+        use httporter_core::{Journal, ProfileExtras, Schedule, ScheduleRepeat};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("httporter.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..4] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO profiles VALUES ('p-1', 's-1', 'Site', 'D:\\site', '/', '[]', 0,
+                     '\"changed\"', 100, 10, '2026-11-01T10:00:00Z', NULL, NULL);
+                 INSERT INTO publish_history (profile, started_at, finished_at, result, uploaded,
+                     deleted, skipped, failed, bytes, purge, verified, remote_files,
+                     remote_folders, regions)
+                 VALUES ('p-1', '2026-11-01T10:00:00Z', '2026-11-01T10:01:00Z', 'ok', 3, 0, 0,
+                     0, 300, '\"off\"', 1, 3, 1, 1);
+                 INSERT INTO journal (batch, site, kind, local, remote, size, folder, state,
+                     error, multipart, updated_at)
+                 VALUES ('b', 's-1', 'upload', 'D:\\site\\a.txt', '/a.txt', 1, 0, 'queued',
+                     NULL, NULL, '2026-11-01T10:00:00Z');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+
+        let st = Store::open(&path).unwrap();
+        assert_eq!(user_version(&st.conn).unwrap(), MIGRATIONS.len() as u32);
+        let mut profile = st.list_profiles().unwrap().remove(0);
+        assert_eq!(profile.extras, ProfileExtras::default());
+        let history = st.list_history(&profile.id, "").unwrap();
+        assert_eq!(history[0].source, HistorySource::App);
+        let journal = crate::SqliteJournal::open(&path)
+            .unwrap()
+            .with_owner(crate::journal::process_owner());
+        assert_eq!(journal.unfinished().unwrap().len(), 1);
+
+        profile.extras = ProfileExtras {
+            watch: true,
+            unattended_deletes: true,
+            schedule: Some(Schedule {
+                enabled: true,
+                repeat: ScheduleRepeat::Weekly {
+                    days: [true, false, true, false, true, false, false],
+                },
+                at_minutes: 6 * 60,
+                purge: Some(PurgeMode::Zone),
+            }),
+        };
+        st.update_profile(&profile).unwrap();
+        assert_eq!(st.list_profiles().unwrap(), [profile.clone()]);
+        let mut scheduled = history[0].clone();
+        scheduled.source = HistorySource::Scheduled;
+        st.add_history(&scheduled).unwrap();
+        assert_eq!(
+            st.list_history(&profile.id, "").unwrap()[0].source,
+            HistorySource::Scheduled
+        );
+    }
+
     #[test]
     fn opens_with_wal_and_busy_timeout() {
         let dir = tempfile::tempdir().unwrap();
@@ -1874,7 +1962,8 @@ mod tests {
                 "guard_percent",
                 "created_at",
                 "last_published_at",
-                "cache_control"
+                "cache_control",
+                "extras"
             ]
         );
         assert_eq!(
@@ -1902,7 +1991,8 @@ mod tests {
                 "verified",
                 "remote_files",
                 "remote_folders",
-                "regions"
+                "regions",
+                "source"
             ]
         );
         assert_eq!(
@@ -1927,7 +2017,8 @@ mod tests {
                 "state",
                 "error",
                 "multipart",
-                "updated_at"
+                "updated_at",
+                "owner"
             ]
         );
         let mut tables: Vec<String> = st
