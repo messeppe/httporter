@@ -29,7 +29,8 @@ pub use notify::{ensure_app_identity, notify, notify_or_flash};
 pub use pickers::{pick_file, pick_files, pick_folder, pick_save_file, set_dialog_owner};
 pub use placement::{client_logical_size, default_placement, placement, visible_placement};
 pub use scheduler::{
-    FakeScheduler, ScheduledTask, Scheduler, TASK_FOLDER, TaskSchedulerCom, task_name,
+    FakeScheduler, ScheduledTask, Scheduler, TASK_FOLDER, TASK_STILL_RUNNING, TaskSchedulerCom,
+    task_name,
 };
 pub use shell::{mono_font_family, open_default, open_url, open_with};
 pub use taskbar::{TaskbarProgress, TaskbarState, flash, is_foreground};

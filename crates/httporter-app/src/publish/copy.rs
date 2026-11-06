@@ -796,24 +796,25 @@ pub fn schedule_text(
     format!("{summary}{NBSP}· {}", glued(&when))
 }
 
-/// The card's line about the last scheduled publish: "Last run: today 06:00 · 3 uploaded".
-pub fn schedule_last(
-    h: &httporter_core::HistoryRecord,
-    now: chrono::DateTime<chrono::Local>,
-) -> String {
-    use httporter_core::PublishResult;
-    let at = h.started_at.with_timezone(&chrono::Local);
+/// When a scheduled run started, for the card: "today 06:00", "yesterday 06:00", "3 Nov 06:00".
+fn run_when(at: chrono::DateTime<chrono::Local>, now: chrono::DateTime<chrono::Local>) -> String {
     let (day, today) = (at.date_naive(), now.date_naive());
     let time = at.format("%H:%M");
-    let when = if day == today {
+    if day == today {
         format!("today {time}")
     } else if today.pred_opt() == Some(day) {
         format!("yesterday {time}")
     } else {
         format!("{} {time}", at.format("%-d %b"))
-    };
+    }
+}
+
+/// What a scheduled publish did: "3 uploaded", "3 uploaded, 1 deleted, 2 failed", "nothing
+/// changed", "not published, 4 failed", "cancelled".
+fn run_counts(h: &httporter_core::HistoryRecord) -> String {
+    use httporter_core::PublishResult;
     let count = crate::format::format_count;
-    let what = match h.result {
+    match h.result {
         PublishResult::Cancelled => "cancelled".to_owned(),
         PublishResult::Failed => format!("not published, {} failed", count(h.failed)),
         _ if h.uploaded + h.deleted + h.failed == 0 => "nothing changed".to_owned(),
@@ -827,8 +828,45 @@ pub fn schedule_last(
             }
             parts.join(", ")
         }
+    }
+}
+
+/// The card's line from a scheduled publish's history row alone (Task Scheduler has no run to
+/// tell of): "Last run: today 06:00 · 3 uploaded".
+pub fn schedule_last(
+    h: &httporter_core::HistoryRecord,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let at = h.started_at.with_timezone(&chrono::Local);
+    format!("Last run: {} · {}", run_when(at, now), run_counts(h))
+}
+
+/// The card's line from the task's last run (when it started, and the CLI's exit code or Task
+/// Scheduler's own code), with the history row of that run if it wrote one (a run with nothing
+/// to publish writes none): "Last run: today 06:00 · nothing to publish", "… · 3 uploaded",
+/// "… · failed (sign-in refused)".
+pub fn schedule_last_run(
+    at: chrono::DateTime<chrono::Local>,
+    code: i32,
+    row: Option<&httporter_core::HistoryRecord>,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    use httporter_core::exit;
+    let what = match (code, row) {
+        (httporter_platform::win::TASK_STILL_RUNNING, _) => "running now".to_owned(),
+        (exit::OK | exit::FAILURES, Some(h)) => run_counts(h),
+        (exit::OK, None) => "nothing to publish".to_owned(),
+        // Busy (another publish of the profile held it for 10 minutes), or an error the
+        // activity log tells of.
+        (exit::FAILURES, None) => "didn't publish (busy, or see the activity log)".to_owned(),
+        (exit::CONFIG, _) => "failed (check the profile's folder and site)".to_owned(),
+        (exit::AUTH, _) => "failed (sign-in refused)".to_owned(),
+        (exit::GUARD, Some(h)) => format!("{}, deletions held back for review", run_counts(h)),
+        (exit::GUARD, None) => "deletions held back for review".to_owned(),
+        // Windows' own codes, such as a program that can't be found.
+        (code, _) => format!("failed (code {:#010X})", code as u32),
     };
-    format!("Last run: {when} · {what}")
+    format!("Last run: {} · {what}", run_when(at, now))
 }
 
 /// The Schedule sheet's messages.

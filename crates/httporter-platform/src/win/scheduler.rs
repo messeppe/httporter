@@ -45,6 +45,11 @@ use windows::core::{BSTR, HRESULT};
 /// The Task Scheduler folder HTTPorter's tasks live in.
 pub const TASK_FOLDER: &str = "\\HTTPorter";
 
+/// `SCHED_S_TASK_RUNNING`: what [`Scheduler::last_run`] says of a run still going.
+pub const TASK_STILL_RUNNING: i32 = 0x0004_1301;
+/// `SCHED_S_TASK_HAS_NOT_RUN`: the task has never run ([`Scheduler::last_run`] answers `None`).
+const TASK_NEVER_RAN: i32 = 0x0004_1303;
+
 /// The name of `profile`'s scheduled task (inside [`TASK_FOLDER`]).
 pub fn task_name(profile: &ProfileId) -> String {
     format!("Publish {profile}")
@@ -74,6 +79,11 @@ pub trait Scheduler: Send + Sync {
     fn next_run(&self, name: &str) -> Result<Option<DateTime<Local>>, String>;
     /// Whether the task exists (the user may have deleted it in Task Scheduler).
     fn exists(&self, name: &str) -> Result<bool, String>;
+    /// When the task last started and what it ended with (the program's exit code, or Task
+    /// Scheduler's own code, such as [`TASK_STILL_RUNNING`]); `None` when it has never run or
+    /// isn't there. Not in the plan's §0: a scheduled run with nothing to publish leaves no
+    /// history row, so the card reads the last run here (controller, after T2).
+    fn last_run(&self, name: &str) -> Result<Option<(DateTime<Local>, i32)>, String>;
     /// The names of every task in [`TASK_FOLDER`] (none if the folder doesn't exist). Not in the
     /// plan's §0: T3 needs it to remove the tasks of profiles that no longer exist.
     fn list(&self) -> Result<Vec<String>, String>;
@@ -150,6 +160,18 @@ impl Scheduler for TaskSchedulerCom {
         let name = name.to_owned();
         on_com_thread(move |service| {
             Ok(existing_task(service, &BSTR::from(name.as_str()))?.is_some())
+        })
+    }
+
+    fn last_run(&self, name: &str) -> Result<Option<(DateTime<Local>, i32)>, String> {
+        let name = name.to_owned();
+        on_com_thread(move |service| {
+            let Some(task) = existing_task(service, &BSTR::from(name.as_str()))? else {
+                return Ok(None);
+            };
+            // SAFETY: as in `upsert`.
+            let (at, code) = unsafe { (task.LastRunTime()?, task.LastTaskResult()?) };
+            Ok(last_run_of(at, code))
         })
     }
 
@@ -341,6 +363,15 @@ fn from_ole_date(date: f64) -> Option<NaiveDateTime> {
         return None;
     }
     epoch.checked_add_signed(TimeDelta::try_seconds(seconds as i64)?)
+}
+
+/// What `LastRunTime` and `LastTaskResult` say, as [`Scheduler::last_run`] answers it.
+fn last_run_of(at: f64, code: i32) -> Option<(DateTime<Local>, i32)> {
+    if code == TASK_NEVER_RAN {
+        return None;
+    }
+    let at = Local.from_local_datetime(&from_ole_date(at)?).earliest()?;
+    Some((at, code))
 }
 
 // ---- The task's definition (pure; the unit tests pin it) ----
@@ -633,6 +664,7 @@ fn task_xml(task: &ScheduledTask, now: NaiveDateTime) -> String {
 pub struct FakeScheduler {
     tasks: Mutex<BTreeMap<String, ScheduledTask>>,
     next: Mutex<BTreeMap<String, DateTime<Local>>>,
+    last: Mutex<BTreeMap<String, (DateTime<Local>, i32)>>,
 }
 
 impl FakeScheduler {
@@ -651,6 +683,15 @@ impl FakeScheduler {
         match at {
             Some(at) => next.insert(name.to_owned(), at),
             None => next.remove(name),
+        };
+    }
+
+    /// What `last_run` reports for `name` from now on, while the task exists.
+    pub fn set_last_run(&self, name: &str, run: Option<(DateTime<Local>, i32)>) {
+        let mut last = lock(&self.last);
+        match run {
+            Some(run) => last.insert(name.to_owned(), run),
+            None => last.remove(name),
         };
     }
 }
@@ -677,6 +718,13 @@ impl Scheduler for FakeScheduler {
 
     fn exists(&self, name: &str) -> Result<bool, String> {
         Ok(lock(&self.tasks).contains_key(name))
+    }
+
+    fn last_run(&self, name: &str) -> Result<Option<(DateTime<Local>, i32)>, String> {
+        let exists = lock(&self.tasks).contains_key(name);
+        Ok(exists
+            .then(|| lock(&self.last).get(name).copied())
+            .flatten())
     }
 
     fn list(&self) -> Result<Vec<String>, String> {
@@ -864,6 +912,11 @@ mod tests {
         // 46_332 days after 30 Dec 1899 is 6 Nov 2026; .25 of a day is 06:00.
         assert_eq!(from_ole_date(46_332.25), Some(at("2026-11-06 06:00")));
         assert_eq!(from_ole_date(46_332.75), Some(at("2026-11-06 18:00")));
+        // A task that never ran says so in its result; one that ran keeps the program's code.
+        assert_eq!(last_run_of(0.0, TASK_NEVER_RAN), None);
+        assert_eq!(last_run_of(46_332.25, TASK_NEVER_RAN), None);
+        let (when, code) = last_run_of(46_332.25, 4).expect("a run");
+        assert_eq!((when.naive_local(), code), (at("2026-11-06 06:00"), 4));
     }
 
     #[test]
@@ -888,6 +941,7 @@ mod tests {
         assert!(!names.contains(&missing));
         assert!(!TaskSchedulerCom.exists(&missing).expect("asked"));
         assert_eq!(TaskSchedulerCom.next_run(&missing).expect("asked"), None);
+        assert_eq!(TaskSchedulerCom.last_run(&missing).expect("asked"), None);
     }
 
     /// The live check of T10: creates `\HTTPorter\Publish test-<unix>`, runs it once (a console
@@ -941,8 +995,7 @@ mod tests {
                 let task = existing_task(service, &name)?.ok_or_else(gone)?;
                 // SAFETY: as in `upsert`.
                 let (ran, result) = unsafe { (task.LastRunTime()?, task.LastTaskResult()?) };
-                // 0x41301: still running; 0x41303: hasn't run yet.
-                if ran > 0.0 && result != 0x41301 && result != 0x41303 {
+                if ran > 0.0 && result != TASK_STILL_RUNNING && result != TASK_NEVER_RAN {
                     return Ok(result);
                 }
             }

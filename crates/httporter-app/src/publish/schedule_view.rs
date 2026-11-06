@@ -25,7 +25,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeDelta};
 use httporter_core::{
     ActivityKind, HistoryRecord, HistorySource, ProfileId, ProfileRecord, ProviderKind, PurgeMode,
     Schedule, ScheduleRepeat,
@@ -141,12 +141,39 @@ enum TaskState {
     Unknown,
 }
 
-fn task_state(s: &dyn Scheduler, name: &str) -> TaskState {
+/// What Task Scheduler says of task `name`, and its last run (when it started, and its code).
+/// Blocks.
+fn look_up(s: &dyn Scheduler, name: &str) -> (TaskState, Option<(DateTime<Local>, i32)>) {
     match s.exists(name) {
-        Ok(false) => TaskState::Missing,
-        Ok(true) => TaskState::Present(s.next_run(name).ok().flatten()),
-        Err(_) => TaskState::Unknown,
+        Ok(false) => (TaskState::Missing, None),
+        Ok(true) => (
+            TaskState::Present(s.next_run(name).ok().flatten()),
+            s.last_run(name).ok().flatten(),
+        ),
+        Err(_) => (TaskState::Unknown, None),
     }
+}
+
+/// The card's last-run line: from the task's last run when Task Scheduler knows one (with the
+/// newest scheduled publish's counts only if that publish was this run: a run with nothing to
+/// publish writes no history row), otherwise from that publish alone; empty before any.
+fn last_line(
+    last: Option<(DateTime<Local>, i32)>,
+    row: Option<&HistoryRecord>,
+    now: DateTime<Local>,
+) -> String {
+    match last {
+        Some((at, code)) => copy::schedule_last_run(at, code, row.filter(|h| same_run(h, at)), now),
+        None => row.map(|h| copy::schedule_last(h, now)).unwrap_or_default(),
+    }
+}
+
+/// Whether publish `h` is the one of the run that started at `at`: it started then or later (the
+/// CLI may first wait for the profile's lock), within the task's 4 hours; 2 minutes of slack
+/// for the clocks.
+fn same_run(h: &HistoryRecord, at: DateTime<Local>) -> bool {
+    let started = h.started_at.with_timezone(&Local);
+    started >= at - TimeDelta::minutes(2) && started <= at + TimeDelta::hours(4)
 }
 
 /// The card's value for a schedule that is on, and whether to say its task is missing.
@@ -191,13 +218,14 @@ pub(super) fn page_shown(
         (card.serial, seen)
     };
     let now = Local::now();
-    let last = history
+    // The newest scheduled publish (the history is newest first).
+    let row = history
         .iter()
         .find(|h| h.source == HistorySource::Scheduled)
-        .map(|h| copy::schedule_last(h, now))
-        .unwrap_or_default();
-    ui.set_schedule_last(last.into());
+        .cloned();
     let Some(schedule) = active(record) else {
+        // Off: the task is gone, so the history alone tells of the last run.
+        ui.set_schedule_last(last_line(None, row.as_ref(), now).into());
         ui.set_schedule_text(copy::SCHEDULE_OFF.into());
         ui.set_schedule_missing(false);
         return;
@@ -206,17 +234,20 @@ pub(super) fn page_shown(
         let (text, missing) = card_text(&schedule, &TaskState::Unknown, now);
         ui.set_schedule_text(text.into());
         ui.set_schedule_missing(missing);
+        ui.set_schedule_last(last_line(None, row.as_ref(), now).into());
     }
     let name = win::task_name(&record.id);
     let p2 = p.clone();
     p.link.rt().spawn(async move {
         let s = scheduler();
-        let state = blocking(move || task_state(&*s, &name)).await;
+        let (state, last) = blocking(move || look_up(&*s, &name)).await;
         let _ = p2.link.ui().upgrade_in_event_loop(move |ui| {
             if lock(&CARD).serial == serial {
-                let (text, missing) = card_text(&schedule, &state, Local::now());
+                let now = Local::now();
+                let (text, missing) = card_text(&schedule, &state, now);
                 ui.set_schedule_text(text.into());
                 ui.set_schedule_missing(missing);
+                ui.set_schedule_last(last_line(last, row.as_ref(), now).into());
             }
         });
     });
@@ -813,8 +844,8 @@ mod tests {
         let name = win::task_name(&record.id);
         fake.set_next_run(&name, Some(local("2026-11-10 06:00")));
         assert_eq!(
-            task_state(&fake, &name),
-            TaskState::Present(Some(local("2026-11-10 06:00")))
+            look_up(&fake, &name),
+            (TaskState::Present(Some(local("2026-11-10 06:00"))), None)
         );
         record.extras.schedule = Some(Schedule {
             enabled: false,
@@ -822,7 +853,7 @@ mod tests {
         });
         put_task(&fake, &record).unwrap();
         assert!(fake.tasks().is_empty());
-        assert_eq!(task_state(&fake, &name), TaskState::Missing);
+        assert_eq!(look_up(&fake, &name), (TaskState::Missing, None));
     }
 
     #[test]
@@ -892,5 +923,51 @@ mod tests {
             copy::schedule_last(&run, now),
             "Last run: today 06:00 · 3 uploaded"
         );
+
+        // Task Scheduler's last run wins; the row gives the counts only for that run.
+        let six = local("2026-11-06 06:00");
+        assert_eq!(
+            last_line(Some((six, 0)), Some(&run), now),
+            "Last run: today 06:00 · 3 uploaded"
+        );
+        let noon = local("2026-11-06 12:00");
+        assert_eq!(
+            last_line(Some((noon, 0)), Some(&run), now),
+            "Last run: today 12:00 · nothing to publish"
+        );
+        assert_eq!(
+            last_line(Some((noon, 1)), Some(&run), now),
+            "Last run: today 12:00 · didn't publish (busy, or see the activity log)"
+        );
+        assert_eq!(
+            last_line(Some((noon, 3)), None, now),
+            "Last run: today 12:00 · failed (sign-in refused)"
+        );
+        assert_eq!(
+            last_line(Some((six, 4)), Some(&run), now),
+            "Last run: today 06:00 · 3 uploaded, deletions held back for review"
+        );
+        assert_eq!(
+            last_line(Some((noon, win::TASK_STILL_RUNNING)), None, now),
+            "Last run: today 12:00 · running now"
+        );
+        assert_eq!(
+            last_line(Some((noon, 0x8007_0002_u32 as i32)), None, now),
+            "Last run: today 12:00 · failed (code 0x80070002)"
+        );
+        // Never run (or the task is gone): the newest scheduled publish, or nothing.
+        assert_eq!(
+            last_line(None, Some(&run), now),
+            "Last run: today 06:00 · 3 uploaded"
+        );
+        assert_eq!(last_line(None, None, now), "");
+        // The fake answers a last run only while its task exists.
+        let fake = FakeScheduler::new();
+        let record = profile("Blog", Some(daily(360)));
+        let name = win::task_name(&record.id);
+        fake.set_last_run(&name, Some((six, 0)));
+        assert_eq!(look_up(&fake, &name).1, None);
+        put_task(&fake, &record).unwrap();
+        assert_eq!(look_up(&fake, &name).1, Some((six, 0)));
     }
 }
