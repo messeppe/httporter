@@ -1067,6 +1067,10 @@ fn remove_site(ctx: &Ctx) {
             transfers.forget_site(&id);
         }
         let removed = link.session.remove_site(&id);
+        if removed.is_ok() {
+            // I6: the scheduled tasks of the site's profiles go with them.
+            crate::publish::remove_orphan_tasks(&link.session);
+        }
         let ui = link.ui.clone();
         let _ =
             ui.upgrade_in_event_loop(move |ui| show_removed(&ui, &link, &id, selected, removed));

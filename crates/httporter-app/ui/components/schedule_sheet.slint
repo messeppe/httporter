@@ -5,9 +5,10 @@
 // the profile sheet and is modal in the same way (Escape cancels, Tab and Shift+Tab stay inside).
 //
 // The sheet shows an On switch, then how often: Hourly (every N hours), Daily or Weekly (the
-// weekday chips), the time of day, and what to purge. The fields start from `draft`; Save hands
-// them back as edited, and the app checks them, then shows `draft.error` or closes the sheet.
-// T1 is the skeleton: T3 fills in the checks and the app's side.
+// weekday chips), the time of day, and what to purge (Bunny sites only: `draft.purge-enabled`).
+// While the switch is off the other fields are dimmed and keep their values. The fields start
+// from `draft`; Save hands them back as edited, and the app checks them, puts the task in place
+// and stores the schedule, then shows `draft.error` or closes the sheet.
 
 import { Theme } from "../theme.slint";
 import { ScheduleDraft } from "../types.slint";
@@ -204,7 +205,8 @@ export component ScheduleSheet inherits Rectangle {
         focus-last => { save-button.focus(); }
 
         AttachedSheet {
-            sheet-width: 520px;
+            // Wide enough for the four purge choices on one line, also with larger text.
+            sheet-width: 580px + 300px * max(0, Theme.text-scale - 1);
             label: @tr("Publish on a Schedule");
 
             VerticalLayout {
@@ -367,7 +369,8 @@ export component ScheduleSheet inherits Rectangle {
                         }
                     }
                 }
-                FormRow {
+                // An S3 site has no CDN to purge: no row rather than a row that does nothing.
+                if root.draft.purge-enabled: FormRow {
                     label: @tr("Purge CDN");
 
                     HorizontalLayout {
@@ -376,7 +379,7 @@ export component ScheduleSheet inherits Rectangle {
                         Segmented {
                             options: [@tr("As the profile"), @tr("Off"), @tr("Changed files"), @tr("Whole zone")];
                             label: @tr("Purge CDN after a scheduled publish");
-                            enabled: root.enabled && root.draft.purge-enabled;
+                            enabled: root.enabled;
                             current <=> root.purge;
                         }
                     }

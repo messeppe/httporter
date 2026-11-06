@@ -540,7 +540,7 @@ pub fn remote_detail(folders: u64, regions: u32) -> String {
 pub const REMOTE_UNKNOWN: &str = "-";
 pub const REMOTE_UNKNOWN_DETAIL: &str = "Counted at the first publish";
 
-/// The Schedule card (scheduled publishing arrives in a later version).
+/// The Schedule card while no schedule is on (I6: see "schedule (I6, T3)" below).
 pub const SCHEDULE_OFF: &str = "Off";
 
 /// Under the history: "5 publishes · kept for the last 200"; while searching, how many match.
@@ -714,6 +714,178 @@ pub fn key_meta(created: chrono::DateTime<chrono::Utc>) -> String {
 /// Settings › Publish: forgetting a key failed.
 pub fn key_not_forgotten(reason: impl std::fmt::Display) -> String {
     format!("The key couldn't be forgotten: {reason}")
+}
+
+// ---- schedule (I6, T3) ----
+
+/// A no-break space: the card's value wraps between "Daily at 06:00" and "next Tue 06:00" only.
+const NBSP: char = '\u{a0}';
+
+/// `text` with its spaces as no-break spaces.
+fn glued(text: &str) -> String {
+    text.replace(' ', &NBSP.to_string())
+}
+
+/// A time of day from minutes after midnight: "06:00".
+pub fn clock(minutes: u16) -> String {
+    let minutes = minutes.min(24 * 60 - 1);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// The weekdays' short names, Monday first (as the Schedule sheet's chips).
+const DAYS_SHORT: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DAYS_PLURAL: [&str; 7] = [
+    "Mondays",
+    "Tuesdays",
+    "Wednesdays",
+    "Thursdays",
+    "Fridays",
+    "Saturdays",
+    "Sundays",
+];
+
+/// What a schedule does, for the card: "Daily at 06:00", "Every 3 hours", "Hourly", "Weekdays at
+/// 06:00", "Mondays at 06:00", "Mon, Wed, Fri at 06:00".
+pub fn schedule_summary(s: &httporter_core::Schedule) -> String {
+    use httporter_core::ScheduleRepeat;
+    let at = clock(s.at_minutes);
+    match &s.repeat {
+        ScheduleRepeat::Hourly { every: 0 | 1 } => "Hourly".to_owned(),
+        ScheduleRepeat::Hourly { every: 24.. } => format!("Daily at {at}"),
+        ScheduleRepeat::Hourly { every } => format!("Every {every} hours"),
+        ScheduleRepeat::Daily => format!("Daily at {at}"),
+        ScheduleRepeat::Weekly { days } => {
+            let on: Vec<usize> = (0..7).filter(|&i| days[i]).collect();
+            match on.as_slice() {
+                [] | [0, 1, 2, 3, 4, 5, 6] => format!("Daily at {at}"),
+                [0, 1, 2, 3, 4] => format!("Weekdays at {at}"),
+                [5, 6] => format!("Weekends at {at}"),
+                [one] => format!("{} at {at}", DAYS_PLURAL[*one]),
+                many => {
+                    let names: Vec<&str> = many.iter().map(|&i| DAYS_SHORT[i]).collect();
+                    format!("{} at {at}", names.join(", "))
+                }
+            }
+        }
+    }
+}
+
+/// The card's value: the schedule and, when Task Scheduler knows it, the next run: "Daily at 06:00
+/// · next Tue 06:00", "Every 3 hours · next at 18:00", "… · next 14 Nov". Wraps only before
+/// "next".
+pub fn schedule_text(
+    s: &httporter_core::Schedule,
+    next: Option<chrono::DateTime<chrono::Local>>,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let summary = glued(&schedule_summary(s));
+    let Some(next) = next else {
+        return summary;
+    };
+    let (day, today) = (next.date_naive(), now.date_naive());
+    let time = next.format("%H:%M");
+    let when = if day == today {
+        format!("next at {time}")
+    } else if day > today && (day - today).num_days() < 7 {
+        use chrono::Datelike;
+        let weekday = next.weekday().num_days_from_monday() as usize;
+        format!("next {} {time}", DAYS_SHORT[weekday.min(6)])
+    } else {
+        format!("next {}", next.format("%-d %b"))
+    };
+    format!("{summary}{NBSP}· {}", glued(&when))
+}
+
+/// The card's line about the last scheduled publish: "Last run: today 06:00 · 3 uploaded".
+pub fn schedule_last(
+    h: &httporter_core::HistoryRecord,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    use httporter_core::PublishResult;
+    let at = h.started_at.with_timezone(&chrono::Local);
+    let (day, today) = (at.date_naive(), now.date_naive());
+    let time = at.format("%H:%M");
+    let when = if day == today {
+        format!("today {time}")
+    } else if today.pred_opt() == Some(day) {
+        format!("yesterday {time}")
+    } else {
+        format!("{} {time}", at.format("%-d %b"))
+    };
+    let count = crate::format::format_count;
+    let what = match h.result {
+        PublishResult::Cancelled => "cancelled".to_owned(),
+        PublishResult::Failed => format!("not published, {} failed", count(h.failed)),
+        _ if h.uploaded + h.deleted + h.failed == 0 => "nothing changed".to_owned(),
+        _ => {
+            let mut parts = vec![format!("{} uploaded", count(h.uploaded))];
+            if h.deleted > 0 {
+                parts.push(format!("{} deleted", count(h.deleted)));
+            }
+            if h.failed > 0 {
+                parts.push(format!("{} failed", count(h.failed)));
+            }
+            parts.join(", ")
+        }
+    };
+    format!("Last run: {when} · {what}")
+}
+
+/// The Schedule sheet's messages.
+pub const SCHEDULE_TIME_INVALID: &str = "Enter the time as hours and minutes, such as 06:00.";
+pub const SCHEDULE_HOURS_INVALID: &str = "Enter how many hours apart, from 1 to 24.";
+pub const SCHEDULE_DAYS_MISSING: &str = "Choose at least one day.";
+pub const SCHEDULE_PROFILE_GONE: &str = "This profile no longer exists.";
+
+/// Task Scheduler refused the task.
+pub fn schedule_task_not_saved(reason: impl std::fmt::Display) -> String {
+    format!("Windows couldn't save the scheduled task: {reason}")
+}
+
+/// Task Scheduler wouldn't remove the task.
+pub fn schedule_task_not_removed(reason: impl std::fmt::Display) -> String {
+    format!("Windows couldn't remove the scheduled task: {reason}")
+}
+
+/// The task was saved, but the profile's schedule wasn't (the task is put back as it was).
+pub fn schedule_not_saved(reason: impl std::fmt::Display) -> String {
+    format!("The schedule couldn't be saved: {reason}")
+}
+
+/// HTTPorter can't tell where it runs from, so the task has no program to start.
+pub fn schedule_no_exe(reason: impl std::fmt::Display) -> String {
+    format!("HTTPorter couldn't find its own program file: {reason}")
+}
+
+/// The task's description in Task Scheduler.
+pub fn schedule_task_description(profile: &str) -> String {
+    format!(
+        "Publishes the HTTPorter profile \u{201c}{profile}\u{201d}. To change or stop it, open \
+         the profile in HTTPorter and choose Publish on a Schedule\u{2026}"
+    )
+}
+
+/// The activity log's lines.
+pub fn schedule_set(profile: &str, summary: &str) -> String {
+    format!("Scheduled publish of \u{201c}{profile}\u{201d}: {summary}")
+}
+
+pub fn schedule_off(profile: &str) -> String {
+    format!("Scheduled publish of \u{201c}{profile}\u{201d} turned off")
+}
+
+pub fn schedule_recreated(profile: &str) -> String {
+    format!("Scheduled task of \u{201c}{profile}\u{201d} recreated")
+}
+
+/// A task left behind by a profile that no longer exists, removed at start or after a site went.
+pub fn schedule_orphan_removed(task: &str) -> String {
+    format!("Removed the scheduled task \u{201c}{task}\u{201d}: its profile no longer exists")
+}
+
+/// A task that couldn't be removed with its profile, or kept up to date with its name.
+pub fn schedule_task_trouble(task: &str, reason: impl std::fmt::Display) -> String {
+    format!("The scheduled task \u{201c}{task}\u{201d} couldn't be updated: {reason}")
 }
 
 // ---- purge now (T5) ----

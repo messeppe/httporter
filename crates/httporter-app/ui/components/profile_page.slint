@@ -45,9 +45,12 @@ component Card inherits Rectangle {
 }
 
 // One of the three cards under the header (mockup: a small label, a big value, a line of detail).
+// `wrap-value`: the value wraps instead of eliding (the Schedule card's "Daily at 06:00 · next Tue
+// 06:00", whose app-made text breaks only before "next").
 component StatCard inherits Card {
     in property <string> caption;
     in property <string> value;
+    in property <bool> wrap-value: false;
 
     accessible-role: groupbox;
     accessible-label: root.caption;
@@ -70,7 +73,8 @@ component StatCard inherits Card {
             color: Theme.label;
             font-size: Theme.font-large;
             font-weight: Theme.weight-semibold;
-            overflow: elide;
+            wrap: root.wrap-value ? TextWrap.word-wrap : TextWrap.no-wrap;
+            overflow: root.wrap-value ? TextOverflow.clip : TextOverflow.elide;
         }
         @children
     }
@@ -484,11 +488,13 @@ export component ProfilePage inherits Rectangle {
                     overflow: elide;
                 }
             }
-            // The schedule (I6): what it is, the last scheduled run, and the link to the sheet.
+            // The schedule (I6): what it is and its next run, the last scheduled run, and the link
+            // to the sheet. Its value may take two lines, so the next run is never cut off.
             StatCard {
                 horizontal-stretch: 1;
                 caption: @tr("Schedule");
                 value: root.schedule-text;
+                wrap-value: true;
 
                 if root.schedule-last != "": Text {
                     text: root.schedule-last;
