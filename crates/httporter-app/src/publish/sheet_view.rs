@@ -15,20 +15,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use httporter_core::{
-    ActivityKind, CdnZone, CompareStatus as Status, FileOutcome, HistoryFile, PURGE_URL_LIMIT,
-    ProfileId, ProfileRecord, ProviderKind, PublishResult, PurgeMode, PurgeResult, SiteRecord,
-    SkipRules, purge_urls,
+    CdnZone, CompareStatus as Status, FileOutcome, HistoryFile, HistorySource, ProfileId,
+    ProfileRecord, ProviderKind, PurgeMode, SiteRecord,
 };
 use httporter_platform::win;
-use httporter_transfer::{
-    BatchTarget, CompareError, CompareMode, CompareResult, PublishPhase, PublishPlan, ScanProgress,
-    compare_trees, run_publish,
-};
+use httporter_transfer::{BatchTarget, CompareResult, PublishPhase, PublishPlan, ScanProgress};
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use tokio::task::AbortHandle;
 
-use super::{Publisher, copy, lock};
-use crate::copy::{self as app_copy, Attempt};
+use super::{Publisher, copy, flow, lock};
+use crate::copy as app_copy;
 use crate::format::format_size;
 use crate::viewmodel::{kind_for, slint_kind};
 use crate::{AppWindow, FileKind, PlanGroup, PlanRow, PublishSheetData};
@@ -152,10 +148,7 @@ fn int(n: u64) -> i32 {
 
 impl Sheet {
     fn new(run: u64, profile: ProfileRecord, site: SiteRecord, parallel: u32) -> Self {
-        let purge = match site.provider {
-            ProviderKind::Bunny => profile.purge,
-            ProviderKind::S3 => PurgeMode::Off,
-        };
+        let purge = flow::purge_for_site(&site, profile.purge);
         Self {
             run,
             target: None,
@@ -295,19 +288,9 @@ impl Sheet {
         self.secrets = result.secrets;
         // Purging changed files one URL at a time is slow past the limit: the whole zone instead.
         // With no link yet, the count is for one host.
-        if self.purge == PurgeMode::Changed {
-            let zones = zones.unwrap_or_else(|| {
-                vec![CdnZone {
-                    id: 0,
-                    name: String::new(),
-                    hostnames: vec![self.site.host.clone()],
-                }]
-            });
-            let urls = purge_urls(&zones, &plan.touched_paths()).len();
-            if urls > PURGE_URL_LIMIT {
-                self.purge = PurgeMode::Zone;
-                self.zone_because = Some(urls);
-            }
+        if let Some(urls) = flow::zone_instead(&self.site, self.purge, zones, &plan) {
+            self.purge = PurgeMode::Zone;
+            self.zone_because = Some(urls);
         }
         self.plan = Some(plan);
     }
@@ -324,8 +307,7 @@ impl Sheet {
 
     /// The delete guard trips for the plan as it is now.
     fn needs_review(&self, plan: &PublishPlan) -> bool {
-        let deletes = plan.delete_count();
-        deletes > 0 && self.profile.guard.trips(deletes, plan.remote_files)
+        flow::guard_trips(&self.profile, plan)
     }
 
     /// What the sheet shows, and the plan list's rows (remembering what each stands for).
@@ -431,16 +413,7 @@ impl Sheet {
         };
         data.can_publish = total > 0 && self.target.is_some();
         // Only the secrets that would go up.
-        let uploaded: Vec<String> = self
-            .secrets
-            .iter()
-            .filter(|rel| {
-                plan.items.iter().any(|item| {
-                    item.rel == **rel && item.include && item.status != Status::RemoteOnly
-                })
-            })
-            .cloned()
-            .collect();
+        let uploaded = flow::secrets_uploaded(&self.secrets, plan);
         if !uploaded.is_empty() {
             data.warning = copy::secrets_warning(&uploaded).into();
         }
@@ -586,8 +559,6 @@ impl Publisher {
             sheet.destination = destination;
             sheet.target = Some(target);
         });
-        let mode = CompareMode::for_site(site.provider, self.session.settings().verify_checksums);
-        let skip = SkipRules::new(&profile.skip_rules);
         let service = service(&site).to_owned();
         let last = Mutex::new(None::<Instant>);
         let progress = |scan: ScanProgress| {
@@ -602,41 +573,21 @@ impl Publisher {
             let text = copy::sheet_progress(&scan, &service);
             self.edit_run(run, |sheet| sheet.progress = text);
         };
-        let found = compare_trees(
-            &*provider,
-            &profile.local_dir,
-            &profile.remote_dir,
-            &skip,
-            mode,
+        let found = flow::compare(
+            &self.session,
             &self.hashes,
+            &*provider,
+            &site,
+            &profile,
             &progress,
         )
         .await;
         match found {
-            Ok(result) => {
-                let zones = match site.provider {
-                    ProviderKind::Bunny => self
-                        .session
-                        .cdn_link(site.id.clone())
-                        .await
-                        .map(|link| link.zones),
-                    ProviderKind::S3 => None,
-                };
+            Ok(flow::Compared { result, zones }) => {
                 self.edit_run(run, move |sheet| sheet.compared(result, zones));
             }
-            Err(CompareError::Local { path, message }) => {
-                let text = copy::compare_local_failed(&path, &message);
-                self.edit_run(run, |sheet| sheet.error = text);
-            }
-            Err(CompareError::Remote(e)) => {
-                let text = app_copy::describe_for(
-                    site.provider,
-                    &e,
-                    &site.container,
-                    &site.host,
-                    Attempt::List(&profile.remote_dir),
-                );
-                self.edit_run(run, |sheet| sheet.error = text);
+            Err(failed) => {
+                self.edit_run(run, |sheet| sheet.error = failed.text);
             }
         }
         let mut sheet = lock(&self.sheet);
@@ -918,10 +869,12 @@ impl Publisher {
 
     // ---- Running ----
 
-    /// Runs `plan` for `profile`: the purger first (asking for the key when needed; without one
-    /// the publish goes on unpurged), then [`run_publish`], then the history, the sidebar, the
-    /// profile page and the result in the status line. A `retry` (of a publish's failed files)
-    /// keeps the profile's last "On Bunny now" counts: its plan only knows the files retried.
+    /// Runs `plan` for `profile`: its publish lock first (another publish of the profile, from
+    /// the command line, a schedule or the watch folder, makes it say so and stop), then the
+    /// purger (asking for the key when needed; without one the publish goes on unpurged), then
+    /// [`flow::execute`], then the history, the sidebar, the profile page and the result in the
+    /// status line. A `retry` (of a publish's failed files) keeps the profile's last "On Bunny now"
+    /// counts: its plan only knows the files retried.
     async fn run_plan(
         self: Arc<Self>,
         profile: ProfileRecord,
@@ -931,56 +884,38 @@ impl Publisher {
         purge: PurgeMode,
         retry: bool,
     ) {
-        // Uploads under the profile's folder carry its Cache-Control (S3; Bunny sets caching in
-        // the pull zone).
-        if site.provider == ProviderKind::S3 {
-            self.transfers.engine().set_cache_control(
-                &site.id,
-                &profile.remote_dir,
-                profile.cache_control.clone(),
-            );
-        }
-        let (purger, unavailable) = if purge == PurgeMode::Off {
-            (None, None)
-        } else {
-            match super::cdn::purger_or_key(&self, &site).await {
-                Ok(purger) => (Some(purger), None),
-                Err(why) => (None, Some(why)),
-            }
+        let Some(_lock) = flow::lock_profile(&profile.id, Duration::ZERO).await else {
+            self.link.status(copy::publish_busy(&profile.name));
+            return;
         };
-        let mode = if purger.is_some() {
-            purge
+        let purger = if purge == PurgeMode::Off {
+            Ok(None)
         } else {
-            PurgeMode::Off
+            super::cdn::purger_or_key(&self, &site).await.map(Some)
         };
         let link = self.link.clone();
         let name = site.name.clone();
         let on_phase = move |phase: PublishPhase| link.status(copy::phase(&name, phase));
-        let ran = run_publish(
-            self.transfers.engine(),
+        let run = flow::Run {
+            profile,
+            site,
             target,
-            &plan,
-            mode,
-            purger,
-            &on_phase,
-        )
-        .await;
-        let mut outcome = match ran {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                self.link.status(copy::publish_not_started(&e.0));
+            plan,
+            purge,
+            source: HistorySource::App,
+        };
+        let engine = self.transfers.engine();
+        let mut record = match flow::execute(engine, &self.session, &run, purger, &on_phase).await {
+            Ok(record) => record,
+            Err(text) => {
+                self.link.status(text);
                 return;
             }
         };
-        if let Some(why) = unavailable {
-            outcome.purge = PurgeResult::Unavailable(why);
-        }
-        let verified = self.session.settings().verify_checksums;
-        let mut record = outcome.into_record(profile.id.clone(), &plan, verified);
         if retry {
             let history = self
                 .session
-                .history(profile.id.clone(), String::new())
+                .history(run.profile.id.clone(), String::new())
                 .await;
             if let Some(last) = history.first() {
                 record.remote_files = last.remote_files;
@@ -988,18 +923,9 @@ impl Publisher {
                 record.regions = last.regions;
             }
         }
-        let message = copy::published(&site.name, &record);
-        let (ok, bytes) = (record.result == PublishResult::Ok, record.bytes);
-        let saved = self.session.add_history(record).await;
-        crate::manage::activity_view::event(
-            ActivityKind::Publish,
-            &site.name,
-            &format!("/{}", profile.remote_dir.as_str()),
-            ok,
-            message.clone(),
-            bytes,
-        );
-        self.link.refresh_remote_at(&site.id, &profile.remote_dir);
+        let (message, saved) = flow::record(&self.session, &run, record).await;
+        self.link
+            .refresh_remote_at(&run.site.id, &run.profile.remote_dir);
         super::profile_view::refresh(&self);
         self.link.status(match saved {
             Ok(_) => message,
@@ -1098,10 +1024,7 @@ pub(super) fn retry_failed(p: &Arc<Publisher>, history: i64) {
             this.link.status(copy::no_connection(&site.name));
             return;
         };
-        let purge = match site.provider {
-            ProviderKind::Bunny => profile.purge,
-            ProviderKind::S3 => PurgeMode::Off,
-        };
+        let purge = flow::purge_for_site(&site, profile.purge);
         this.run_plan(profile, site, target, plan, purge, true)
             .await;
     });

@@ -6,8 +6,8 @@
 ;
 ; Defines (ISCC /D<name>=<value>):
 ;   AppVersion   required. The version, from Cargo.toml (package.ps1 reads it with cargo metadata).
-;   SourceDir    required. The staged folder: httporter.exe, LICENSE-MIT.txt, LICENSE-APACHE.txt,
-;                THIRD-PARTY-NOTICES.txt, README.txt.
+;   SourceDir    required. The staged folder: httporter.exe, httporter.com (the console
+;                companion), LICENSE-MIT.txt, LICENSE-APACHE.txt, THIRD-PARTY-NOTICES.txt, README.txt.
 ;   VersionInfo  the numeric x.y.z for the setup's file version; default AppVersion.
 ;   IconFile     the setup icon; default ..\assets\icon\httporter.ico.
 ;   RepoUrl      the project page (https://github.com/<owner>/<repo>), shown in Apps & features.
@@ -18,6 +18,10 @@
 ; Per-user install, no admin rights: %LOCALAPPDATA%\Programs\HTTPorter. Uninstalling removes the
 ; program and keeps the user's data (%APPDATA%\HTTPorter, %LOCALAPPDATA%\HTTPorter and the
 ; Credential Manager entries); Settings > Security > Reset HTTPorter removes those.
+;
+; The task "Add HTTPorter to PATH" (unchecked) appends the install folder to the user's own Path
+; (HKCU\Environment), so `httporter` in any terminal finds httporter.com; uninstalling takes it
+; out again ([Code] below).
 
 #ifndef AppVersion
   #error Pass the version: ISCC /DAppVersion=1.0.0
@@ -58,6 +62,9 @@ DisableReadyPage=no
 AppMutex=Local\HTTPorter.Running
 CloseApplications=yes
 RestartApplications=no
+; The "Add HTTPorter to PATH" task changes the user's Path: Setup, and the uninstaller after
+; taking it out, tell Windows (WM_SETTINGCHANGE), so new terminals see it without a sign-out.
+ChangesEnvironment=yes
 SetupIconFile={#IconFile}
 UninstallDisplayIcon={app}\httporter.exe
 UninstallDisplayName=HTTPorter
@@ -82,9 +89,12 @@ UninstalledAll=%1 was removed from this PC.%n%nYour sites, settings and saved ke
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "addtopath"; Description: "Add HTTPorter to PATH (for the ""httporter"" command)"; GroupDescription: "Command line:"; Flags: unchecked
 
 [Files]
 Source: "{#SourceDir}\httporter.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The console companion: `httporter …` in cmd or PowerShell runs it (§8.8.1).
+Source: "{#SourceDir}\httporter.com"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE-MIT.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE-APACHE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
@@ -98,3 +108,94 @@ Name: "{autodesktop}\HTTPorter"; Filename: "{app}\httporter.exe"; AppUserModelID
 
 [Run]
 Filename: "{app}\httporter.exe"; Description: "{cm:LaunchProgram,HTTPorter}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// "Add HTTPorter to PATH" (task addtopath): the install folder is appended to the user's own
+// Path (HKCU\Environment, a REG_EXPAND_SZ), once. Uninstalling takes that entry out again,
+// whichever install added it; every other entry is kept as it was (only empty ones go).
+// ChangesEnvironment (above) sends WM_SETTINGCHANGE after either. A later install without the
+// task leaves the Path alone.
+
+const
+  EnvironmentKey = 'Environment';
+
+// Whether Path entry Part names the folder Dir: any case, with or without a trailing backslash.
+function SameDir(Part, Dir: String): Boolean;
+begin
+  Result := CompareText(RemoveBackslashUnlessRoot(Trim(Part)), RemoveBackslashUnlessRoot(Dir)) = 0;
+end;
+
+// Path without its entries that name Dir; Found says whether there were any.
+function PathWithout(Path, Dir: String; var Found: Boolean): String;
+var
+  Rest, Part: String;
+  At: Integer;
+begin
+  Result := '';
+  Found := False;
+  Rest := Path;
+  while Rest <> '' do
+  begin
+    At := Pos(';', Rest);
+    if At = 0 then
+    begin
+      Part := Rest;
+      Rest := '';
+    end else
+    begin
+      Part := Copy(Rest, 1, At - 1);
+      Rest := Copy(Rest, At + 1, Length(Rest));
+    end;
+    if SameDir(Part, Dir) then
+      Found := True
+    else if Trim(Part) <> '' then
+    begin
+      if Result <> '' then
+        Result := Result + ';';
+      Result := Result + Part;
+    end;
+  end;
+end;
+
+procedure AddToPath(Dir: String);
+var
+  Path: String;
+  Found: Boolean;
+begin
+  if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Path) then
+    Path := '';
+  PathWithout(Path, Dir, Found);
+  if Found then
+    Exit;
+  if (Path <> '') and (Path[Length(Path)] <> ';') then
+    Path := Path + ';';
+  RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Path + Dir);
+end;
+
+procedure RemoveFromPath(Dir: String);
+var
+  Path, Kept: String;
+  Found: Boolean;
+begin
+  if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Path) then
+    Exit;
+  Kept := PathWithout(Path, Dir, Found);
+  if not Found then
+    Exit;
+  if Kept = '' then
+    RegDeleteValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path')
+  else
+    RegWriteExpandStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Kept);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('addtopath') then
+    AddToPath(ExpandConstant('{app}'));
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RemoveFromPath(ExpandConstant('{app}'));
+end;

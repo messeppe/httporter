@@ -2,11 +2,11 @@
 #   powershell -NoProfile -File tools/package.ps1 [-TargetDir <dir>] [-OutDir <dir>]
 #
 # Steps:
-#   1. cargo build --release --locked -p httporter-app
+#   1. cargo build --release --locked -p httporter-app -p httporter-com
 #   2. note the exe size (no budget: the user prefers function over a smaller exe)
-#   3. stage dist\HTTPorter-<version>\ (exe, LICENSE-MIT.txt, LICENSE-APACHE.txt,
-#      THIRD-PARTY-NOTICES.txt from tools/third_party.py, README.txt)
-#   4. tools/sign.ps1 on the staged exe
+#   3. stage dist\HTTPorter-<version>\ (httporter.exe, httporter.com, LICENSE-MIT.txt,
+#      LICENSE-APACHE.txt, THIRD-PARTY-NOTICES.txt from tools/third_party.py, README.txt)
+#   4. tools/sign.ps1 on the staged httporter.exe and httporter.com
 #   5. dist\HTTPorter-<version>-windows-x64-portable.zip
 #   6. Inno Setup (installer/httporter.iss) -> dist\HTTPorter-<version>-setup.exe, then sign.ps1 on it
 #   7. dist\SHA256SUMS.txt
@@ -21,6 +21,8 @@
 #   -OutDir      where the release files go; default <repo>\dist.
 #   -SkipBuild   package the httporter.exe already in <TargetDir>\release.
 #   -Exe         package this httporter.exe instead (implies -SkipBuild); for trying the script.
+#   -Com         package this console companion as httporter.com; default httporter-com.exe in
+#                <TargetDir>\release, or beside -Exe (httporter-com.exe, else httporter.com).
 #   -IconFile    setup icon for Inno Setup; default the .iss one (assets\icon\httporter.ico).
 #   -Iscc        path of ISCC.exe; default HTTPORTER_ISCC, PATH, then the usual Inno Setup 6 folders.
 param(
@@ -28,6 +30,7 @@ param(
     [string]$OutDir,
     [switch]$SkipBuild,
     [string]$Exe,
+    [string]$Com,
     [string]$IconFile,
     [string]$Iscc
 )
@@ -135,15 +138,28 @@ if ($Exe) {
 } else {
     $builtExe = Join-Path $TargetDir 'release\httporter.exe'
 }
-if ($SkipBuild) {
-    Write-Host "build: skipped, packaging $builtExe"
+# The console companion (crates/httporter-com): cargo names it httporter-com.exe; it ships as
+# httporter.com beside httporter.exe, which `httporter` in cmd and PowerShell finds first (PATHEXT).
+if ($Com) {
+    $builtCom = (Resolve-Path -LiteralPath $Com).Path
+} elseif ($Exe) {
+    $exeDir = Split-Path -Parent $builtExe
+    $builtCom = Join-Path $exeDir 'httporter-com.exe'
+    if (-not (Test-Path -LiteralPath $builtCom -PathType Leaf)) { $builtCom = Join-Path $exeDir 'httporter.com' }
 } else {
-    Invoke-Native 'cargo' @('build', '--release', '--locked', '-p', 'httporter-app', '--target-dir', $TargetDir)
+    $builtCom = Join-Path $TargetDir 'release\httporter-com.exe'
+}
+if ($SkipBuild) {
+    Write-Host "build: skipped, packaging $builtExe and $builtCom"
+} else {
+    Invoke-Native 'cargo' @('build', '--release', '--locked', '-p', 'httporter-app', '-p', 'httporter-com', '--target-dir', $TargetDir)
 }
 if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) { throw "no exe at $builtExe" }
+if (-not (Test-Path -LiteralPath $builtCom -PathType Leaf)) { throw "no console companion at $builtCom (build -p httporter-com)" }
 
 # --- 2. Size (reported only) ----------------------------------------------------------------
 $exeSize = (Get-Item -LiteralPath $builtExe).Length
+$comSize = (Get-Item -LiteralPath $builtCom).Length
 
 # --- 3. Stage -------------------------------------------------------------------------------
 if (-not $OutDir) { $OutDir = Join-Path $repo 'dist' }
@@ -155,6 +171,7 @@ if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -F
 New-Item -ItemType Directory -Path $stage | Out-Null
 
 Copy-Item -LiteralPath $builtExe -Destination (Join-Path $stage 'httporter.exe')
+Copy-Item -LiteralPath $builtCom -Destination (Join-Path $stage 'httporter.com')
 Write-WindowsText (Join-Path $stage 'LICENSE-MIT.txt') ([IO.File]::ReadAllText((Join-Path $repo 'LICENSE-MIT')))
 Write-WindowsText (Join-Path $stage 'LICENSE-APACHE.txt') ([IO.File]::ReadAllText((Join-Path $repo 'LICENSE-APACHE')))
 
@@ -180,6 +197,31 @@ Running it
 - Portable zip: unzip anywhere and run httporter.exe.
 
 Requires Windows 10 or 11, 64-bit.
+
+Command line
+------------
+httporter.com, beside httporter.exe, runs HTTPorter's commands in cmd or PowerShell, with
+the same sites, profiles, saved keys, history and activity log as the window (which may be
+open meanwhile). In this folder (in PowerShell: .\httporter), or anywhere once the folder
+is on PATH:
+
+  httporter publish --profile "My site"     publish a profile, as its Publish button does
+                                            (--dry-run, --yes, --no-delete,
+                                             --purge changed|all|none)
+  httporter ls "My site:/blog"              list a folder of a site
+  httporter upload <files...> "My site:/blog"
+  httporter download "My site:/blog" <folder>
+  httporter sites                           the sites, with their ids
+  httporter profiles                        the publish profiles, with their ids
+  httporter --help                          everything else
+
+Exit codes: 0 done, 1 some transfers failed, 2 a setup problem (a name, an option or a
+folder), 3 signing in failed, 4 deletions held back by the delete guard (run again with
+--yes). Nothing asks for a password: keys are read from Windows Credential Manager.
+
+To type "httporter" anywhere, tick "Add HTTPorter to PATH" in the installer, or add this
+folder to PATH yourself (Windows Settings > System > About > Advanced system settings >
+Environment Variables). Uninstalling takes the installer's entry out again.
 
 Your data
 ---------
@@ -207,6 +249,7 @@ $signScript = Join-Path $repo 'tools\sign.ps1'
 $powershell = Join-Path $PSHOME 'powershell.exe'
 if (-not (Test-Path -LiteralPath $powershell)) { $powershell = (Get-Process -Id $PID).Path }
 Invoke-Native $powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $signScript, (Join-Path $stage 'httporter.exe'))
+Invoke-Native $powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $signScript, (Join-Path $stage 'httporter.com'))
 
 # --- 5. Portable zip ------------------------------------------------------------------------
 # Built entry by entry so every name uses forward slashes (Compress-Archive in Windows
@@ -258,6 +301,7 @@ $sumsPath = Join-Path $OutDir 'SHA256SUMS.txt'
 Write-Host ''
 Write-Host "HTTPorter $version packaged in $OutDir"
 Write-Host ("  httporter.exe   {0}" -f (Format-Size $exeSize))
+Write-Host ("  httporter.com   {0}" -f (Format-Size $comSize))
 Write-Host ("  portable zip    {0}" -f (Format-Size (Get-Item -LiteralPath $zipPath).Length))
 Write-Host ("  setup           {0}" -f (Format-Size (Get-Item -LiteralPath $setupPath).Length))
 Write-Host "  SHA256SUMS.txt"

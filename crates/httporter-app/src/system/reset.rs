@@ -107,6 +107,12 @@ pub fn run_pending_reset() {
     }
 }
 
+/// A reset was confirmed and hasn't run yet: its marker is there. The command line (I6) then
+/// refuses to run, since the reset is about to wipe what it would use.
+pub fn pending() -> bool {
+    Profile::of_this_user().is_some_and(|profile| exists(&profile.marker()))
+}
+
 /// Why the reset at this start stopped, if it did.
 pub(super) fn failure() -> Option<&'static str> {
     FAILED.get().map(String::as_str)
