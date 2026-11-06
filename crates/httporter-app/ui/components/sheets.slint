@@ -294,18 +294,21 @@ component CheckRow inherits Rectangle {
 }
 
 // A segmented control (mockup `.seg`): one option is chosen. One Tab stop; Left and Right (or Up
-// and Down) move the choice.
+// and Down) move the choice. Turned off (`enabled`), it is dimmed like a turned-off button and
+// takes neither the keyboard focus nor clicks, and its ring hides if it was turned off while
+// focused (ledger 153).
 export component Segmented inherits Rectangle {
     in property <[string]> options;
     // What assistive technology calls the group.
     in property <string> label;
+    in property <bool> enabled: true;
     in-out property <int> current: 0;
     out property <bool> has-focus: key-focus.has-focus;
     // The user chose another option.
     callback selected(int);
 
     function select(index: int) {
-        if (index >= 0 && index < root.options.length && index != root.current) {
+        if (root.enabled && index >= 0 && index < root.options.length && index != root.current) {
             root.current = index;
             root.selected(index);
         }
@@ -314,9 +317,11 @@ export component Segmented inherits Rectangle {
     height: Theme.control-height;
     background: Theme.chip;
     border-radius: 8px;
+    opacity: root.enabled ? 1 : 0.45;
     forward-focus: key-focus;
     accessible-role: radio-group;
     accessible-label: root.label;
+    accessible-enabled: root.enabled;
 
     HorizontalLayout {
         padding: 2px;
@@ -330,6 +335,7 @@ export component Segmented inherits Rectangle {
             accessible-role: radio-button;
             accessible-checkable: true;
             accessible-checked: i == root.current;
+            accessible-enabled: root.enabled;
             accessible-label: option;
             accessible-action-default => { root.select(i); }
 
@@ -348,6 +354,7 @@ export component Segmented inherits Rectangle {
             }
 
             TouchArea {
+                enabled: root.enabled;
                 clicked => {
                     key-focus.focus();
                     root.select(i);
@@ -365,14 +372,15 @@ export component Segmented inherits Rectangle {
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
         border-color: Theme.focus-ring;
-        visible: root.has-focus;
+        visible: root.has-focus && root.enabled;
     }
 
     key-focus := FocusScope {
         x: 0;
         width: 0;
+        enabled: root.enabled;
         key-pressed(event) => {
-            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+            if (!root.enabled || event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                 return reject;
             }
             if (event.text == Key.LeftArrow || event.text == Key.UpArrow) {
