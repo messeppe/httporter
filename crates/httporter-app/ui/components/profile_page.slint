@@ -31,7 +31,7 @@ global HistoryCols {
     out property <length> purge: 130px;
     out property <length> pad: 12px;
     out property <length> gap: 8px;
-    out property <length> row-height: 34px;
+    out property <length> row-height: 34px + Theme.grow;
 }
 
 // A rounded box on the page (mockup `.group`).
@@ -60,13 +60,13 @@ component StatCard inherits Card {
         Text {
             text: root.caption;
             color: Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             overflow: elide;
         }
         Text {
             text: root.value;
             color: Theme.label;
-            font-size: 20px;
+            font-size: Theme.font-large;
             font-weight: Theme.weight-semibold;
             overflow: elide;
         }
@@ -88,7 +88,7 @@ component Cell inherits Text {
     in property <bool> lit;
 
     color: root.lit ? Theme.sel-text : Theme.label;
-    font-size: 12px;
+    font-size: Theme.font-caption;
     vertical-alignment: center;
     overflow: elide;
 }
@@ -196,7 +196,7 @@ export component ProfilePage inherits Rectangle {
     // The detail is shown for a publish (ids start at 1).
     property <bool> has-detail: root.history-detail.id > 0;
     // The detail's file list: up to six lines, then it scrolls.
-    property <length> path-height: 20px;
+    property <length> path-height: 20px + Theme.grow-small;
 
     background: Theme.win;
     accessible-role: region;
@@ -288,7 +288,7 @@ export component ProfilePage inherits Rectangle {
                             text: root.profile.destination;
                             color: Theme.label;
                             font-family: Theme.font-mono;
-                            font-size: 12px;
+                            font-size: Theme.font-caption;
                             vertical-alignment: center;
                             overflow: elide;
                             accessible-role: none;
@@ -297,7 +297,7 @@ export component ProfilePage inherits Rectangle {
                     // The chips: skip rules, remove extras, purge, delete guard. Slint has no
                     // wrapping layout, so a row too narrow for them cuts the last ones off.
                     Rectangle {
-                        height: 20px;
+                        height: Theme.chip-height;
                         min-width: 0px;
                         clip: true;
 
@@ -326,7 +326,7 @@ export component ProfilePage inherits Rectangle {
                             horizontal-stretch: 1;
                             text: root.profile.status;
                             color: Theme.orange;
-                            font-size: 12px;
+                            font-size: Theme.font-caption;
                             wrap: word-wrap;
                             vertical-alignment: center;
                         }
@@ -368,7 +368,7 @@ export component ProfilePage inherits Rectangle {
                 Text {
                     text: root.profile.last-detail;
                     color: Theme.label2;
-                    font-size: 12px;
+                    font-size: Theme.font-caption;
                     overflow: elide;
                 }
             }
@@ -380,7 +380,7 @@ export component ProfilePage inherits Rectangle {
                 Text {
                     text: root.profile.remote-detail;
                     color: Theme.label2;
-                    font-size: 12px;
+                    font-size: Theme.font-caption;
                     overflow: elide;
                 }
             }
@@ -399,14 +399,14 @@ export component ProfilePage inherits Rectangle {
                         text: @tr("Publish on a schedule…");
                         color: Theme.accent-text;
                         opacity: 0.45;
-                        font-size: 12px;
+                        font-size: Theme.font-caption;
                         overflow: elide;
                         accessible-role: none;
                     }
                     Text {
                         horizontal-stretch: 1;
                         text: @tr("Arrives in a later version");
-                        color: Theme.label3;
+                        color: Theme.label2;
                         font-size: Theme.font-small;
                         vertical-alignment: center;
                         overflow: elide;
@@ -426,7 +426,7 @@ export component ProfilePage inherits Rectangle {
             VerticalLayout {
                 // Header (mockup `.pane-head`).
                 Rectangle {
-                    height: 40px;
+                    height: 40px + Theme.grow;
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -470,7 +470,7 @@ export component ProfilePage inherits Rectangle {
 
                 // Column headers (mockup `.cols`).
                 Rectangle {
-                    height: 26px;
+                    height: 26px + Theme.grow-small;
 
                     HorizontalLayout {
                         padding-left: HistoryCols.pad;

@@ -38,7 +38,7 @@ component Segment inherits Rectangle {
     in property <bool> available: true;
     callback clicked();
 
-    height: 24px;
+    height: Theme.tab-height;
     border-radius: 6px;
     background: root.selected ? Theme.control : transparent;
     border-width: root.selected ? 0.5px : 0px;
@@ -63,7 +63,7 @@ component Segment inherits Rectangle {
             text: root.text;
             color: root.available ? Theme.label : Theme.label3;
             font-size: Theme.font-body;
-            font-weight: root.selected ? Theme.weight-semibold : 400;
+            font-weight: root.selected ? Theme.weight-semibold : Theme.weight-regular;
             vertical-alignment: center;
             accessible-role: none;
         }
@@ -121,7 +121,7 @@ component SignInSwitch inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -210,7 +210,7 @@ component BucketRow inherits Rectangle {
     out property <bool> has-focus: key-focus.has-focus;
     callback picked();
 
-    height: 26px;
+    height: 26px + Theme.grow;
     border-radius: 6px;
     background: area.has-hover ? Theme.hover : transparent;
     forward-focus: key-focus;
@@ -235,7 +235,7 @@ component BucketRow inherits Rectangle {
     Rectangle {
         border-radius: parent.border-radius;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -587,7 +587,7 @@ export component AddSiteSheet inherits Rectangle {
                         Text {
                             text: root.editing ? @tr("Edit Site") : @tr("Add Site");
                             color: Theme.label;
-                            font-size: 17px;
+                            font-size: Theme.font-headline;
                             font-weight: Theme.weight-semibold;
                         }
                         Text {
@@ -743,7 +743,7 @@ export component AddSiteSheet inherits Rectangle {
                             label: @tr("Storage zones");
                             Rectangle {
                                 // Three rows and a bit of the fourth, so that the list scrolls and the sheet still fits a short window.
-                                height: min(root.zones.length * 26px + 8px, 94px);
+                                height: min(root.zones.length * (26px + Theme.grow) + 8px, 94px + 3 * Theme.grow);
                                 border-radius: 7px;
                                 background: Theme.field;
                                 border-width: 1px;
@@ -759,7 +759,7 @@ export component AddSiteSheet inherits Rectangle {
                                     VerticalLayout {
                                         alignment: start;
                                         for zone[i] in root.zones: Rectangle {
-                                            height: 26px;
+                                            height: 26px + Theme.grow;
 
                                             if zone.usable: HorizontalLayout {
                                                 padding-left: 6px;
@@ -780,7 +780,7 @@ export component AddSiteSheet inherits Rectangle {
                                                 padding-right: 6px;
                                                 Text {
                                                     text: @tr("{} · can't be added: {}", zone.name, zone.reason);
-                                                    color: Theme.label3;
+                                                    color: Theme.label2;
                                                     font-size: Theme.font-body;
                                                     vertical-alignment: center;
                                                     overflow: elide;
@@ -973,7 +973,7 @@ export component AddSiteSheet inherits Rectangle {
                                 }
                                 if root.s3-errors.bucket != "": ErrorLine { text: root.s3-errors.bucket; }
                                 if root.buckets-open: Rectangle {
-                                    height: root.buckets-busy || root.buckets-error != "" || root.buckets.length == 0 ? 32px : min(root.buckets.length * 26px + 8px, 134px);
+                                    height: root.buckets-busy || root.buckets-error != "" || root.buckets.length == 0 ? 32px + Theme.grow : min(root.buckets.length * (26px + Theme.grow) + 8px, 134px + 5 * Theme.grow);
                                     border-radius: 7px;
                                     background: Theme.field;
                                     border-width: 1px;
@@ -1071,7 +1071,7 @@ export component AddSiteSheet inherits Rectangle {
                         FormRow {
                             label: @tr("Endpoint");
                             Rectangle {
-                                height: 28px;
+                                height: Theme.control-height;
                                 border-radius: 7px;
                                 background: Theme.chip;
                                 border-width: 0.5px;
@@ -1095,7 +1095,7 @@ export component AddSiteSheet inherits Rectangle {
                                         text: root.endpoint;
                                         color: Theme.label;
                                         font-family: Theme.font-mono;
-                                        font-size: 12px;
+                                        font-size: Theme.font-caption;
                                         vertical-alignment: center;
                                         overflow: elide;
                                     }

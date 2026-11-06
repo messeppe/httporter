@@ -18,7 +18,7 @@ import { VCenter } from "layout.slint";
 component Kbd inherits Rectangle {
     in property <string> text;
 
-    height: 20px;
+    height: 20px + Theme.grow-small;
     min-width: 20px;
     border-radius: 5px;
     background: Theme.chip;
@@ -58,7 +58,7 @@ component PaletteRow inherits Rectangle {
         : root.item.icon == PaletteIcon.settings ? Icons.gear
         : Icons.chev-r;
 
-    height: root.item.header ? 28px : 40px;
+    height: root.item.header ? 28px + Theme.grow-small : 40px + Theme.grow + Theme.grow-small;
 
     if root.item.header: Text {
         x: 10px;
@@ -103,7 +103,7 @@ component PaletteRow inherits Rectangle {
                     text: root.item.title;
                     color: Theme.label;
                     font-size: Theme.font-body;
-                    font-weight: root.current ? Theme.weight-medium : 400;
+                    font-weight: root.current ? Theme.weight-medium : Theme.weight-regular;
                     overflow: elide;
                     accessible-role: none;
                 }
@@ -211,7 +211,7 @@ export component CommandPalette inherits Rectangle {
             body := VerticalLayout {
                 // The field.
                 Rectangle {
-                    height: 52px;
+                    height: 52px + Theme.font-headline - 17px;
 
                     HorizontalLayout {
                         padding-left: 16px;
@@ -235,8 +235,8 @@ export component CommandPalette inherits Rectangle {
                                 width: parent.width;
                                 height: parent.height;
                                 text: @tr("Type a command, a site or a folder");
-                                color: Theme.label3;
-                                font-size: 17px;
+                                color: Theme.label2;
+                                font-size: Theme.font-headline;
                                 vertical-alignment: center;
                                 overflow: elide;
                                 accessible-role: none;
@@ -246,7 +246,7 @@ export component CommandPalette inherits Rectangle {
                                 height: parent.height;
                                 vertical-alignment: center;
                                 text <=> root.query;
-                                font-size: 17px;
+                                font-size: Theme.font-headline;
                                 color: Theme.label;
                                 single-line: true;
                                 accessible-role: text-input;
@@ -324,7 +324,7 @@ export component CommandPalette inherits Rectangle {
                         }
 
                         if root.items.length == 0: Text {
-                            height: 44px;
+                            height: 44px + Theme.grow;
                             text: @tr("No matches");
                             color: Theme.label2;
                             font-size: Theme.font-body;

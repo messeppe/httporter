@@ -301,20 +301,25 @@ export component Toolbar inherits Rectangle {
                         active: root.view-mode == 1;
                         clicked => { root.set-view(1); }
                     }
+                    // Compare and synchronized browsing are toggles: assistive technology reads
+                    // them as on or off.
                     if root.view-mode == 0: ToolButton {
                         icon: Icons.compare;
                         label: @tr("Compare panes");
-                        description: root.comparing ? @tr("On") : (root.can-compare ? @tr("Off") : @tr("Open a folder on This PC and a site folder to compare them"));
+                        description: root.can-compare || root.comparing ? "" : @tr("Open a folder on This PC and a site folder to compare them");
                         active: root.comparing;
                         enabled: root.can-compare || root.comparing;
+                        accessible-checkable: true;
+                        accessible-checked: root.comparing;
                         clicked => { root.toggle-compare(); }
                     }
                     // Opening a folder in one pane opens the same folder in the other.
                     if root.view-mode == 0: ToolButton {
                         icon: Icons.lock;
                         label: @tr("Synchronized browsing");
-                        description: root.sync-browsing ? @tr("On") : @tr("Off");
                         active: root.sync-browsing;
+                        accessible-checkable: true;
+                        accessible-checked: root.sync-browsing;
                         clicked => { root.toggle-sync(); }
                     }
                 }

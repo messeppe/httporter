@@ -152,10 +152,10 @@ export component Switch inherits Rectangle {
         drop-shadow-offset-y: 1px;
         drop-shadow-color: #0000004d;
 
-        animate x { duration: 120ms; }
+        animate x { duration: Theme.motion ? 120ms : 0ms; }
     }
 
-    // Keyboard focus ring, 3 px outside.
+    // Keyboard focus ring, 3 px outside. A turned-off switch has none (ledger 153).
     Rectangle {
         x: -3px;
         y: -3px;
@@ -163,8 +163,8 @@ export component Switch inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
-        visible: root.has-focus;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.enabled;
     }
 
     // Zero width so that clicks do not focus it (the ring is for keyboard focus only).
@@ -438,7 +438,7 @@ component SiteRowItem inherits Rectangle {
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
-    height: 44px;
+    height: 44px + Theme.grow + Theme.grow-small;
     border-radius: 7px;
     background: root.selected ? Theme.sel : (area.has-hover ? Theme.hover : transparent);
     forward-focus: key-focus;
@@ -485,11 +485,12 @@ component SiteRowItem inherits Rectangle {
         }
     }
 
-    // Keyboard focus ring, inside the list's clip.
+    // Keyboard focus ring, inside the list's clip. On the selected row it is white, as the text
+    // is: the focus colour would be lost on the selection blue (4.7:1 against it).
     Rectangle {
         border-radius: parent.border-radius;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: root.selected ? Theme.sel-text : Theme.focus-ring;
         visible: root.has-focus;
     }
 

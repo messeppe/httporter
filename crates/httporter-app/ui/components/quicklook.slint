@@ -46,7 +46,7 @@ component ModeSwitch inherits Rectangle {
         }
     }
 
-    height: 28px;
+    height: Theme.control-height;
     background: Theme.chip;
     border-radius: 8px;
     accessible-role: radio-group;
@@ -75,7 +75,7 @@ component ModeSwitch inherits Rectangle {
                     text: @tr("Source");
                     color: Theme.label;
                     font-size: Theme.font-body;
-                    font-weight: root.current == 0 ? Theme.weight-semibold : 400;
+                    font-weight: root.current == 0 ? Theme.weight-semibold : Theme.weight-regular;
                     vertical-alignment: center;
                     accessible-role: none;
                 }
@@ -108,7 +108,7 @@ component ModeSwitch inherits Rectangle {
                     text: root.second;
                     color: Theme.label;
                     font-size: Theme.font-body;
-                    font-weight: root.current == 1 ? Theme.weight-semibold : 400;
+                    font-weight: root.current == 1 ? Theme.weight-semibold : Theme.weight-regular;
                     vertical-alignment: center;
                     accessible-role: none;
                 }
@@ -276,18 +276,18 @@ export component QuickLook inherits Rectangle {
 
                         ListView {
                             for line in root.lines: Rectangle {
-                                height: 19px;
+                                height: 19px + Theme.font-caption - 12px;
                                 background: line.mark == 1 ? Theme.green-soft : (line.mark == 2 ? Theme.red-soft : transparent);
 
                                 HorizontalLayout {
                                     alignment: start;
 
                                     Text {
-                                        width: 44px;
+                                        width: 44px * Theme.text-scale;
                                         text: line.no;
                                         color: Theme.label2;
                                         font-family: Theme.font-mono;
-                                        font-size: 12px;
+                                        font-size: Theme.font-caption;
                                         horizontal-alignment: right;
                                         vertical-alignment: center;
                                     }
@@ -299,7 +299,7 @@ export component QuickLook inherits Rectangle {
                                         text: span.text;
                                         color: CodeColors.of(span.style);
                                         font-family: Theme.font-mono;
-                                        font-size: 12px;
+                                        font-size: Theme.font-caption;
                                         vertical-alignment: center;
                                     }
                                 }

@@ -19,7 +19,8 @@ import { SecurityTab } from "security_tab.slint";
 import { CaptionButtons } from "caption_buttons.slint";
 
 // One tab of the row under the title (mockup: a 82 px button with the icon over its name).
-// Reachable with Tab, activated with Space or Return.
+// Reachable with Tab, activated with Space or Return. It widens for a name that larger text no
+// longer fits in 82 px.
 component TabButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
@@ -27,8 +28,8 @@ component TabButton inherits Rectangle {
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
-    width: 82px;
-    height: 54px;
+    width: max(82px, name.preferred-width + 12px);
+    height: 54px + Theme.grow-small;
     border-radius: 8px;
     background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
     forward-focus: key-focus;
@@ -50,11 +51,11 @@ component TabButton inherits Rectangle {
             image-fit: contain;
             accessible-role: none;
         }
-        Text {
+        name := Text {
             text: root.text;
             color: Theme.label;
             font-size: Theme.font-small;
-            font-weight: root.selected ? Theme.weight-semibold : 400;
+            font-weight: root.selected ? Theme.weight-semibold : Theme.weight-regular;
             horizontal-alignment: center;
             accessible-role: none;
         }
@@ -68,7 +69,7 @@ component TabButton inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -215,7 +216,7 @@ component Switch inherits Rectangle {
         drop-shadow-offset-y: 1px;
         drop-shadow-color: #0000004d;
 
-        animate x { duration: 120ms; }
+        animate x { duration: Theme.motion ? 120ms : 0ms; }
     }
 
     // Keyboard focus ring, 3 px outside.
@@ -226,7 +227,7 @@ component Switch inherits Rectangle {
         height: parent.height + 6px;
         border-radius: parent.border-radius + 3px;
         border-width: 2px;
-        border-color: Theme.accent;
+        border-color: Theme.focus-ring;
         visible: root.has-focus;
     }
 
@@ -711,7 +712,7 @@ export component SettingsWindow inherits Window {
         // tab buttons keep their own presses.
         Rectangle {
             background: Theme.chrome;
-            height: 98px;
+            height: 98px + Theme.grow + Theme.grow-small;
 
             caption-area := TouchArea {
                 pointer-event(event) => {
@@ -726,7 +727,7 @@ export component SettingsWindow inherits Window {
             VerticalLayout {
                 // As much padding at the left as Close is wide: the title is centred in the window.
                 HorizontalLayout {
-                    height: 32px;
+                    height: 32px + Theme.grow;
                     padding-left: 46px;
                     padding-right: 46px;
 
@@ -742,7 +743,7 @@ export component SettingsWindow inherits Window {
                 }
 
                 Rectangle {
-                    height: 66px;
+                    height: 66px + Theme.grow-small;
                     accessible-role: tab-list;
                     accessible-label: @tr("Settings sections");
 

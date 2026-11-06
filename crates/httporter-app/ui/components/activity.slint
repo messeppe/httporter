@@ -16,7 +16,7 @@ component ActivityItem inherits Rectangle {
     in property <int> index;
     in property <int> count;
 
-    height: 28px;
+    height: Theme.row-height;
     background: Math.mod(root.index, 2) == 1 ? Theme.row-alt : transparent;
     accessible-role: list-item;
     accessible-label: @tr("{}, {}, {}, {}, {}", root.entry.when, root.entry.kind, root.entry.site, root.entry.path, root.entry.detail);
@@ -32,7 +32,7 @@ component ActivityItem inherits Rectangle {
             width: 104px;
             text: root.entry.when;
             color: Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
@@ -41,7 +41,7 @@ component ActivityItem inherits Rectangle {
             width: 70px;
             text: root.entry.kind;
             color: root.entry.failed ? Theme.red : Theme.label;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             font-weight: Theme.weight-medium;
             vertical-alignment: center;
             overflow: elide;
@@ -51,7 +51,7 @@ component ActivityItem inherits Rectangle {
             width: 110px;
             text: root.entry.site;
             color: Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
@@ -61,7 +61,7 @@ component ActivityItem inherits Rectangle {
             min-width: 0px;
             text: root.entry.path;
             color: Theme.label;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
@@ -70,7 +70,7 @@ component ActivityItem inherits Rectangle {
             width: 180px;
             text: root.entry.detail;
             color: root.entry.failed ? Theme.red : Theme.label2;
-            font-size: 12px;
+            font-size: Theme.font-caption;
             horizontal-alignment: right;
             vertical-alignment: center;
             overflow: elide;
@@ -134,7 +134,7 @@ export component ActivitySheet inherits Rectangle {
                 Text {
                     text: @tr("Activity");
                     color: Theme.label;
-                    font-size: 17px;
+                    font-size: Theme.font-headline;
                     font-weight: Theme.weight-semibold;
                     accessible-role: none;
                 }

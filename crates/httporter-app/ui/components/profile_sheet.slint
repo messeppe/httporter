@@ -128,14 +128,14 @@ export component ProfileSheet inherits Rectangle {
                 Text {
                     text: root.editing ? @tr("Edit Profile") : @tr("New Publish Profile");
                     color: Theme.label;
-                    font-size: 17px;
+                    font-size: Theme.font-headline;
                     font-weight: Theme.weight-semibold;
                     accessible-role: none;
                 }
                 Text {
                     text: @tr("A profile publishes one folder to one place, uploading only what changed.");
                     color: Theme.label2;
-                    font-size: 12px;
+                    font-size: Theme.font-caption;
                     wrap: word-wrap;
                     accessible-role: none;
                 }
@@ -159,7 +159,7 @@ export component ProfileSheet inherits Rectangle {
                     label: @tr("Site");
 
                     Text {
-                        height: 28px;
+                        height: Theme.control-height;
                         text: root.draft.site-name;
                         color: Theme.label;
                         font-size: Theme.font-body;
@@ -197,8 +197,8 @@ export component ProfileSheet inherits Rectangle {
                     label: @tr("Skip rules");
 
                     rules-edit := TextEdit {
-                        height: 110px;
-                        font-size: 12px;
+                        height: 110px + 5 * (Theme.font-caption - 12px);
+                        font-size: Theme.font-caption;
                         wrap: no-wrap;
                         accessible-label: @tr("Skip rules, one per line");
                     }
