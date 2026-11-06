@@ -14,7 +14,10 @@ pub mod sigv4;
 pub mod storage;
 mod xml;
 
-pub use buckets::{CorsRule, Website};
+pub use buckets::{
+    BUCKET_NAME_INVALID, BUCKET_NAME_TAKEN, BucketNameProblem, CORS_METHODS, CorsRule, NOT_OFFERED,
+    Website, bucket_name_problem, location_constraint,
+};
 pub use errors::ACCESS_DENIED;
 pub use multipart::{MULTIPART_THRESHOLD, PART_SIZE, part_size_for};
 pub use presets::{

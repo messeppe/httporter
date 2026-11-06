@@ -6,8 +6,9 @@
 // creates, Tab and Shift+Tab stay inside).
 //
 // The app checks the name (Bunny: lowercase letters, digits and hyphens), creates the zone or the
-// bucket, and either shows `error` or closes the sheet; `busy` while it is at work. T1 is the
-// skeleton: T5 fills in the app's side.
+// bucket, and either shows what went wrong under the field it is about (`name-error`,
+// `pull-zone-error`; the rest in `error`) or closes the sheet; `busy` while it is at work. A zone or
+// a bucket that is being created can't be called back, so Cancel waits for the answer.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
@@ -58,6 +59,9 @@ export component CreateZoneSheet inherits Rectangle {
     in-out property <[bool]> replication;
     in property <bool> busy;
     in property <string> error;
+    // Under the name field and under the pull zone's name field.
+    in property <string> name-error;
+    in property <string> pull-zone-error;
     callback create(NewZoneDraft);
     callback cancelled();
 
@@ -77,11 +81,25 @@ export component CreateZoneSheet inherits Rectangle {
     }
 
     init => { name-field.focus(); }
+    changed name-error => {
+        if (root.name-error != "") {
+            name-field.focus();
+        }
+    }
+    changed pull-zone-error => {
+        if (root.pull-zone-error != "") {
+            pull-field.focus();
+        }
+    }
 
     Modal {
         at-first-stop: name-field.has-focus;
         at-last-stop: create-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => {
+            if (!root.busy) {
+                root.cancelled();
+            }
+        }
         confirm => { root.submit(); }
         focus-first => { name-field.focus(); }
         focus-last => { create-button.focus(); }
@@ -107,11 +125,15 @@ export component CreateZoneSheet inherits Rectangle {
                     name-field := Field {
                         label: @tr("Zone name");
                         placeholder: @tr("my-site");
+                        error: root.name-error;
                         enabled: !root.busy;
                         accepted => { root.submit(); }
                     }
-                    Text {
-                        text: @tr("Lowercase letters, digits and hyphens.");
+                    if root.name-error != "": ErrorLine {
+                        text: root.name-error;
+                    }
+                    if root.name-error == "": Text {
+                        text: @tr("4 to 63 lowercase letters, digits and hyphens. Zone names are unique across Bunny.");
                         color: Theme.label2;
                         font-size: Theme.font-small;
                         wrap: word-wrap;
@@ -193,8 +215,18 @@ export component CreateZoneSheet inherits Rectangle {
                     pull-field := Field {
                         label: @tr("Pull zone name");
                         placeholder: name-field.text != "" ? name-field.text : @tr("The zone's name");
+                        error: root.pull-zone-error;
                         enabled: root.pull-zone && !root.busy;
                         accepted => { root.submit(); }
+                    }
+                    if root.pull-zone-error != "": ErrorLine {
+                        text: root.pull-zone-error;
+                    }
+                    if root.pull-zone && root.pull-zone-error == "": Text {
+                        text: @tr("Its address is {}.b-cdn.net.", pull-field.text != "" ? pull-field.text : (name-field.text != "" ? name-field.text : @tr("name")));
+                        color: Theme.label2;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
                     }
                 }
                 if root.error != "": ErrorLine {
@@ -212,6 +244,7 @@ export component CreateZoneSheet inherits Rectangle {
 
                 CapsuleButton {
                     text: @tr("Cancel");
+                    enabled: !root.busy;
                     clicked => { root.cancelled(); }
                 }
                 create-button := CapsuleButton {
@@ -241,11 +274,20 @@ export component CreateBucketSheet inherits Rectangle {
     }
 
     init => { name-field.focus(); }
+    changed error => {
+        if (root.error != "") {
+            name-field.focus();
+        }
+    }
 
     Modal {
         at-first-stop: name-field.has-focus;
         at-last-stop: create-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => {
+            if (!root.busy) {
+                root.cancelled();
+            }
+        }
         confirm => { root.submit(); }
         focus-first => { name-field.focus(); }
         focus-last => { create-button.focus(); }
@@ -271,18 +313,20 @@ export component CreateBucketSheet inherits Rectangle {
                     name-field := Field {
                         label: @tr("Bucket name");
                         placeholder: @tr("my-site");
+                        error: root.error;
                         enabled: !root.busy;
                         accepted => { root.submit(); }
                     }
-                    Text {
-                        text: @tr("Bucket names are unique across the service: lowercase letters, digits, dots and hyphens.");
+                    // The name is the sheet's only field: whatever went wrong is said under it.
+                    if root.error != "": ErrorLine {
+                        text: root.error;
+                    }
+                    if root.error == "": Text {
+                        text: @tr("Bucket names are unique across the service: lowercase letters, digits and hyphens.");
                         color: Theme.label2;
                         font-size: Theme.font-small;
                         wrap: word-wrap;
                     }
-                }
-                if root.error != "": ErrorLine {
-                    text: root.error;
                 }
             }
             FootRule { }
@@ -296,6 +340,7 @@ export component CreateBucketSheet inherits Rectangle {
 
                 CapsuleButton {
                     text: @tr("Cancel");
+                    enabled: !root.busy;
                     clicked => { root.cancelled(); }
                 }
                 create-button := CapsuleButton {

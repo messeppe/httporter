@@ -706,14 +706,20 @@ export component AppWindow inherits Window {
     in property <bool> watch-can-review: false;
     callback watch-review();
     // Create New Zone… and Create Bucket… (T5), from the Add Site sheet: the window opens their
-    // sheets and tells the app (`add-site-create-zone` with the account key typed,
-    // `add-site-create-bucket` with the S3 fields and secret). Cancel closes them; Create leaves
-    // closing them to the app. `create-zone-replication` has one entry per region name.
+    // sheets and tells the app (`add-site-create-zone` with the account key typed and whether it is
+    // kept, `add-site-create-bucket` with the S3 fields and secret). Cancel closes them; Create
+    // leaves closing them to the app. `create-zone-replication` has one entry per region name. The
+    // name errors go under their fields; a bucket made goes in the Add Site sheet's bucket field
+    // (`add-site-picked-bucket`, at each new serial).
     in-out property <bool> create-zone-open: false;
     in-out property <[bool]> create-zone-replication;
     in property <bool> create-zone-busy: false;
     in property <string> create-zone-error;
-    callback add-site-create-zone(string);
+    in property <string> create-zone-name-error;
+    in property <string> create-zone-pull-error;
+    in property <string> add-site-picked-bucket;
+    in property <int> add-site-picked-bucket-serial;
+    callback add-site-create-zone(string, bool);
     callback create-zone(NewZoneDraft);
     callback create-zone-cancel();
     in-out property <bool> create-bucket-open: false;
@@ -1502,10 +1508,12 @@ export component AppWindow inherits Window {
         find-zones(key) => { root.add-site-find-zones(key); }
         zones-chosen(checked, keep) => { root.add-site-zones-chosen(checked, keep); }
         list-buckets(draft, secret) => { root.add-site-list-buckets(draft, secret); }
-        create-zone(key) => {
+        create-zone(key, keep) => {
             root.create-zone-open = true;
-            root.add-site-create-zone(key);
+            root.add-site-create-zone(key, keep);
         }
+        picked-bucket: root.add-site-picked-bucket;
+        picked-bucket-serial: root.add-site-picked-bucket-serial;
         create-bucket(draft, secret) => {
             root.create-bucket-open = true;
             root.add-site-create-bucket(draft, secret);
@@ -1527,6 +1535,8 @@ export component AppWindow inherits Window {
         replication <=> root.create-zone-replication;
         busy: root.create-zone-busy;
         error: root.create-zone-error;
+        name-error: root.create-zone-name-error;
+        pull-zone-error: root.create-zone-pull-error;
         create(zone) => { root.create-zone(zone); }
         cancelled => {
             root.create-zone-open = false;

@@ -18,10 +18,11 @@ use std::fmt;
 use std::time::Duration;
 
 use httporter_core::{HttpProtocol, ProviderError, ProxyMode, TransferSettings};
-use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
+use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::json;
 
 use crate::client::{
     ACCESS_KEY, Connections, ERROR_BODY_MAX, Op, build_client, effective_proxy, map_400,
@@ -217,29 +218,469 @@ impl BunnyAccount {
     }
 }
 
-/// Zone tools (§8.8.4–8.8.5, I6). T5 confirms the fields from bunny.net's API reference (B6) and
-/// cites it here.
+/// Zone tools (§8.8.4–8.8.5, I6). The fields, from bunny.net's API reference (B6, read
+/// 2026-11-06):
+///
+/// - `POST /storagezone` (`StorageZonePublic_Add`): `Name` (4–63 characters), `Region` (the main
+///   region's code), `ReplicationRegions` (codes); answers 201 with the `StorageZoneModel`
+///   (`Id`, `Password`, `ReadOnlyPassword`, `Region`, `StorageHostname`, …), 400 with
+///   `ApiErrorData` (`ErrorKey`, `Field`, `Message`).
+///   <https://bunny.net/docs/api-reference/core/storage-zone/add-storage-zone.md>
+/// - `GET /storagezone/{id}`: the `StorageZoneModel`, with `Custom404FilePath`,
+///   `Rewrite404To200` and `ReplicationRegions`.
+///   <https://bunny.net/docs/api-reference/core/storage-zone/get-storage-zone.md>
+/// - `POST /storagezone/{id}` (`StorageZoneSettingsModel`): `ReplicationZones`,
+///   `Custom404FilePath`, `Rewrite404To200` (all nullable); answers 204.
+///   <https://bunny.net/docs/api-reference/core/storage-zone/update-storage-zone.md>
+/// - `POST /pullzone` (`PullZoneAddModel`): `Name`, `OriginType` 2 (storage zone),
+///   `StorageZoneId`; answers 201 (the reference gives no body, so the pull zone is looked up in
+///   `GET /pullzone` when the answer doesn't describe it).
+///   <https://bunny.net/docs/api-reference/core/pull-zone/add-pull-zone.md>
+/// - `POST /storagezone/checkavailability` and `POST /pullzone/checkavailability`: `Name`; the
+///   reference gives no answer fields, live answers carry `Available`.
+///   <https://bunny.net/docs/api-reference/core/storage-zone/check-the-storage-zone-availability.md>,
+///   <https://bunny.net/docs/api-reference/core/pull-zone/check-the-pull-zone-availability.md>
+///
+/// Names: a storage zone's is 4–63 characters (the reference) of letters, digits and dashes
+/// (Bunny's S3 guide, <https://bunny.net/docs/storage/s3.md>); HTTPorter asks for lowercase. A
+/// pull zone's becomes `{name}.b-cdn.net` (<https://bunny.net/docs/cdn/quickstart.md>), so it is
+/// kept to a host name label: lowercase letters, digits and hyphens, at most 63, no hyphen at
+/// either end. Replication regions can be added to a zone but never removed (Bunny's rule):
+/// [`BunnyAccount::update_zone_settings`] only ever sends more.
 impl BunnyAccount {
     /// Creates a storage zone (`POST /storagezone`) and, when `z.pull_zone` names one, a pull zone
     /// whose origin it is (`POST /pullzone`). The zone comes back as the zone list gives it, with
     /// its pull zone.
-    pub async fn create_zone(&self, _z: &NewZone) -> Result<ZoneInfo, ProviderError> {
-        todo!("T5")
+    ///
+    /// Both names are checked first ([`zone_name_problem`], [`pull_zone_name_problem`]), then
+    /// asked about (`checkavailability`): a name taken is [`ProviderError::Refused`] with
+    /// [`ZONE_NAME_TAKEN`] or [`PULL_ZONE_NAME_TAKEN`], and nothing is created. Should the pull
+    /// zone fail once the storage zone exists, the error says so; the storage zone stays (callers
+    /// that want to keep it as a site use [`Self::create_storage_zone`] and
+    /// [`Self::create_pull_zone`] themselves).
+    pub async fn create_zone(&self, z: &NewZone) -> Result<ZoneInfo, ProviderError> {
+        if zone_name_problem(&z.name).is_some() {
+            return Err(bad_name("storage zone", &z.name));
+        }
+        if let Some(name) = &z.pull_zone
+            && pull_zone_name_problem(name).is_some()
+        {
+            return Err(bad_name("pull zone", name));
+        }
+        if !self.zone_name_available(&z.name).await? {
+            return Err(ProviderError::Refused(ZONE_NAME_TAKEN.to_owned()));
+        }
+        if let Some(name) = &z.pull_zone
+            && !self.pull_zone_name_available(name).await?
+        {
+            return Err(ProviderError::Refused(PULL_ZONE_NAME_TAKEN.to_owned()));
+        }
+        let mut zone = self.create_storage_zone(z).await?;
+        if let Some(name) = &z.pull_zone {
+            match self.create_pull_zone(name, zone.id).await {
+                Ok(pull_zone) => zone.pull_zones.push(pull_zone),
+                Err(error) => {
+                    return Err(ProviderError::Permanent(format!(
+                        "the storage zone {} was created, but its pull zone wasn't: {error}",
+                        zone.name
+                    )));
+                }
+            }
+        }
+        Ok(zone)
     }
 
-    /// The zone's 404 handling and replication regions.
-    pub async fn zone_settings(&self, _zone_id: u64) -> Result<ZoneSettings, ProviderError> {
-        todo!("T5")
+    /// `POST /storagezone`: the storage zone alone, with its password (from the answer, or from
+    /// `GET /storagezone/{id}` when the answer leaves it out). The name must pass
+    /// [`zone_name_problem`]; the main region is left out of the replication regions.
+    pub async fn create_storage_zone(&self, z: &NewZone) -> Result<ZoneInfo, ProviderError> {
+        if zone_name_problem(&z.name).is_some() {
+            return Err(bad_name("storage zone", &z.name));
+        }
+        let region = z.region.trim().to_ascii_uppercase();
+        if region.is_empty() || !region.bytes().all(|b| b.is_ascii_alphabetic()) {
+            return Err(ProviderError::Permanent(
+                "the storage zone needs a main region".into(),
+            ));
+        }
+        let mut replication: Vec<String> = Vec::new();
+        for code in &z.replication {
+            let code = code.trim().to_ascii_uppercase();
+            if !code.is_empty() && code != region && !replication.contains(&code) {
+                replication.push(code);
+            }
+        }
+        let mut body = json!({ "Name": z.name, "Region": region });
+        if !replication.is_empty() {
+            body["ReplicationRegions"] = json!(replication);
+        }
+        let answer = self
+            .send(Method::POST, "/storagezone", Some(body), "new storage zone")
+            .await?;
+        let created: RawZoneDetails = parse(&answer, "new storage zone")?;
+        let details = if created.password.as_deref().is_none_or(str::is_empty) {
+            self.details(created.id).await?
+        } else {
+            created
+        };
+        let name = details.name.clone().unwrap_or_else(|| z.name.clone());
+        check_zone(details.into_raw(&z.name)).map_err(|unusable| {
+            ProviderError::Permanent(format!(
+                "the new storage zone {name} can't be used: {}",
+                unusable.reason
+            ))
+        })
+    }
+
+    /// `POST /pullzone`: a pull zone named `name` whose origin is the storage zone
+    /// `storage_zone_id` (`OriginType` 2). The name must pass [`pull_zone_name_problem`].
+    pub async fn create_pull_zone(
+        &self,
+        name: &str,
+        storage_zone_id: u64,
+    ) -> Result<PullZoneInfo, ProviderError> {
+        if pull_zone_name_problem(name).is_some() {
+            return Err(bad_name("pull zone", name));
+        }
+        let body = json!({
+            "Name": name,
+            "OriginType": ORIGIN_TYPE_STORAGE_ZONE,
+            "StorageZoneId": storage_zone_id,
+        });
+        let answer = self
+            .send(Method::POST, "/pullzone", Some(body), "new pull zone")
+            .await?;
+        // The reference describes no answer: use it when it is the pull zone, with its host
+        // names, and look the pull zone up otherwise.
+        if let Ok(created) = serde_json::from_slice::<RawPullZone>(&answer)
+            && let Some(info) = created.info()
+            && !info.hostnames.is_empty()
+        {
+            return Ok(info);
+        }
+        let pull_zones: Vec<RawPullZone> = self.get("/pullzone", "pull zone list").await?;
+        pull_zones
+            .iter()
+            .filter(|pull_zone| pull_zone.serves(storage_zone_id))
+            .filter(|pull_zone| {
+                pull_zone
+                    .name
+                    .as_deref()
+                    .is_some_and(|found| found.eq_ignore_ascii_case(name))
+            })
+            .find_map(RawPullZone::info)
+            .ok_or_else(|| {
+                ProviderError::Permanent(
+                    "unexpected response from server (the new pull zone isn't listed)".into(),
+                )
+            })
+    }
+
+    /// Whether no storage zone is called `name` yet (`POST /storagezone/checkavailability`). An
+    /// answer without `Available` counts as yes: creating the zone will say if it isn't.
+    pub async fn zone_name_available(&self, name: &str) -> Result<bool, ProviderError> {
+        self.available("/storagezone/checkavailability", name).await
+    }
+
+    /// Whether no pull zone is called `name` yet (`POST /pullzone/checkavailability`), as
+    /// [`Self::zone_name_available`].
+    pub async fn pull_zone_name_available(&self, name: &str) -> Result<bool, ProviderError> {
+        self.available("/pullzone/checkavailability", name).await
+    }
+
+    async fn available(&self, path: &str, name: &str) -> Result<bool, ProviderError> {
+        let answer = self
+            .send(
+                Method::POST,
+                path,
+                Some(json!({ "Name": name })),
+                "availability",
+            )
+            .await?;
+        Ok(serde_json::from_slice::<RawAvailability>(&answer)
+            .ok()
+            .and_then(|found| found.available)
+            .unwrap_or(true))
+    }
+
+    /// The storage zone called `name` (exactly: Bunny's names are case-sensitive), by its id and
+    /// main region, from `GET /storagezone`; [`ProviderError::NotFound`] when the account has
+    /// none. Settings › Sites finds a site's zone with it.
+    pub async fn find_zone(&self, name: &str) -> Result<ZoneRef, ProviderError> {
+        let zones: Vec<RawZoneRef> = self.get("/storagezone?page=0", "storage zone list").await?;
+        zones
+            .into_iter()
+            .find(|zone| zone.name.as_deref() == Some(name))
+            .map(|zone| ZoneRef {
+                id: zone.id,
+                region: zone.region.unwrap_or_default().trim().to_ascii_lowercase(),
+            })
+            .ok_or(ProviderError::NotFound)
+    }
+
+    /// The zone's 404 handling and replication regions (`GET /storagezone/{id}`), region codes
+    /// in lower case.
+    pub async fn zone_settings(&self, zone_id: u64) -> Result<ZoneSettings, ProviderError> {
+        Ok(self.details(zone_id).await?.settings())
     }
 
     /// Changes the zone's 404 handling and adds replication regions (`POST /storagezone/{id}`).
-    /// Regions can only be added: Bunny doesn't remove one.
+    /// Regions can only be added: Bunny doesn't remove one. The zone is read first, and the
+    /// regions sent are the ones it has plus those of `s` it hasn't (never its main region), so a
+    /// region left out of `s` stays; `ReplicationZones` is sent only when that adds one. An empty
+    /// `custom_404_path` clears the 404 page.
     pub async fn update_zone_settings(
         &self,
-        _zone_id: u64,
-        _s: &ZoneSettings,
+        zone_id: u64,
+        s: &ZoneSettings,
     ) -> Result<(), ProviderError> {
-        todo!("T5")
+        let current = self.details(zone_id).await?;
+        let main = current
+            .region
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_uppercase();
+        let mut regions: Vec<String> = current
+            .replication_regions
+            .iter()
+            .flatten()
+            .map(|code| code.trim().to_ascii_uppercase())
+            .filter(|code| !code.is_empty())
+            .collect();
+        let had = regions.len();
+        for code in &s.replication {
+            let code = code.trim().to_ascii_uppercase();
+            if !code.is_empty() && code != main && !regions.contains(&code) {
+                regions.push(code);
+            }
+        }
+        let path = s
+            .custom_404_path
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+        let mut body = json!({
+            "Custom404FilePath": path,
+            "Rewrite404To200": s.rewrite_404_to_200,
+        });
+        if regions.len() > had {
+            body["ReplicationZones"] = json!(regions);
+        }
+        self.send(
+            Method::POST,
+            &format!("/storagezone/{zone_id}"),
+            Some(body),
+            "storage zone",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `GET /storagezone/{id}`.
+    async fn details(&self, zone_id: u64) -> Result<RawZoneDetails, ProviderError> {
+        self.get(&format!("/storagezone/{zone_id}"), "storage zone")
+            .await
+    }
+
+    /// One attempt at a request with `json` as its body, if given; the answer's body (up to
+    /// [`ANSWER_MAX`]) on success. A 400 is [`ProviderError::Refused`] with what Bunny said in its
+    /// `ApiErrorData` (`Message`), or busy for "Unable to process request".
+    async fn send(
+        &self,
+        method: Method,
+        path_and_query: &str,
+        json: Option<serde_json::Value>,
+        what: &str,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let mut request = self
+            .client
+            .request(method, format!("{}{path_and_query}", self.base))
+            .header(ACCESS_KEY, self.api_key.clone())
+            .header(ACCEPT, "application/json");
+        if let Some(json) = json {
+            request = request
+                .header(CONTENT_TYPE, "application/json")
+                .body(json.to_string());
+        }
+        let mut response = request.send().await.map_err(network_error)?;
+        let status = response.status();
+        if status.is_success() {
+            return read_capped(&mut response, ANSWER_MAX)
+                .await
+                .map_err(network_error);
+        }
+        if status == StatusCode::BAD_REQUEST {
+            let body = read_capped(&mut response, ERROR_BODY_MAX)
+                .await
+                .unwrap_or_default();
+            return Err(rejected(&body, what));
+        }
+        Err(map_status(
+            status,
+            parse_retry_after(response.headers()),
+            Op::Account,
+        ))
+    }
+}
+
+/// What [`ProviderError::Refused`] says when a storage zone of that name exists already.
+pub const ZONE_NAME_TAKEN: &str = "a storage zone of that name exists already";
+/// What [`ProviderError::Refused`] says when a pull zone of that name exists already.
+pub const PULL_ZONE_NAME_TAKEN: &str = "a pull zone of that name exists already";
+
+/// The longest answer of the account API that is read (a zone or a pull zone is a few KB).
+const ANSWER_MAX: usize = 4 * 1024 * 1024;
+/// A storage zone's name: 4 to 63 characters (`StorageZoneModelAdd.Name`).
+pub const ZONE_NAME_MIN: usize = 4;
+pub const ZONE_NAME_MAX: usize = 63;
+/// A pull zone's name is the first label of a host name: at most 63 characters.
+pub const PULL_ZONE_NAME_MAX: usize = 63;
+
+/// What is wrong with the name of a zone to create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneNameProblem {
+    /// Not between `min` and `max` characters.
+    Length { min: usize, max: usize },
+    /// Something other than lowercase letters, digits and hyphens.
+    Characters,
+    /// A hyphen first or last.
+    Hyphen,
+}
+
+/// What is wrong with `name` as a new storage zone's name, or `None`: 4–63 lowercase letters,
+/// digits and hyphens, not starting or ending with a hyphen.
+pub fn zone_name_problem(name: &str) -> Option<ZoneNameProblem> {
+    label_problem(name, ZONE_NAME_MIN, ZONE_NAME_MAX)
+}
+
+/// What is wrong with `name` as a new pull zone's name, or `None`: 1–63 lowercase letters, digits
+/// and hyphens, not starting or ending with a hyphen (it is a host name label).
+pub fn pull_zone_name_problem(name: &str) -> Option<ZoneNameProblem> {
+    label_problem(name, 1, PULL_ZONE_NAME_MAX)
+}
+
+fn label_problem(name: &str, min: usize, max: usize) -> Option<ZoneNameProblem> {
+    let len = name.chars().count();
+    if len < min || len > max {
+        return Some(ZoneNameProblem::Length { min, max });
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Some(ZoneNameProblem::Characters);
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return Some(ZoneNameProblem::Hyphen);
+    }
+    None
+}
+
+/// A name that should have been checked before it got here. It is ours (typed by the user), so
+/// it may be repeated.
+fn bad_name(what: &str, name: &str) -> ProviderError {
+    ProviderError::Permanent(format!("{name:?} can't be a {what} name"))
+}
+
+/// What a 400 of the account API means: busy for "Unable to process request", otherwise
+/// [`ProviderError::Refused`] with the `Message` of Bunny's `ApiErrorData`, cleaned; a body that
+/// isn't one is said as [`map_400`] says it.
+fn rejected(body: &[u8], what: &str) -> ProviderError {
+    let busy = String::from_utf8_lossy(body)
+        .to_ascii_lowercase()
+        .contains("unable to process request");
+    if !busy
+        && let Ok(data) = serde_json::from_slice::<RawApiError>(body)
+        && let Some(message) = data.message.as_deref().and_then(snippet)
+    {
+        return ProviderError::Refused(message);
+    }
+    match map_400(body, Op::Account) {
+        ProviderError::Permanent(message) => ProviderError::Permanent(format!("{what}: {message}")),
+        other => other,
+    }
+}
+
+fn parse<T: DeserializeOwned>(body: &[u8], what: &str) -> Result<T, ProviderError> {
+    serde_json::from_slice(body).map_err(|error| unreadable(what, &error))
+}
+
+/// A storage zone by its id and main region (lower case), as [`BunnyAccount::find_zone`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneRef {
+    pub id: u64,
+    pub region: String,
+}
+
+/// Bunny's `ApiErrorData`; only the message is used.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RawApiError {
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RawAvailability {
+    available: Option<bool>,
+}
+
+/// An element of the zone list, for finding a zone by name. No password is read.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RawZoneRef {
+    id: u64,
+    name: Option<String>,
+    region: Option<String>,
+}
+
+/// One storage zone (`StorageZoneModel`) as `GET /storagezone/{id}` and `POST /storagezone`
+/// answer. No `Debug`: it holds the passwords.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RawZoneDetails {
+    id: u64,
+    name: Option<String>,
+    password: Option<String>,
+    read_only_password: Option<String>,
+    region: Option<String>,
+    storage_hostname: Option<String>,
+    replication_regions: Option<Vec<String>>,
+    #[serde(rename = "Custom404FilePath")]
+    custom_404_file_path: Option<String>,
+    #[serde(rename = "Rewrite404To200")]
+    rewrite_404_to_200: Option<bool>,
+}
+
+impl RawZoneDetails {
+    /// As an element of the zone list, named `fallback` when the answer gave no name.
+    fn into_raw(self, fallback: &str) -> RawZone {
+        RawZone {
+            id: self.id,
+            name: self.name.unwrap_or_else(|| fallback.to_owned()),
+            password: self.password.unwrap_or_default(),
+            read_only_password: self.read_only_password,
+            region: self.region,
+            storage_hostname: self.storage_hostname,
+        }
+    }
+
+    fn settings(self) -> ZoneSettings {
+        ZoneSettings {
+            custom_404_path: self
+                .custom_404_file_path
+                .map(|path| path.trim().to_owned())
+                .filter(|path| !path.is_empty()),
+            rewrite_404_to_200: self.rewrite_404_to_200.unwrap_or(false),
+            replication: self
+                .replication_regions
+                .into_iter()
+                .flatten()
+                .map(|code| code.trim().to_ascii_lowercase())
+                .filter(|code| !code.is_empty())
+                .collect(),
+        }
     }
 }
 

@@ -321,10 +321,15 @@ export component AddSiteSheet inherits Rectangle {
     callback zones-chosen([bool], bool);
     // Choose… beside the bucket: list the buckets that these fields and this secret can see.
     callback list-buckets(SiteDraft, string);
-    // I6 (T5): Create New Zone…, with the account key typed, and Create Bucket…, with these fields
-    // and this secret. The window opens their sheets.
-    callback create-zone(string);
+    // I6 (T5): Create New Zone…, with the account key typed and whether it is kept afterwards (the
+    // choice under the zone list), and Create Bucket…, with these fields and this secret. The window
+    // opens their sheets.
+    callback create-zone(string, bool);
     callback create-bucket(SiteDraft, string);
+    // A bucket Create Bucket… made: each new `picked-bucket-serial` puts `picked-bucket` in the
+    // bucket field.
+    in property <string> picked-bucket;
+    in property <int> picked-bucket-serial;
     // An eye button was pressed (any secret field).
     callback reveal();
     callback cancel();
@@ -465,6 +470,14 @@ export component AddSiteSheet inherits Rectangle {
         } else {
             cancel-button.focus();
         }
+    }
+
+    changed picked-bucket-serial => {
+        bucket-field.text = root.picked-bucket;
+        root.s3-errors.bucket = "";
+        root.touched();
+        root.refresh-endpoint();
+        bucket-field.focus();
     }
 
     changed error-serial => {
@@ -754,7 +767,7 @@ export component AddSiteSheet inherits Rectangle {
                                     text: @tr("Create New Zone…");
                                     icon: Icons.plus;
                                     enabled: !root.busy && key-field.text != "";
-                                    clicked => { root.create-zone(key-field.text); }
+                                    clicked => { root.create-zone(key-field.text, keep-radio.current == 1); }
                                 }
                             }
                         }

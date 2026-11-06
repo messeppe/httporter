@@ -993,3 +993,176 @@ pub fn presigned_copied(links: usize, secs: u64) -> String {
 //
 //
 //
+
+// ---- zone and bucket tools (I6, T5) ----
+
+use httporter_bunny::ZoneNameProblem;
+use httporter_core::{AuthHint, ProviderError, ProviderKind};
+use httporter_s3::BucketNameProblem;
+
+/// What is wrong with a storage zone's or pull zone's name, under its field.
+pub fn zone_name_problem(problem: ZoneNameProblem) -> String {
+    match problem {
+        ZoneNameProblem::Length { min, max } if min <= 1 => {
+            format!("Use at most {max} characters.")
+        }
+        ZoneNameProblem::Length { min, max } => format!("Use {min} to {max} characters."),
+        ZoneNameProblem::Characters => "Use lowercase letters, digits and hyphens only.".to_owned(),
+        ZoneNameProblem::Hyphen => "Start and end the name with a letter or digit.".to_owned(),
+    }
+}
+
+/// Create New Zone…: the storage zone's name is taken (Bunny's names are unique across accounts).
+pub const ZONE_NAME_TAKEN: &str = "Bunny already has a storage zone with this name, in this account or another. Try another name.";
+/// Create New Zone…: the pull zone's name (its `*.b-cdn.net` address) is taken.
+pub const PULL_ZONE_NAME_TAKEN: &str =
+    "Bunny already has a pull zone with this name. Try another name.";
+/// Create New Zone… or Create Bucket… lost what the Add Site sheet gave it (it was closed).
+pub const ZONE_SHEET_GONE: &str = "Open Create New Zone… again from Add Site.";
+pub const BUCKET_SHEET_GONE: &str = "Open Create Bucket… again from Add Site.";
+/// A created zone that the site list doesn't have after it was added.
+pub const ZONE_NOT_LISTED: &str = "HTTPorter didn't list it.";
+/// Settings › Sites › Zone: the account key was forgotten since the zone was read.
+pub const ZONE_KEY_GONE: &str =
+    "The account key isn't kept any more. Add it again to change the zone.";
+
+/// A zone tool's request failed: why, in Bunny's words when it gave some.
+pub fn zone_tool_failed(error: &ProviderError) -> String {
+    match error {
+        ProviderError::Refused(message) => format!("Bunny didn't accept this: {message}"),
+        ProviderError::NotFound => "Bunny no longer has this zone.".to_owned(),
+        other => crate::copy::account_failed(other),
+    }
+}
+
+/// The zone was created and added as a site.
+pub fn zone_created(name: &str) -> String {
+    format!("Created the storage zone {name} and added it as a site.")
+}
+
+/// The zone was created and added, but its pull zone wasn't created.
+pub fn zone_created_without_pull_zone(name: &str, why: &str) -> String {
+    format!("Created the storage zone {name}, but not its pull zone. {why}")
+}
+
+/// The zone and its pull zone were created, but the pull zone couldn't be kept as the site's CDN.
+pub fn zone_cdn_not_linked(name: &str, why: impl std::fmt::Display) -> String {
+    format!(
+        "Created the storage zone {name}, but its pull zone couldn't be linked for purging: {why}"
+    )
+}
+
+/// The zone was created on Bunny but couldn't be saved as a site.
+pub fn zone_not_added(name: &str, why: &str) -> String {
+    format!(
+        "The storage zone {name} was created on Bunny, but couldn't be added as a site: {why} \
+         Find Zones lists it."
+    )
+}
+
+/// What is wrong with a new bucket's name, under its field.
+pub fn bucket_name_problem(problem: BucketNameProblem) -> String {
+    match problem {
+        BucketNameProblem::Length { min, max } => {
+            format!("Bucket names have {min} to {max} characters.")
+        }
+        BucketNameProblem::Characters { dots: true } => {
+            "Use lowercase letters, digits, dots and hyphens only.".to_owned()
+        }
+        BucketNameProblem::Characters { dots: false } => {
+            "Use lowercase letters, digits and hyphens only.".to_owned()
+        }
+        BucketNameProblem::Edge => "Start and end the name with a letter or digit.".to_owned(),
+        BucketNameProblem::Dots => {
+            "Don't put two dots together, or write the name like an IP address.".to_owned()
+        }
+        BucketNameProblem::Reserved => {
+            "The service keeps names that start or end like this for itself.".to_owned()
+        }
+    }
+}
+
+/// Create Bucket… without the key it needs (the Add Site fields are incomplete).
+pub fn bucket_needs(field_problem: &str) -> String {
+    format!("Fill in Add Site first: {field_problem}")
+}
+
+/// Create Bucket… made the bucket; the Add Site sheet now has it in its bucket field.
+pub fn bucket_created(name: &str) -> String {
+    format!("Created the bucket {name}.")
+}
+
+/// A part of a bucket's settings the service doesn't offer (the section hides its fields).
+pub fn not_offered(service: &str) -> String {
+    format!("{service} doesn't offer this through its S3 API.")
+}
+
+/// A bucket tool's request failed: why, in words, for `service` at `host`.
+pub fn bucket_tool_failed(error: &ProviderError, service: &str, host: &str) -> String {
+    match error {
+        ProviderError::Refused(message) if message == httporter_s3::NOT_OFFERED => {
+            not_offered(service)
+        }
+        ProviderError::Refused(message) if message == httporter_s3::BUCKET_NAME_TAKEN => {
+            "That name is taken: bucket names are unique across the whole service. Try another."
+                .to_owned()
+        }
+        ProviderError::Refused(message) if message == httporter_s3::BUCKET_NAME_INVALID => {
+            format!("{service} doesn't accept that name.")
+        }
+        ProviderError::Auth {
+            hint: AuthHint::Unknown,
+        } => format!("These keys aren't allowed to do this on {service}."),
+        ProviderError::Permanent(detail) => format!("{service} refused: {detail}"),
+        other => crate::copy::describe_for(
+            ProviderKind::S3,
+            other,
+            host,
+            host,
+            crate::copy::Attempt::Setup,
+        ),
+    }
+}
+
+/// Settings › Sites › Zone while the settings are read.
+pub const ZONE_READING: &str = "Reading the zone's settings from Bunny…";
+/// Settings › Sites › Bucket while the settings are read.
+pub const BUCKET_READING: &str = "Reading the bucket's settings…";
+/// The zone's settings couldn't be read.
+pub fn zone_unreadable(why: &str) -> String {
+    format!("Couldn't read the zone's settings. {why}")
+}
+/// The bucket's settings couldn't be read.
+pub fn bucket_unreadable(why: &str) -> String {
+    format!("Couldn't read the bucket's settings. {why}")
+}
+/// Saved, on the Save row.
+pub const ZONE_SAVED: &str = "Saved on Bunny.";
+pub const BUCKET_SAVED: &str = "Saved on the service.";
+/// Nothing was changed, so nothing was sent.
+pub const NOTHING_CHANGED: &str = "Nothing to save: these are the settings it has.";
+/// A read-only site's zone or bucket isn't changed.
+pub const READ_ONLY_NOT_CHANGED: &str = "This site is read-only. Turn Read-only off to change it.";
+
+/// The 404 page path isn't one.
+pub const PATH_404_INVALID: &str = "Enter a path in the zone, such as /404.html.";
+/// The replication regions the zone has, by city: "Frankfurt, New York".
+pub fn regions_list(cities: &[String]) -> String {
+    cities.join(", ")
+}
+/// A CORS origin that isn't one.
+pub fn origin_invalid(origin: &str) -> String {
+    format!("“{origin}” isn't an origin. Use one like https://example.com, or * for any.")
+}
+/// A CORS method S3 doesn't allow.
+pub fn method_invalid(method: &str) -> String {
+    format!("“{method}” isn't allowed. Use GET, PUT, POST, DELETE or HEAD.")
+}
+/// Methods without the origins they are for.
+pub const METHODS_NEED_ORIGINS: &str = "Enter the origins these methods are for.";
+/// The website's index document isn't a file name.
+pub const INDEX_INVALID: &str = "Enter a file name without a slash, such as index.html.";
+/// An error document without an index document.
+pub const INDEX_NEEDED: &str = "A website needs an index document too.";
+/// The website's error document isn't a path in the bucket.
+pub const ERROR_DOC_INVALID: &str = "Enter the file's path in the bucket, such as 404.html.";
