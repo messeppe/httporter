@@ -26,6 +26,11 @@ global Counts {
     }
 }
 
+// The height of a plan list row, which holds a line of text.
+global PlanSizes {
+    out property <length> row: 30px + Theme.grow;
+}
+
 // The tint of each group's chip (mockup `.chip.changed`, `.new`, `.remote`, and red for a delete).
 global GroupStyle {
     pure public function fg(group: PlanGroup) -> color {
@@ -132,20 +137,38 @@ component Tick inherits Rectangle {
 
 // One row of the plan list (mockup: checkbox, kind icon and path, the chip, the size), or a group
 // header with its group's checkbox, title, file count and size. A click anywhere on it toggles it.
+// The keyboard reaches it through the list (PlanList), which says when it is on the row.
 component PlanItem inherits Rectangle {
     in property <PlanRow> entry;
+    // Where the row is in the list, for assistive technology.
+    in property <int> index;
+    in property <int> count;
+    // The keyboard is on this row and the list has the focus: the focus ring shows.
+    in property <bool> focused;
     callback toggled();
     // A tree folder row's disclosure triangle.
     callback expand();
 
-    height: 30px + Theme.grow;
+    height: PlanSizes.row;
     background: root.entry.header ? Theme.row-alt : (area.has-hover ? Theme.hover : transparent);
     accessible-role: checkbox;
-    accessible-label: root.entry.path;
-    accessible-description: root.entry.label;
+    // The path and what happens to it ("index.html, Changed"; the state, "checked", is read
+    // after it); a group header's title and count ("Changed, 12 files"), a tree folder's name
+    // and count.
+    accessible-label: @tr("{}, {}", root.entry.path, root.entry.label);
+    accessible-description: root.entry.size;
     accessible-checkable: true;
     accessible-checked: root.entry.checked;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+    accessible-expandable: root.entry.folder;
+    accessible-expanded: root.entry.folder && root.entry.expanded;
     accessible-action-default => { root.toggled(); }
+    accessible-action-expand => {
+        if (root.entry.folder && !root.entry.expanded) {
+            root.expand();
+        }
+    }
 
     area := TouchArea {
         clicked => { root.toggled(); }
@@ -242,6 +265,165 @@ component PlanItem inherits Rectangle {
         height: 1px;
         background: Theme.sep;
     }
+
+    // Focus ring inside the row, clear of the list's rounded corners: the list clips one drawn
+    // outside.
+    Rectangle {
+        x: 3px;
+        y: 2px;
+        width: parent.width - 6px;
+        height: parent.height - 4px;
+        border-radius: 6px;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        visible: root.focused;
+    }
+}
+
+// The plan list. One Tab stop, like the site list (ledger 155), but the keys are the list's own
+// (the rows are virtualized, so the focus can't live in a row that scrolls away): Up and Down,
+// Home and End, PageUp and PageDown move the keyboard's row, which is scrolled into view and drawn
+// with the focus ring; Space ticks or clears its checkbox (a group header's or a tree folder's for
+// all it holds), as a click does; in the tree, Right opens a closed folder and Left closes an open
+// one. Return is left to the sheet's default button and Escape to Cancel. Assistive technology is
+// told the keyboard's row is the one focused (`accessible-delegate-focus`).
+component PlanList inherits Rectangle {
+    in property <[PlanRow]> rows;
+    // A row's checkbox, as a click on it; a tree folder opened or closed.
+    callback toggle(int);
+    callback expand(int);
+
+    // The row the keyboard is on: the last one moved to or clicked, kept inside the rows when
+    // they change (a filter, a folder closed).
+    property <int> key-row: 0;
+    property <int> at: Math.max(0, Math.min(root.rows.length - 1, root.key-row));
+    // The rows a PageUp or PageDown moves by: a view of them, less one.
+    property <int> page: Math.max(1, Math.floor(view.visible-height / PlanSizes.row) - 1);
+
+    accessible-role: list;
+    accessible-label: @tr("Files to publish");
+    accessible-item-count: root.rows.length;
+    // The list view only makes the rows in view; the focus goes to the keyboard's row among those,
+    // the first of which is the one at the top of the view (half a pixel of slack for the list
+    // lining a row up with the top).
+    accessible-delegate-focus: root.at - Math.floor((-view.content-y + 0.5px) / PlanSizes.row);
+
+    // Scroll so that the keyboard's row is fully in view (as the panes do). Does nothing before
+    // the list has been laid out.
+    function reveal() {
+        if (view.visible-height <= 0px) {
+            return;
+        }
+        if (root.at * PlanSizes.row < -view.content-y) {
+            view.content-y = -root.at * PlanSizes.row;
+        } else if ((root.at + 1) * PlanSizes.row > -view.content-y + view.visible-height) {
+            if ((root.at + 1) * PlanSizes.row > -view.content-y + 1.5 * view.visible-height) {
+                // A long way down: the list snaps a jump of more than a screen and a half to a
+                // whole row, so line the row up with the top of the list, where that is exact.
+                view.content-y = -root.at * PlanSizes.row;
+            } else {
+                view.content-y = view.visible-height - (root.at + 1) * PlanSizes.row;
+            }
+        }
+    }
+
+    function move-to(index: int) {
+        if (root.rows.length > 0) {
+            root.key-row = Math.max(0, Math.min(root.rows.length - 1, index));
+            root.reveal();
+        }
+    }
+
+    // Tab came to the list: the keyboard stays on its row if that is in view, else it takes the
+    // first row in view (the list may have been scrolled with the mouse).
+    function take-row-in-view() {
+        if (view.visible-height <= 0px) {
+            return;
+        }
+        let first = Math.ceil(-view.content-y / PlanSizes.row);
+        let last = Math.floor((-view.content-y + view.visible-height) / PlanSizes.row) - 1;
+        if (last >= first && (root.at < first || root.at > last)) {
+            root.key-row = Math.max(0, Math.min(root.rows.length - 1, first));
+        }
+    }
+
+    // Zero width so that clicks do not focus it: a click on a row only toggles it.
+    keys := FocusScope {
+        x: 0;
+        width: 0;
+        focus-gained(reason) => { root.take-row-in-view(); }
+        key-pressed(event) => {
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                return reject;
+            }
+            if (event.text == Key.UpArrow) {
+                root.move-to(root.at - 1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.move-to(root.at + 1);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.move-to(0);
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.move-to(root.rows.length - 1);
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                root.move-to(root.at - root.page);
+                return accept;
+            }
+            if (event.text == Key.PageDown) {
+                root.move-to(root.at + root.page);
+                return accept;
+            }
+            if (event.text == Key.Space) {
+                if (!event.repeat) {
+                    root.reveal();
+                    root.toggle(root.at);
+                }
+                return accept;
+            }
+            if (event.text == Key.RightArrow && root.rows[root.at].folder && !root.rows[root.at].expanded) {
+                root.expand(root.at);
+                return accept;
+            }
+            if (event.text == Key.LeftArrow && root.rows[root.at].folder && root.rows[root.at].expanded) {
+                root.expand(root.at);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    // The list view insets its content by 2 px on every side; it reaches out by that much so
+    // that the rows run edge to edge. Not an element of its own for assistive technology: this
+    // list is, so that the focus can be handed to a row.
+    view := ListView {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        accessible-role: none;
+
+        for row[i] in root.rows: PlanItem {
+            entry: row;
+            index: i;
+            count: root.rows.length;
+            focused: keys.has-focus && i == root.at;
+            toggled => {
+                root.key-row = i;
+                root.toggle(i);
+            }
+            expand => {
+                root.key-row = i;
+                root.expand(i);
+            }
+        }
+    }
 }
 
 export component PublishSheet inherits Rectangle {
@@ -266,7 +448,7 @@ export component PublishSheet inherits Rectangle {
 
     // As many rows as fit under the toolbar with the rest of the sheet (about 460 px, and its dozen
     // lines of text grow with the text size), and at least four.
-    property <length> list-height: min(max(root.rows.length, 4) * (30px + Theme.grow), max(4 * (30px + Theme.grow), root.height - Theme.toolbar-height - 460px - 12 * Theme.grow));
+    property <length> list-height: min(max(root.rows.length, 4) * PlanSizes.row, max(4 * PlanSizes.row, root.height - Theme.toolbar-height - 460px - 12 * Theme.grow));
     property <bool> busy: root.data.busy;
     property <bool> has-plan: !root.data.busy && root.data.error == "";
 
@@ -500,21 +682,12 @@ export component PublishSheet inherits Rectangle {
                         vertical-alignment: center;
                         wrap: word-wrap;
                     }
-                    // The list view insets its content by 2 px on every side; it reaches out by that
-                    // much so that the rows run edge to edge.
-                    if root.has-plan && root.rows.length > 0: ListView {
-                        x: -2px;
-                        y: -2px;
-                        width: parent.width + 4px;
-                        height: parent.height + 4px;
-                        accessible-label: @tr("Files to publish");
-                        accessible-item-count: root.rows.length;
-
-                        for row[i] in root.rows: PlanItem {
-                            entry: row;
-                            toggled => { root.toggle(i); }
-                            expand => { root.plan-expand(i); }
-                        }
+                    if root.has-plan && root.rows.length > 0: PlanList {
+                        width: parent.width;
+                        height: parent.height;
+                        rows: root.rows;
+                        toggle(i) => { root.toggle(i); }
+                        expand(i) => { root.plan-expand(i); }
                     }
                 }
 
@@ -540,17 +713,12 @@ export component PublishSheet inherits Rectangle {
                         }
                     }
                     VCenter {
+                        // Turned off (an S3 site), it is dimmed and skipped by Tab.
                         purge-control := Segmented {
                             options: [@tr("Off"), @tr("Changed files"), @tr("Whole zone")];
                             label: @tr("Purge CDN after publishing");
-                            opacity: root.data.purge-enabled ? 1 : 0.45;
-                            selected(index) => {
-                                if (root.data.purge-enabled) {
-                                    root.purge(index);
-                                } else {
-                                    self.current = root.data.purge;
-                                }
-                            }
+                            enabled: root.data.purge-enabled;
+                            selected(index) => { root.purge(index); }
                         }
                     }
                 }

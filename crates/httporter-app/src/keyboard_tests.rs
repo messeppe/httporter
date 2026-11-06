@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Keyboard operation of the sidebar, the shared buttons and the window's shortcuts (Back and
-//! Forward, Alt+arrows, F5), driven headlessly with the testing backend. The panes' own keys are
-//! in `pane_tests.rs`; the `@tr()` and copy scans are in `lint_tests.rs`.
+//! Forward, Alt+arrows, F5), the Publish sheet's plan list and Purge, and Quick Look's Source /
+//! Changes switch, driven headlessly with the testing backend. The panes' own keys are in
+//! `pane_tests.rs`; the `@tr()` and copy scans are in `lint_tests.rs`.
 
 use crate::pane_tests::{LOCAL_LIST, REMOTE_LIST, crumb_names, row_starting, window_with_panes};
-use crate::{AppWindow, ProviderTile, SiteItem};
+use crate::{
+    AppWindow, FileKind, PlanGroup, PlanRow, ProviderTile, PublishSheetData, QuickLookData,
+    SiteItem,
+};
 use i_slint_backend_testing as testing;
 use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, LogicalPosition, Model, ModelRc, SharedString, VecModel};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -817,4 +821,332 @@ fn polish_4_alt_space_and_alt_return_do_not_press_crumbs_headers_rows_or_add_sit
         pressed.borrow().last().map(String::as_str),
         Some("add site")
     );
+}
+
+// ---- The Publish sheet's plan list and Purge, and Quick Look's Source / Changes switch ----
+
+/// Starts the testing backend once on this thread.
+fn init_once() {
+    thread_local! {
+        static STARTED: Cell<bool> = const { Cell::new(false) };
+    }
+    if !STARTED.with(|started| started.replace(true)) {
+        testing::init_no_event_loop();
+    }
+}
+
+type Said = Rc<std::cell::RefCell<Vec<String>>>;
+
+fn plan_row(path: &str, label: &str, checked: bool, header: bool) -> PlanRow {
+    PlanRow {
+        path: path.into(),
+        kind: if header {
+            FileKind::Folder
+        } else {
+            FileKind::Code
+        },
+        group: if label == "New" || path == "New" {
+            PlanGroup::New
+        } else {
+            PlanGroup::Changed
+        },
+        label: label.into(),
+        size: if header { "24 KB" } else { "12 KB" }.into(),
+        checked,
+        header,
+        depth: 0,
+        folder: false,
+        expanded: false,
+    }
+}
+
+/// The Publish sheet open on a plan of two groups (five rows), with nothing only on the site (so
+/// Remove extras is off) and the purge on or off; what the sheet asks for is logged.
+fn publish_window(purge_enabled: bool) -> (AppWindow, Said) {
+    init_once();
+    let w = AppWindow::new().unwrap();
+    w.set_publish_sheet(PublishSheetData {
+        title: "Publish to example-shop.com".into(),
+        changed: 2,
+        new: 1,
+        purge_enabled,
+        button_label: "Publish 3 Files".into(),
+        can_publish: true,
+        ..Default::default()
+    });
+    w.set_plan_rows(ModelRc::new(VecModel::from(vec![
+        plan_row("Changed", "2 files", true, true),
+        plan_row("index.html", "Changed", true, false),
+        plan_row("about.html", "Changed", false, false),
+        plan_row("New", "1 file", true, true),
+        plan_row("site.css", "New", true, false),
+    ])));
+    let said: Said = Rc::default();
+    w.on_plan_toggle({
+        let said = said.clone();
+        move |row| said.borrow_mut().push(format!("toggle {row}"))
+    });
+    w.on_plan_expand({
+        let said = said.clone();
+        move |row| said.borrow_mut().push(format!("expand {row}"))
+    });
+    w.on_publish_purge({
+        let said = said.clone();
+        move |mode| said.borrow_mut().push(format!("purge {mode}"))
+    });
+    w.on_publish_confirm({
+        let said = said.clone();
+        move || said.borrow_mut().push("confirm".to_owned())
+    });
+    w.set_publish_open(true);
+    w.show().unwrap();
+    slint::platform::update_timers_and_animations();
+    (w, said)
+}
+
+fn keys(w: &AppWindow, keys: &[Key]) {
+    for &key in keys {
+        tap(w.window(), key);
+    }
+}
+
+fn said(log: &Said) -> Vec<String> {
+    std::mem::take(&mut *log.borrow_mut())
+}
+
+fn element(w: &AppWindow, role: AccessibleRole, label: &str) -> ElementHandle {
+    ElementHandle::find_by_accessible_label(w, label)
+        .find(|e| e.accessible_role() == Some(role))
+        .unwrap_or_else(|| panic!("no {role:?} {label:?}"))
+}
+
+/// Accessibility sweep: the plan list is one Tab stop (Shift+Tab from Cancel, the default focus,
+/// past Export Plan…; Remove extras and Purge are off). Up, Down, Home, End, PageUp and PageDown
+/// move the keyboard's row, Space ticks it through `plan-toggle` as a click does (a header's for
+/// its group), and Return is still the sheet's Publish.
+#[test]
+fn the_plan_list_is_one_tab_stop_moved_by_keys_and_ticked_with_space() {
+    let (w, log) = publish_window(false);
+    keys(&w, &[Key::Backtab, Key::Backtab, Key::Space]);
+    assert_eq!(said(&log), ["toggle 0"], "the list starts on its first row");
+
+    keys(&w, &[Key::DownArrow, Key::DownArrow, Key::Space]);
+    keys(&w, &[Key::UpArrow, Key::Space]);
+    keys(&w, &[Key::End, Key::Space, Key::DownArrow, Key::Space]);
+    keys(&w, &[Key::Home, Key::Space, Key::UpArrow, Key::Space]);
+    assert_eq!(
+        said(&log),
+        [
+            "toggle 2", "toggle 1", "toggle 4", "toggle 4", "toggle 0", "toggle 0"
+        ]
+    );
+
+    // A page is the rows in view less one: three or four of the four or five shown.
+    keys(&w, &[Key::PageDown, Key::Space]);
+    let down = said(&log);
+    assert!(
+        down == ["toggle 3"] || down == ["toggle 4"],
+        "PageDown went to {down:?}"
+    );
+    keys(&w, &[Key::PageUp, Key::Space]);
+    assert_eq!(said(&log), ["toggle 0"]);
+
+    // A held Space ticks once; Left and Right do nothing on a file (only a tree folder opens).
+    w.window().dispatch_event(WindowEvent::KeyPressRepeated {
+        text: Key::Space.into(),
+    });
+    keys(&w, &[Key::RightArrow, Key::LeftArrow]);
+    assert!(said(&log).is_empty());
+
+    tap(w.window(), Key::Return);
+    assert_eq!(said(&log), ["confirm"]);
+}
+
+/// In a long plan the keyboard's row is scrolled into view: End shows the last row, Home the
+/// first, and PageDown goes on by about a view at a time.
+#[test]
+fn the_plan_list_scrolls_the_keyboards_row_into_view() {
+    let (w, log) = publish_window(false);
+    let mut rows = vec![plan_row("Changed", "60 files", true, true)];
+    rows.extend((1..=60).map(|i| plan_row(&format!("page-{i}.html"), "Changed", true, false)));
+    w.set_plan_rows(ModelRc::new(VecModel::from(rows)));
+    slint::platform::update_timers_and_animations();
+    let list = element(&w, AccessibleRole::List, "Files to publish");
+    let in_view = |label: &str| {
+        let Some(row) = ElementHandle::find_by_accessible_label(&w, label)
+            .find(|e| e.accessible_role() == Some(AccessibleRole::Checkbox))
+        else {
+            return false;
+        };
+        let (top, bottom) = (
+            list.absolute_position().y,
+            list.absolute_position().y + list.size().height,
+        );
+        let y = row.absolute_position().y;
+        y >= top - 0.5 && y + row.size().height <= bottom + 0.5
+    };
+    assert!(!in_view("page-60.html, Changed"));
+
+    keys(&w, &[Key::Backtab, Key::Backtab, Key::End, Key::Space]);
+    assert_eq!(said(&log), ["toggle 60"]);
+    assert!(in_view("page-60.html, Changed"), "End shows the last row");
+    assert!(!in_view("page-1.html, Changed"));
+
+    keys(&w, &[Key::Home, Key::PageDown, Key::PageDown, Key::Space]);
+    let toggled = said(&log);
+    let row: usize = toggled[0].trim_start_matches("toggle ").parse().unwrap();
+    assert!(row >= 6, "two pages down from the top went to row {row}");
+    assert!(in_view(&format!("page-{row}.html, Changed")));
+    assert!(!in_view("page-1.html, Changed"));
+
+    keys(&w, &[Key::Home]);
+    assert!(in_view("Changed, 60 files"), "Home shows the first row");
+}
+
+/// Narrator reads a plan row as its path and what happens to it, then its state ("index.html,
+/// Changed, checked"), and a header as its group and count. The list says how many rows it has.
+#[test]
+fn plan_rows_tell_assistive_technology_what_they_are() {
+    let (w, _log) = publish_window(false);
+    let row = element(&w, AccessibleRole::Checkbox, "index.html, Changed");
+    assert_eq!(row.accessible_checkable(), Some(true));
+    assert_eq!(row.accessible_checked(), Some(true));
+    assert_eq!(row.accessible_item_index(), Some(1));
+    assert_eq!(row.accessible_item_count(), Some(5));
+    assert_eq!(description(&row), "12 KB");
+    let unticked = element(&w, AccessibleRole::Checkbox, "about.html, Changed");
+    assert_eq!(unticked.accessible_checked(), Some(false));
+    let header = element(&w, AccessibleRole::Checkbox, "Changed, 2 files");
+    assert_eq!(header.accessible_checked(), Some(true));
+    let list = element(&w, AccessibleRole::List, "Files to publish");
+    assert_eq!(list.accessible_item_count(), Some(5));
+}
+
+/// A tree folder opens with Right and closes with Left, through `plan-expand` as its triangle.
+#[test]
+fn a_tree_folder_opens_with_right_and_closes_with_left() {
+    let (w, log) = publish_window(false);
+    let folder = |expanded: bool| PlanRow {
+        kind: FileKind::Folder,
+        depth: 1,
+        folder: true,
+        expanded,
+        ..plan_row("images", "2 files", true, false)
+    };
+    let rows = w.get_plan_rows();
+    rows.set_row_data(1, folder(false));
+    keys(&w, &[Key::Backtab, Key::Backtab, Key::DownArrow]);
+    keys(&w, &[Key::LeftArrow, Key::RightArrow]);
+    assert_eq!(
+        said(&log),
+        ["expand 1"],
+        "Left does nothing on a closed folder"
+    );
+    rows.set_row_data(1, folder(true));
+    keys(&w, &[Key::RightArrow, Key::LeftArrow]);
+    assert_eq!(
+        said(&log),
+        ["expand 1"],
+        "Right does nothing on an open folder"
+    );
+}
+
+/// Accessibility sweep: the Purge control turned off (an S3 site) says it is off and takes no
+/// focus, as a turned-off button: Shift+Tab goes from Export Plan… straight to the list.
+#[test]
+fn the_purge_control_turned_off_takes_no_focus() {
+    let (w, log) = publish_window(false);
+    let purge = element(&w, AccessibleRole::RadioGroup, "Purge CDN after publishing");
+    assert_eq!(purge.accessible_enabled(), Some(false));
+    keys(
+        &w,
+        &[Key::Backtab, Key::Backtab, Key::RightArrow, Key::Space],
+    );
+    assert_eq!(said(&log), ["toggle 0"]);
+}
+
+/// Turned on, the Purge control is the Tab stop before Export Plan… and the arrows choose.
+#[test]
+fn the_purge_control_turned_on_is_reached_and_chosen_with_the_arrows() {
+    let (w, log) = publish_window(true);
+    let purge = element(&w, AccessibleRole::RadioGroup, "Purge CDN after publishing");
+    assert_eq!(purge.accessible_enabled(), Some(true));
+    keys(
+        &w,
+        &[Key::Backtab, Key::Backtab, Key::RightArrow, Key::RightArrow],
+    );
+    assert_eq!(said(&log), ["purge 1", "purge 2"]);
+}
+
+/// Quick Look open on a text file that can (or can't) be compared; what it asks for is logged.
+fn quick_look_window(can_diff: bool) -> (AppWindow, Said) {
+    init_once();
+    let w = AppWindow::new().unwrap();
+    w.set_ql(QuickLookData {
+        title: "index.html".into(),
+        kind: 0,
+        can_diff,
+        diff_label: "Changes vs Bunny".into(),
+        diff_note: "Nothing to compare it with.".into(),
+        ..Default::default()
+    });
+    let said: Said = Rc::default();
+    w.on_ql_set_mode({
+        let said = said.clone();
+        move |mode| said.borrow_mut().push(format!("mode {mode}"))
+    });
+    w.on_ql_step({
+        let said = said.clone();
+        move |by| said.borrow_mut().push(format!("step {by}"))
+    });
+    w.on_ql_open_with({
+        let said = said.clone();
+        move || said.borrow_mut().push("open with".to_owned())
+    });
+    w.on_ql_close({
+        let said = said.clone();
+        move || said.borrow_mut().push("close".to_owned())
+    });
+    w.set_ql_open(true);
+    w.show().unwrap();
+    slint::platform::update_timers_and_animations();
+    (w, said)
+}
+
+/// Accessibility sweep: Quick Look's Source / Changes switch is the Tab stop after the close
+/// button. Space or Return flips the view; ← and → stay Quick Look's previous and next file there
+/// too, and Esc still closes.
+#[test]
+fn the_quick_look_switch_flips_with_space_and_keeps_the_arrows_for_files() {
+    let (w, log) = quick_look_window(true);
+    // The panel has the keys at first: → is the next file.
+    tap(w.window(), Key::RightArrow);
+    assert_eq!(said(&log), ["step 1"]);
+
+    keys(&w, &[Key::Tab, Key::Tab, Key::Space]);
+    assert_eq!(said(&log), ["mode 1"]);
+    assert_eq!(w.get_ql_mode(), 1);
+    let switch = element(&w, AccessibleRole::Switch, "Changes vs Bunny");
+    assert_eq!(switch.accessible_checked(), Some(true));
+
+    // The switch keeps the focus: the arrows step through the files, Return flips back.
+    keys(&w, &[Key::LeftArrow, Key::RightArrow, Key::Return]);
+    assert_eq!(said(&log), ["step -1", "step 1", "mode 0"]);
+    assert_eq!(switch.accessible_checked(), Some(false));
+
+    tap(w.window(), Key::Escape);
+    assert_eq!(said(&log), ["close"]);
+}
+
+/// With nothing to compare the switch can't switch: it takes no focus (Tab goes from the close
+/// button to Open With…, Open in Browser being off) and says why.
+#[test]
+fn the_quick_look_switch_takes_no_focus_with_nothing_to_compare() {
+    let (w, log) = quick_look_window(false);
+    let switch = element(&w, AccessibleRole::Switch, "Changes vs Bunny");
+    assert_eq!(switch.accessible_enabled(), Some(false));
+    assert_eq!(description(&switch), "Nothing to compare it with.");
+    keys(&w, &[Key::Tab, Key::Tab, Key::Return]);
+    assert_eq!(said(&log), ["open with"]);
+    assert_eq!(w.get_ql_mode(), 0);
 }

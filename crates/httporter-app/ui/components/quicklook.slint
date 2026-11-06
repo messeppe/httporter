@@ -5,13 +5,14 @@
 // against the copy on the other side, its image, or its kind with a button to open it; and the
 // sheet for a file edited here that changed on the site meanwhile.
 //
-// Space and Esc close Quick Look; ← and → step to the previous and next file.
+// Space and Esc close Quick Look; ← and → step to the previous and next file. Tab reaches the
+// header's controls; on the Source / Changes switch Space or Return flips the view (ModeSwitch).
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { CodeLine, EditConflictData, QuickLookData } from "../types.slint";
-import { CapsuleButton, ToolButton } from "buttons.slint";
+import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { AlertCard, Modal } from "sheets.slint";
 import { VCenter } from "layout.slint";
 
@@ -30,16 +31,26 @@ global CodeColors {
 }
 
 // Source | Changes vs Bunny (mockup `.seg`). The second is off when there is nothing to compare;
-// `hovering-off` says the pointer is on it then, so the footer can say why. Pointer only: ← and →
-// step through the files.
+// `showing-why` says the pointer or the keyboard is on the switch then, so the footer can say why.
+//
+// Keys: one Tab stop (after the close button; none while there is nothing to compare). Space or
+// Return flips the view, Source to Changes and back; nothing else is the switch's. ← and → stay
+// Quick Look's previous and next file even while the switch has the focus (they are handed on
+// through `step`), and Esc still closes, so no key means two things in Quick Look; Space, as on
+// the header's buttons, presses the control that has the focus. A click chooses without taking
+// the focus, which goes back to the panel's keys. For assistive technology it is one switch,
+// "Changes vs Bunny", on while the changes are shown.
 component ModeSwitch inherits Rectangle {
     in property <string> second;
     in property <bool> second-enabled;
     // Why the second is off.
     in property <string> note;
     in-out property <int> current: 0;
-    out property <bool> hovering-off: off-area.has-hover && !root.second-enabled;
+    out property <bool> has-focus: key-focus.has-focus;
+    out property <bool> showing-why: (off-area.has-hover || key-focus.has-focus) && !root.second-enabled;
     callback selected(int);
+    // ← (-1) or → (1) pressed on the switch: Quick Look's step to another file.
+    callback step(int);
 
     function choose(index: int) {
         if (index != root.current && (index == 0 || root.second-enabled)) {
@@ -51,8 +62,14 @@ component ModeSwitch inherits Rectangle {
     height: Theme.control-height;
     background: Theme.chip;
     border-radius: 8px;
-    accessible-role: radio-group;
-    accessible-label: @tr("Compare view");
+    forward-focus: key-focus;
+    accessible-role: switch;
+    accessible-label: root.second;
+    accessible-description: root.second-enabled ? "" : root.note;
+    accessible-enabled: root.second-enabled;
+    accessible-checkable: true;
+    accessible-checked: root.current == 1;
+    accessible-action-default => { root.choose(1 - root.current); }
 
     HorizontalLayout {
         padding: 2px;
@@ -63,11 +80,6 @@ component ModeSwitch inherits Rectangle {
             background: root.current == 0 ? Theme.control : transparent;
             border-width: root.current == 0 ? 0.5px : 0px;
             border-color: Theme.control-border;
-            accessible-role: radio-button;
-            accessible-checkable: true;
-            accessible-checked: root.current == 0;
-            accessible-label: @tr("Source");
-            accessible-action-default => { root.choose(0); }
 
             HorizontalLayout {
                 padding-left: 12px;
@@ -94,13 +106,6 @@ component ModeSwitch inherits Rectangle {
             border-width: root.current == 1 ? 0.5px : 0px;
             border-color: Theme.control-border;
             opacity: root.second-enabled ? 1 : 0.45;
-            accessible-role: radio-button;
-            accessible-checkable: true;
-            accessible-checked: root.current == 1;
-            accessible-enabled: root.second-enabled;
-            accessible-label: root.second;
-            accessible-description: root.second-enabled ? "" : root.note;
-            accessible-action-default => { root.choose(1); }
 
             HorizontalLayout {
                 padding-left: 12px;
@@ -119,6 +124,44 @@ component ModeSwitch inherits Rectangle {
             off-area := TouchArea {
                 clicked => { root.choose(1); }
             }
+        }
+    }
+
+    // Keyboard focus ring, 3 px outside like the buttons' ring; not once the switch can't switch
+    // (ledger 153: the next file may have nothing to compare while the switch is focused).
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: parent.border-radius + 3px;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        visible: root.has-focus && root.second-enabled;
+    }
+
+    // Zero width so that clicks do not focus it. With nothing to compare there is nothing to
+    // switch to, so it takes no focus then, as a turned-off button.
+    key-focus := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.second-enabled;
+        key-pressed(event) => {
+            if (Activation.triggers(event)) {
+                root.choose(1 - root.current);
+                return accept;
+            }
+            if (!event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta) {
+                if (event.text == Key.LeftArrow) {
+                    root.step(-1);
+                    return accept;
+                }
+                if (event.text == Key.RightArrow) {
+                    root.step(1);
+                    return accept;
+                }
+            }
+            return reject;
         }
     }
 }
@@ -233,10 +276,15 @@ export component QuickLook inherits Rectangle {
                             second-enabled: root.data.can-diff;
                             note: root.data.diff-note;
                             current <=> root.mode;
+                            // From the keyboard the focus stays on the switch; after a click the
+                            // arrow keys go back to the panel.
                             selected(mode) => {
                                 root.set-mode(mode);
-                                keys.focus();
+                                if (!self.has-focus) {
+                                    keys.focus();
+                                }
                             }
+                            step(by) => { root.step(by); }
                         }
                     }
                     VCenter {
@@ -384,7 +432,7 @@ export component QuickLook inherits Rectangle {
 
                         Text {
                             horizontal-stretch: 1;
-                            text: switch.hovering-off ? root.data.diff-note : root.data.footer-left;
+                            text: switch.showing-why ? root.data.diff-note : root.data.footer-left;
                             color: Theme.label2;
                             font-size: Theme.font-small;
                             vertical-alignment: center;
