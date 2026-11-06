@@ -289,7 +289,7 @@ impl S3Storage {
         self.skipped.load(Ordering::Relaxed)
     }
 
-    fn bucket(&self) -> Result<&str, ProviderError> {
+    pub(crate) fn bucket(&self) -> Result<&str, ProviderError> {
         if self.bucket.is_empty() {
             Err(ProviderError::Permanent(
                 "No bucket is set for this site.".into(),

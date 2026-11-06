@@ -9,7 +9,9 @@ pub mod regions;
 mod transfer;
 
 pub use account::{
-    BunnyAccount, NewZone, PullZoneInfo, UnusableZone, ZoneInfo, ZoneList, ZoneSettings,
+    BunnyAccount, NewZone, PULL_ZONE_NAME_MAX, PULL_ZONE_NAME_TAKEN, PullZoneInfo, UnusableZone,
+    ZONE_NAME_MAX, ZONE_NAME_MIN, ZONE_NAME_TAKEN, ZoneInfo, ZoneList, ZoneNameProblem, ZoneRef,
+    ZoneSettings, pull_zone_name_problem, zone_name_problem,
 };
 pub use cdn::BunnyCdn;
 pub use client::{BunnyConfig, BunnyStorage};

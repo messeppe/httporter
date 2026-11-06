@@ -326,6 +326,8 @@ fn show_site(window: &SettingsWindow, m: &Arc<Manager>, row: Option<usize>) {
     let site = row
         .and_then(|row| lock(&m.settings).rows.get(row).cloned())
         .and_then(|id| m.session.site(&id));
+    // I6 (T5): its Zone or Bucket section.
+    super::zones::show_site(window, m, site.as_ref());
     let Some(site) = site else {
         window.set_site_form(SiteSettingsData::default());
         return;

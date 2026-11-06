@@ -297,6 +297,11 @@ export struct NewZoneDraft {
 // Settings › Sites › Zone (T5): a Bunny site with a kept account key. `shown` false hides the
 // section; `regions` are the replication regions it has now, by city (they can only be added:
 // Add Regions… offers the others). `id` is the site's, so that a newer site's data is told apart.
+// T5 as built: `loaded` once the zone's settings are read (Save needs them); `note` says what is
+// going on (reading them, or why the section can't be used); `path-error` goes under the 404
+// page field. Add Regions… sets `adding` (the app does), which lists `region-names` (every Bunny
+// region, by city): those in `region-on` (the main region and the ones replicated to) are ticked
+// and can't be changed, the others tick `region-add` (one entry per name; the app sizes it).
 export struct ZoneSettingsData {
     id: string,
     shown: bool,
@@ -305,11 +310,21 @@ export struct ZoneSettingsData {
     regions: string,
     busy: bool,
     error: string,
+    loaded: bool,
+    note: string,
+    path-error: string,
+    region-names: [string],
+    region-on: [bool],
+    region-add: [bool],
+    adding: bool,
 }
 
 // Settings › Sites › Bucket (T5): an S3 site. Each part shows only where the service offers it;
 // `note` says when it doesn't ("{Service} doesn't offer this through its S3 API."). The CORS rule
 // is a simple editor: origins and methods, comma-separated.
+// T5 as built: `note` is the Save row's line (reading the settings, or why they can't be read);
+// `cors-note` / `website-note` stand in for a part the service doesn't offer ("{Service} doesn't
+// offer this through its S3 API."); the `*-error`s go under their fields; `loaded` once read.
 export struct BucketSettingsData {
     id: string,
     shown: bool,
@@ -322,6 +337,13 @@ export struct BucketSettingsData {
     note: string,
     busy: bool,
     error: string,
+    loaded: bool,
+    cors-note: string,
+    website-note: string,
+    origins-error: string,
+    methods-error: string,
+    index-error: string,
+    error-doc-error: string,
 }
 
 // ---- Manage+ (I4) ----

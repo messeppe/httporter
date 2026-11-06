@@ -95,15 +95,37 @@ pub trait PresetFeatures {
     fn supports_website(&self) -> bool;
 }
 
+/// What each service says it offers through its S3 API (B8, checked 2026-11-06):
+///
+/// | service | CORS | static website | source |
+/// | --- | --- | --- | --- |
+/// | Amazon S3 | yes | yes | <https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketCors.html>, <https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketWebsite.html> |
+/// | Cloudflare R2 | yes | no (`Get/PutBucketWebsite` not implemented) | <https://developers.cloudflare.com/r2/api/s3/api/> |
+/// | Backblaze B2 | yes | no ("Website Configuration" unsupported) | <https://www.backblaze.com/docs/cloud-storage-s3-compatible-api>, <https://www.backblaze.com/docs/cloud-storage-enable-cors-with-the-s3-compatible-api> |
+/// | Wasabi | yes ("Bucket-level CORS via the S3 API is fully supported") | no (no static website hosting) | <https://docs.wasabi.com/apidocs/bucket-cors-support-with-the-wasabi-s3-api>, <https://docs.wasabi.com/docs/how-do-i-use-cors-and-custom-domains-with-wasabi> |
+/// | DigitalOcean Spaces | yes | yes (`Put/Get/DeleteBucketWebsite`) | <https://docs.digitalocean.com/reference/api/spaces/> |
+/// | MinIO | no (`PutBucketCors` unsupported) | no (`PutBucketWebsite` unsupported) | <https://docs.min.io/community/minio-object-store/reference/s3-api-compatibility.html> |
+/// | Other S3 | tried | tried | unknown: a service without it answers `NotImplemented`, shown as such |
 impl PresetFeatures for S3Preset {
-    /// None until T5 confirms each service from its documentation.
     fn supports_cors(&self) -> bool {
-        false
+        match self {
+            S3Preset::AwsS3
+            | S3Preset::CloudflareR2
+            | S3Preset::BackblazeB2
+            | S3Preset::Wasabi
+            | S3Preset::DigitalOceanSpaces
+            | S3Preset::Other => true,
+            S3Preset::Minio => false,
+        }
     }
 
-    /// None until T5 confirms each service from its documentation.
     fn supports_website(&self) -> bool {
-        false
+        match self {
+            S3Preset::AwsS3 | S3Preset::DigitalOceanSpaces | S3Preset::Other => true,
+            S3Preset::CloudflareR2 | S3Preset::BackblazeB2 | S3Preset::Wasabi | S3Preset::Minio => {
+                false
+            }
+        }
     }
 }
 

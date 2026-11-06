@@ -11,6 +11,7 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use serde::Deserialize;
 
+use crate::buckets::{CorsRule, Website};
 use crate::errors;
 
 /// The most keys one `DeleteObjects` request can name.
@@ -291,6 +292,8 @@ fn expect_root(body: &[u8], root: &str, status: u16) -> Result<String, ProviderE
                 "ListBucketResult" => "listing",
                 "ListAllMyBucketsResult" => "list of buckets",
                 "InitiateMultipartUploadResult" => "multipart upload",
+                "CORSConfiguration" => "CORS configuration",
+                "WebsiteConfiguration" => "website configuration",
                 _ => "result",
             }
         ))),
@@ -347,6 +350,180 @@ pub(crate) fn is_xml_safe(key: &str) -> bool {
     key.chars().all(|c| {
         !(c < ' ' && !matches!(c, '\t' | '\n' | '\r')) && c != '\u{FFFE}' && c != '\u{FFFF}'
     })
+}
+
+// ---- Bucket settings (I6, §8.8.4–8.8.5) ----
+//
+// The documents of `CreateBucket`, `Get/PutBucketCors` and `Get/PutBucketWebsite`, as the S3 API
+// reference gives them:
+// - https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html
+// - https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketCors.html
+// - https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketCors.html
+// - https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketWebsite.html
+// - https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetBucketWebsite.html
+
+/// The namespace S3 writes its documents in, and expects in a request.
+const S3_NS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
+
+/// The body of a `CreateBucket` request that names the region the bucket goes in.
+pub(crate) fn create_bucket_request(region: &str) -> String {
+    let mut xml = String::with_capacity(160);
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CreateBucketConfiguration xmlns=\"");
+    xml.push_str(S3_NS);
+    xml.push_str("\"><LocationConstraint>");
+    escape_into(&mut xml, region);
+    xml.push_str("</LocationConstraint></CreateBucketConfiguration>");
+    xml
+}
+
+#[derive(Deserialize)]
+struct CorsXml {
+    #[serde(rename = "CORSRule", default)]
+    rules: Vec<CorsRuleXml>,
+}
+
+#[derive(Deserialize)]
+struct CorsRuleXml {
+    #[serde(rename = "ID", default)]
+    id: Option<String>,
+    #[serde(rename = "AllowedOrigin", default)]
+    origins: Vec<String>,
+    #[serde(rename = "AllowedMethod", default)]
+    methods: Vec<String>,
+    #[serde(rename = "AllowedHeader", default)]
+    headers: Vec<String>,
+    #[serde(rename = "ExposeHeader", default)]
+    expose_headers: Vec<String>,
+    #[serde(rename = "MaxAgeSeconds", default)]
+    max_age: Option<String>,
+}
+
+/// The rules of a `CORSConfiguration` (`GetBucketCors`), in the order given. Values are trimmed;
+/// a `MaxAgeSeconds` that is not a number is left out rather than failing the whole answer.
+pub(crate) fn parse_cors(body: &[u8], status: u16) -> Result<Vec<CorsRule>, ProviderError> {
+    let text = expect_root(body, "CORSConfiguration", status)?;
+    let doc: CorsXml =
+        quick_xml::de::from_str(&text).map_err(|e| unrecognised("CORS configuration", &e))?;
+    let trimmed = |values: Vec<String>| -> Vec<String> {
+        values
+            .into_iter()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .collect()
+    };
+    Ok(doc
+        .rules
+        .into_iter()
+        .map(|rule| CorsRule {
+            origins: trimmed(rule.origins),
+            methods: trimmed(rule.methods),
+            headers: trimmed(rule.headers),
+            max_age: rule.max_age.and_then(|age| age.trim().parse().ok()),
+            expose_headers: trimmed(rule.expose_headers),
+            id: rule
+                .id
+                .map(|id| id.trim().to_owned())
+                .filter(|id| !id.is_empty()),
+        })
+        .collect())
+}
+
+/// The body of a `PutBucketCors` request for `rules` (at least one). Every value is escaped.
+pub(crate) fn cors_request(rules: &[CorsRule]) -> String {
+    let mut xml = String::with_capacity(160 + rules.len() * 200);
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CORSConfiguration xmlns=\"");
+    xml.push_str(S3_NS);
+    xml.push_str("\">");
+    let element = |xml: &mut String, name: &str, value: &str| {
+        xml.push('<');
+        xml.push_str(name);
+        xml.push('>');
+        escape_into(xml, value);
+        xml.push_str("</");
+        xml.push_str(name);
+        xml.push('>');
+    };
+    for rule in rules {
+        xml.push_str("<CORSRule>");
+        if let Some(id) = &rule.id {
+            element(&mut xml, "ID", id);
+        }
+        for origin in &rule.origins {
+            element(&mut xml, "AllowedOrigin", origin);
+        }
+        for method in &rule.methods {
+            element(&mut xml, "AllowedMethod", method);
+        }
+        for header in &rule.headers {
+            element(&mut xml, "AllowedHeader", header);
+        }
+        for header in &rule.expose_headers {
+            element(&mut xml, "ExposeHeader", header);
+        }
+        if let Some(age) = rule.max_age {
+            element(&mut xml, "MaxAgeSeconds", &age.to_string());
+        }
+        xml.push_str("</CORSRule>");
+    }
+    xml.push_str("</CORSConfiguration>");
+    xml
+}
+
+#[derive(Deserialize)]
+struct WebsiteXml {
+    #[serde(rename = "IndexDocument", default)]
+    index: Option<SuffixXml>,
+    #[serde(rename = "ErrorDocument", default)]
+    error: Option<KeyXml>,
+}
+
+#[derive(Deserialize)]
+struct SuffixXml {
+    #[serde(rename = "Suffix", default)]
+    suffix: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct KeyXml {
+    #[serde(rename = "Key", default)]
+    key: Option<String>,
+}
+
+/// The index and error documents of a `WebsiteConfiguration` (`GetBucketWebsite`). A bucket that
+/// only redirects (`RedirectAllRequestsTo`) has no index document: `index` is then empty.
+pub(crate) fn parse_website(body: &[u8], status: u16) -> Result<Website, ProviderError> {
+    let text = expect_root(body, "WebsiteConfiguration", status)?;
+    let doc: WebsiteXml =
+        quick_xml::de::from_str(&text).map_err(|e| unrecognised("website configuration", &e))?;
+    Ok(Website {
+        index: doc
+            .index
+            .and_then(|index| index.suffix)
+            .map(|suffix| suffix.trim().to_owned())
+            .unwrap_or_default(),
+        error: doc
+            .error
+            .and_then(|error| error.key)
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty()),
+    })
+}
+
+/// The body of a `PutBucketWebsite` request: the index document and, if any, the error document.
+pub(crate) fn website_request(website: &Website) -> String {
+    let mut xml = String::with_capacity(220);
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?><WebsiteConfiguration xmlns=\"");
+    xml.push_str(S3_NS);
+    xml.push_str("\"><IndexDocument><Suffix>");
+    escape_into(&mut xml, &website.index);
+    xml.push_str("</Suffix></IndexDocument>");
+    if let Some(error) = &website.error {
+        xml.push_str("<ErrorDocument><Key>");
+        escape_into(&mut xml, error);
+        xml.push_str("</Key></ErrorDocument>");
+    }
+    xml.push_str("</WebsiteConfiguration>");
+    xml
 }
 
 /// Text for element content. Tab, line feed and carriage return are written as character
@@ -573,6 +750,85 @@ mod tests {
         let parsed: Req = quick_xml::de::from_str(&delete_request(&keys)).unwrap();
         let back: Vec<&str> = parsed.objects.iter().map(|o| o.key.as_str()).collect();
         assert_eq!(back, keys);
+    }
+
+    #[test]
+    fn cors_rules_round_trip_through_the_writer_and_the_reader() {
+        let rules = vec![
+            CorsRule {
+                origins: vec!["https://a.example".into(), "https://b&c.example".into()],
+                methods: vec!["GET".into(), "HEAD".into()],
+                headers: vec!["*".into()],
+                max_age: Some(3000),
+                expose_headers: vec!["ETag".into()],
+                id: Some("site".into()),
+            },
+            CorsRule {
+                origins: vec!["*".into()],
+                methods: vec!["PUT".into()],
+                ..CorsRule::default()
+            },
+        ];
+        let xml = cors_request(&rules);
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?><CORSConfiguration"));
+        assert!(xml.contains("<AllowedOrigin>https://b&amp;c.example</AllowedOrigin>"));
+        assert_eq!(xml.matches("<CORSRule>").count(), 2);
+        assert_eq!(parse_cors(xml.as_bytes(), 200).unwrap(), rules);
+    }
+
+    #[test]
+    fn a_cors_answer_is_read_leniently_and_strictly_by_kind() {
+        let body = format!(
+            "<CORSConfiguration xmlns=\"{NS}\"><CORSRule><AllowedMethod> GET </AllowedMethod>\
+             <AllowedOrigin>*</AllowedOrigin><MaxAgeSeconds>soon</MaxAgeSeconds>\
+             <AllowedMethod>HEAD</AllowedMethod></CORSRule></CORSConfiguration>"
+        );
+        let rules = parse_cors(body.as_bytes(), 200).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].methods, ["GET", "HEAD"]);
+        assert_eq!(rules[0].origins, ["*"]);
+        assert_eq!(rules[0].max_age, None);
+        assert!(parse_cors(b"<CORSConfiguration/>", 200).unwrap().is_empty());
+        assert!(parse_cors(b"<WebsiteConfiguration/>", 200).is_err());
+    }
+
+    #[test]
+    fn the_website_documents_round_trip() {
+        for website in [
+            Website {
+                index: "index.html".into(),
+                error: Some("errors/404.html".into()),
+            },
+            Website {
+                index: "a&b.html".into(),
+                error: None,
+            },
+        ] {
+            let xml = website_request(&website);
+            assert_eq!(parse_website(xml.as_bytes(), 200).unwrap(), website);
+        }
+        let redirect = b"<WebsiteConfiguration><RedirectAllRequestsTo><HostName>x.example\
+                         </HostName></RedirectAllRequestsTo></WebsiteConfiguration>";
+        assert_eq!(
+            parse_website(redirect, 200).unwrap(),
+            Website {
+                index: String::new(),
+                error: None
+            }
+        );
+        assert!(parse_website(b"<Error><Code>X</Code></Error>", 200).is_err());
+    }
+
+    #[test]
+    fn the_create_bucket_body_names_the_region() {
+        assert_eq!(
+            create_bucket_request("eu-west-1"),
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CreateBucketConfiguration \
+                 xmlns=\"{NS}\"><LocationConstraint>eu-west-1</LocationConstraint>\
+                 </CreateBucketConfiguration>"
+            )
+        );
     }
 
     #[test]

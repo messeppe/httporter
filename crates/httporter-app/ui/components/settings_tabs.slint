@@ -12,7 +12,7 @@ import { AboutSlint, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Activation, CapsuleButton } from "buttons.slint";
-import { ErrorLine, Field, RegionPicker } from "form_controls.slint";
+import { CheckLine, ErrorLine, Field, RegionPicker } from "form_controls.slint";
 import { Segmented } from "sheets.slint";
 import { VCenter } from "layout.slint";
 import { BucketSettingsData, SiteSettingsData, SiteSettingsRow, ZoneSettingsData } from "../types.slint";
@@ -557,6 +557,11 @@ export component SitesTab inherits Rectangle {
     property <string> website-index;
     property <string> website-error;
     property <BucketSettingsData> bucket-drawn;
+    // The regions ticked to add (the app's model in `zone.region-add`, which the ticks write to).
+    property <[bool]> zone-add;
+    // A read-only site's zone and bucket are shown but can't be changed here, as its files can't.
+    property <bool> zone-editable: root.zone.loaded && !root.zone.busy && !root.read-only-on;
+    property <bool> bucket-editable: root.bucket.loaded && !root.bucket.busy && !root.read-only-on;
     property <bool> has-site: root.current >= 0 && root.current < root.rows.length && root.form.id != "";
 
     function draw-form() {
@@ -594,6 +599,7 @@ export component SitesTab inherits Rectangle {
         if (root.zone.id != root.zone-drawn.id || root.zone.rewrite-404 != root.zone-drawn.rewrite-404) {
             root.zone-rewrite = root.zone.rewrite-404;
         }
+        root.zone-add = root.zone.region-add;
         root.zone-drawn = root.zone;
     }
 
@@ -614,7 +620,7 @@ export component SitesTab inherits Rectangle {
     }
 
     function save-zone() {
-        if (!root.zone.busy) {
+        if (root.zone-editable) {
             root.zone-save({
                 id: root.zone.id,
                 shown: root.zone.shown,
@@ -623,12 +629,19 @@ export component SitesTab inherits Rectangle {
                 regions: root.zone.regions,
                 busy: root.zone.busy,
                 error: "",
+                loaded: root.zone.loaded,
+                note: root.zone.note,
+                path-error: "",
+                region-names: root.zone.region-names,
+                region-on: root.zone.region-on,
+                region-add: root.zone-add,
+                adding: root.zone.adding,
             });
         }
     }
 
     function save-bucket() {
-        if (!root.bucket.busy) {
+        if (root.bucket-editable) {
             root.bucket-save({
                 id: root.bucket.id,
                 shown: root.bucket.shown,
@@ -641,6 +654,13 @@ export component SitesTab inherits Rectangle {
                 note: root.bucket.note,
                 busy: root.bucket.busy,
                 error: "",
+                loaded: root.bucket.loaded,
+                cors-note: root.bucket.cors-note,
+                website-note: root.bucket.website-note,
+                origins-error: "",
+                methods-error: "",
+                index-error: "",
+                error-doc-error: "",
             });
         }
     }
@@ -825,6 +845,7 @@ export component SitesTab inherits Rectangle {
                                 GroupRow {
                                     title: @tr("404 page");
                                     help: @tr("The file served for a path that doesn't exist, such as /404.html. Empty for Bunny's own page.");
+                                    error: root.zone.path-error;
 
                                     VCenter {
                                         Field {
@@ -832,7 +853,9 @@ export component SitesTab inherits Rectangle {
                                             text <=> root.zone-404;
                                             placeholder: @tr("/404.html");
                                             label: @tr("404 page path");
-                                            enabled: !root.zone.busy;
+                                            error: root.zone.path-error;
+                                            enabled: root.zone-editable;
+                                            edited => { root.zone.path-error = ""; }
                                             accepted => { root.save-zone(); }
                                         }
                                     }
@@ -844,28 +867,86 @@ export component SitesTab inherits Rectangle {
                                     Switch {
                                         label: @tr("Return status 200 for the 404 page");
                                         checked <=> root.zone-rewrite;
-                                        enabled: !root.zone.busy;
+                                        enabled: root.zone-editable;
                                     }
                                 }
                                 GroupRow {
                                     title: @tr("Replication regions");
                                     help: root.zone.regions != "" ? @tr("{}. Regions can be added but never removed.", root.zone.regions) : @tr("None. Regions can be added but never removed.");
 
-                                    CapsuleButton {
+                                    if !root.zone.adding: CapsuleButton {
                                         text: @tr("Add Regions…");
-                                        enabled: !root.zone.busy;
+                                        enabled: root.zone-editable;
                                         clicked => { root.zone-add-regions(); }
+                                    }
+                                }
+                                // Add Regions…: every region, the ones the zone has ticked and
+                                // fixed, the others to tick. Saved with the 404 settings.
+                                if root.zone.adding: Rectangle {
+                                    VerticalLayout {
+                                        padding-left: 14px;
+                                        padding-right: 14px;
+                                        padding-top: 2px;
+                                        padding-bottom: 10px;
+                                        spacing: 6px;
+
+                                        Rectangle {
+                                            height: min(root.zone.region-names.length * (26px + Theme.grow) + 8px, 120px + 4 * Theme.grow);
+                                            border-radius: 7px;
+                                            background: Theme.field;
+                                            border-width: 1px;
+                                            border-color: Theme.field-border;
+                                            accessible-role: list;
+                                            accessible-label: @tr("Regions to add");
+
+                                            ScrollView {
+                                                x: 4px;
+                                                y: 4px;
+                                                width: parent.width - 8px;
+                                                height: parent.height - 8px;
+
+                                                VerticalLayout {
+                                                    alignment: start;
+
+                                                    for name[i] in root.zone.region-names: HorizontalLayout {
+                                                        height: 26px + Theme.grow;
+                                                        padding-left: 6px;
+                                                        padding-right: 6px;
+
+                                                        VCenter {
+                                                            CheckLine {
+                                                                text: root.zone.region-on[i] ? @tr("{} (already in the zone)", name) : name;
+                                                                checked: root.zone.region-on[i] || root.zone-add[i];
+                                                                enabled: root.zone-editable && !root.zone.region-on[i];
+                                                                toggled(now) => { root.zone-add[i] = now; }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            text: @tr("The regions you tick are added when you save, and each one stores a copy of every file. Bunny can't remove a region once it is added.");
+                                            color: Theme.orange;
+                                            font-size: Theme.font-small;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    Rectangle {
+                                        y: parent.height - 1px;
+                                        height: 1px;
+                                        background: Theme.sep;
                                     }
                                 }
                                 GroupRow {
                                     title: @tr("Apply to the zone");
-                                    help: @tr("The 404 settings change on Bunny when you save.");
+                                    help: root.zone.note != "" ? root.zone.note : (root.read-only-on ? @tr("This site is read-only, so its zone can't be changed here.") : @tr("The 404 settings and the regions change on Bunny when you save."));
                                     error: root.zone.error;
                                     last: true;
 
                                     CapsuleButton {
                                         text: root.zone.busy ? @tr("Saving…") : @tr("Save");
-                                        enabled: !root.zone.busy;
+                                        enabled: root.zone-editable;
                                         clicked => { root.save-zone(); }
                                     }
                                 }
@@ -873,14 +954,15 @@ export component SitesTab inherits Rectangle {
                         }
 
                         // I6 (T5): the bucket's CORS rule and static website, where the service
-                        // offers them through its S3 API.
+                        // offers them through its S3 API; a part it doesn't offer says so.
                         if root.bucket.shown: Section {
                             title: @tr("Bucket");
 
                             Group {
                                 if root.bucket.cors-shown: GroupRow {
                                     title: @tr("CORS origins");
-                                    help: @tr("The sites whose pages may fetch these files, comma-separated (* for any).");
+                                    help: @tr("The sites whose pages may fetch these files, comma-separated (* for any). Empty removes the rule.");
+                                    error: root.bucket.origins-error;
 
                                     VCenter {
                                         Field {
@@ -888,7 +970,9 @@ export component SitesTab inherits Rectangle {
                                             text <=> root.cors-origins;
                                             placeholder: @tr("https://example.com");
                                             label: @tr("CORS origins");
-                                            enabled: !root.bucket.busy;
+                                            error: root.bucket.origins-error;
+                                            enabled: root.bucket-editable;
+                                            edited => { root.bucket.origins-error = ""; }
                                             accepted => { root.save-bucket(); }
                                         }
                                     }
@@ -896,6 +980,7 @@ export component SitesTab inherits Rectangle {
                                 if root.bucket.cors-shown: GroupRow {
                                     title: @tr("CORS methods");
                                     help: @tr("Comma-separated, such as GET, HEAD.");
+                                    error: root.bucket.methods-error;
 
                                     VCenter {
                                         Field {
@@ -903,14 +988,21 @@ export component SitesTab inherits Rectangle {
                                             text <=> root.cors-methods;
                                             placeholder: @tr("GET, HEAD");
                                             label: @tr("CORS methods");
-                                            enabled: !root.bucket.busy;
+                                            error: root.bucket.methods-error;
+                                            enabled: root.bucket-editable;
+                                            edited => { root.bucket.methods-error = ""; }
                                             accepted => { root.save-bucket(); }
                                         }
                                     }
                                 }
+                                if !root.bucket.cors-shown: GroupRow {
+                                    title: @tr("CORS");
+                                    help: root.bucket.cors-note;
+                                }
                                 if root.bucket.website-shown: GroupRow {
                                     title: @tr("Website index document");
                                     help: @tr("Served for a folder's address. Empty turns the static website off.");
+                                    error: root.bucket.index-error;
 
                                     VCenter {
                                         Field {
@@ -918,7 +1010,9 @@ export component SitesTab inherits Rectangle {
                                             text <=> root.website-index;
                                             placeholder: @tr("index.html");
                                             label: @tr("Website index document");
-                                            enabled: !root.bucket.busy;
+                                            error: root.bucket.index-error;
+                                            enabled: root.bucket-editable;
+                                            edited => { root.bucket.index-error = ""; }
                                             accepted => { root.save-bucket(); }
                                         }
                                     }
@@ -926,6 +1020,7 @@ export component SitesTab inherits Rectangle {
                                 if root.bucket.website-shown: GroupRow {
                                     title: @tr("Website error document");
                                     help: @tr("Served for a path that doesn't exist.");
+                                    error: root.bucket.error-doc-error;
 
                                     VCenter {
                                         Field {
@@ -933,20 +1028,27 @@ export component SitesTab inherits Rectangle {
                                             text <=> root.website-error;
                                             placeholder: @tr("404.html");
                                             label: @tr("Website error document");
-                                            enabled: !root.bucket.busy;
+                                            error: root.bucket.error-doc-error;
+                                            enabled: root.bucket-editable;
+                                            edited => { root.bucket.error-doc-error = ""; }
                                             accepted => { root.save-bucket(); }
                                         }
                                     }
                                 }
-                                GroupRow {
+                                if !root.bucket.website-shown: GroupRow {
+                                    title: @tr("Static website");
+                                    help: root.bucket.website-note;
+                                    last: !root.bucket.cors-shown;
+                                }
+                                if root.bucket.cors-shown || root.bucket.website-shown: GroupRow {
                                     title: @tr("Apply to the bucket");
-                                    help: root.bucket.note != "" ? root.bucket.note : @tr("These settings change on the service when you save.");
+                                    help: root.bucket.note != "" ? root.bucket.note : (root.read-only-on ? @tr("This site is read-only, so its bucket can't be changed here.") : @tr("These settings change on the service when you save."));
                                     error: root.bucket.error;
                                     last: true;
 
                                     CapsuleButton {
                                         text: root.bucket.busy ? @tr("Saving…") : @tr("Save");
-                                        enabled: !root.bucket.busy && (root.bucket.cors-shown || root.bucket.website-shown);
+                                        enabled: root.bucket-editable;
                                         clicked => { root.save-bucket(); }
                                     }
                                 }
