@@ -90,6 +90,14 @@ pub struct UiState {
     pub check_updates: bool,
     /// When the release feed was last read, in Unix seconds; 0 is never.
     pub last_update_check: i64,
+    /// The renderer (Settings › Advanced), applied at the next start: 0 software (the default),
+    /// 1 GPU.
+    pub renderer: u8,
+    /// The GPU renderer failed when it was last used (an error, or a crash or hang before its
+    /// first frame): the renderer went back to software and Settings › Advanced says why. It is
+    /// also set while a start with the GPU renderer has drawn nothing yet, so that a start that
+    /// crashes or hangs there is taken as one that failed. Choosing a renderer clears it.
+    pub gpu_failed: bool,
 }
 
 impl Default for UiState {
@@ -108,6 +116,8 @@ impl Default for UiState {
             tray: true,
             check_updates: false,
             last_update_check: 0,
+            renderer: 0,
+            gpu_failed: false,
         }
     }
 }

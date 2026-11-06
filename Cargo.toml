@@ -38,13 +38,16 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde = "1.0.229"
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-# The app draws with the software renderer only (main.rs), so the OpenGL renderer
-# (femtovg, glutin) and the tray icon stay out of the exe (S8: ≤ 25 MB).
+# Two renderers on the winit backend: the software one by default (lowest memory, S7),
+# and the GPU one (FemtoVG on OpenGL, through glutin) when chosen in Settings › Advanced
+# (I5; the app picks one at start in `renderer.rs`). There is no exe-size budget any
+# more (user, 2026-11-05).
 slint = { version = "1.18", default-features = false, features = [
     "std",
     "compat-1-2",
     "backend-winit",
     "renderer-software",
+    "renderer-femtovg",
     "accessibility",
 ] }
 # Build only: compiles the .slint files; same version as `slint`.

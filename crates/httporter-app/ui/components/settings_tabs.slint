@@ -768,12 +768,18 @@ export component SitesTab inherits Rectangle {
 
 // ---- Advanced ----
 
-// Show Activity Log…, Open Log Folder, the checksum cache.
+// Show Activity Log…, Open Log Folder, the checksum cache; the renderer (I5).
 export component AdvancedTab inherits Rectangle {
     in property <string> hash-cache-text;
     callback clear-hash-cache();
     callback show-activity();
     callback open-log-folder();
+    // ---- I5 ----
+    // The renderer, applied at the next start: 0 software, 1 GPU. `renderer-fell-back` is true
+    // when this run uses the software renderer because the GPU one couldn't start.
+    in-out property <int> renderer: 0;
+    in property <bool> renderer-fell-back: false;
+    callback renderer-edited();
 
     ScrollView {
         TabColumn {
@@ -817,6 +823,26 @@ export component AdvancedTab inherits Rectangle {
 
             Note {
                 text: @tr("The checksum cache remembers the SHA-256 and MD5 of files on this PC, so that comparing and publishing don't read an unchanged file again. Clearing it is safe: files are read again when needed.");
+            }
+
+            Section {
+                title: @tr("Graphics");
+
+                Group {
+                    GroupRow {
+                        title: @tr("Renderer");
+                        help: @tr("Software uses the least memory. GPU can scroll more smoothly on large, high-resolution screens. Applies the next time HTTPorter starts.");
+                        error: root.renderer-fell-back ? @tr("The GPU renderer couldn't start, so HTTPorter uses the software renderer.") : "";
+                        last: true;
+
+                        Segmented {
+                            options: [@tr("Software"), @tr("GPU")];
+                            label: @tr("Renderer");
+                            current <=> root.renderer;
+                            selected => { root.renderer-edited(); }
+                        }
+                    }
+                }
             }
         }
     }

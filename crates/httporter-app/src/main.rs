@@ -27,6 +27,7 @@ mod import;
 mod local_fs;
 mod manage;
 mod publish;
+mod renderer;
 mod rt;
 mod selection;
 mod session;
@@ -102,20 +103,17 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    // Software renderer on the winit backend: lowest memory use. A SLINT_BACKEND
-    // environment variable overrides this, which tools/measure.ps1 -Backend relies on.
-    if std::env::var_os("SLINT_BACKEND").is_none() {
-        slint::BackendSelector::new()
-            .backend_name("winit".into())
-            .renderer_name("software".into())
-            .select()?;
-    }
+    // The site database first: it holds the renderer setting (Settings › Advanced), which Slint
+    // needs before anything of it is used. Opening the session uses nothing of Slint's.
+    let session = open_session()?;
+    // The winit backend with the software renderer (the lowest memory use), or the GPU one when
+    // it is chosen; a SLINT_BACKEND environment variable overrides both (`renderer.rs`).
+    let gpu = renderer::select(&session)?;
 
     // Listings, connection tests, planning and transfers run here, off the UI thread.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let session = open_session()?;
     let journal = open_journal(&session);
     // Digests of local files not used for 90 days go, off the UI thread.
     session.prune_hash_cache();
@@ -131,6 +129,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         copy::describe_transfer_error,
     );
     let ui = AppWindow::new()?;
+    // Without OpenGL 2.0 Slint quietly gave the window the software renderer.
+    let gpu = gpu.and_then(|gpu| gpu.check(&ui));
     // Windows' text size and "Animation effects" (read again when they change, T5).
     ui.global::<Theme>().set_text_scale(win::text_scale());
     ui.global::<Theme>().set_motion(win::animations_enabled());
@@ -152,7 +152,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     // into the tray while transfers carry on (T3). Closing the window quits as before
     // (`transfers::install_close`).
     ui.show()?;
-    slint::run_event_loop_until_quit()?;
+    let looped = slint::run_event_loop_until_quit();
+    // With the GPU renderer an error here (its OpenGL context couldn't be made, or drawing failed)
+    // can't be helped in this run: the next start uses the software renderer, and says why.
+    if let Some(gpu) = &gpu {
+        gpu.ended(looped.is_err());
+    }
+    looped.map_err(|e| -> Box<dyn Error> {
+        if gpu.is_some() {
+            copy::gpu_renderer_failed(e).into()
+        } else {
+            e.into()
+        }
+    })?;
     // Every way out ends here (a close, Quit, the tray's last batch): where the window is, while
     // its HWND still exists.
     window::save_placement();

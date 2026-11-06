@@ -65,6 +65,12 @@ FALLBACKS = {
     "accesskit_winit": ("Apache-2.0", [], []),
     # BSL-1.0 (upstream LICENSE, Boost Software License 1.0).
     "clipboard-win": ("BSL-1.0", [], []),
+    # gl-rs (build dependencies of glutin, for the GPU renderer's WGL and EGL bindings):
+    # Apache-2.0, upstream LICENSE; the sources say "Copyright 2015 Brendan Zabarauskas and the
+    # gl-rs developers". khronos_api bundles the Khronos registries the bindings are made from:
+    # gl.xml and wgl.xml under Apache-2.0, egl.xml under Khronos's own MIT-style licence.
+    "gl_generator": ("Apache-2.0", [], []),
+    "khronos_api": ("Apache-2.0", [], ["khronos-egl"]),
     # lyon: "MIT OR Apache-2.0", upstream LICENSE-MIT.
     "lyon_algorithms": ("MIT", ["Copyright (c) 2013 Nicolas Silva"], []),
     "lyon_extra": ("MIT", ["Copyright (c) 2013 Nicolas Silva"], []),
@@ -411,7 +417,33 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
-EXTRA_NOTICES = {"chromium": ("LICENSE.chromium (upstream)", CHROMIUM_BSD)}
+# The licence at the top of khronos_api's api_egl/api/egl.xml (the EGL registry).
+KHRONOS_EGL = """Copyright (c) 2013-2017 The Khronos Group Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and/or associated documentation files (the
+"Materials"), to deal in the Materials without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Materials, and to
+permit persons to whom the Materials are furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Materials.
+
+THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+MATERIALS OR THE USE OR OTHER DEALINGS IN THE MATERIALS.
+"""
+
+EXTRA_NOTICES = {
+    "chromium": ("LICENSE.chromium (upstream)", CHROMIUM_BSD),
+    "khronos-egl": ("egl.xml (the Khronos EGL registry)", KHRONOS_EGL),
+}
 
 
 if __name__ == "__main__":

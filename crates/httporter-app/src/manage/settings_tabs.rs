@@ -7,7 +7,8 @@
 //!   long pre-signed links last), its CDN link, and the conflict choices remembered for it, each
 //!   with Forget (review M3); Export Sites… and Import Sites…, whose file holds no secret (the
 //!   session writes and reads it).
-//! - **Advanced:** Show Activity Log…, Open Log Folder, the checksum cache and Clear.
+//! - **Advanced:** Show Activity Log…, Open Log Folder, the checksum cache and Clear; the
+//!   renderer (I5), kept in the saved [`UiState`] for the next start (`renderer.rs`).
 //!
 //! Every edit applies at once, as on the Transfers tab: the window (`settings_tabs.slint`) only
 //! draws the form and hands it back; this file checks it, stores it and draws the answer.
@@ -28,6 +29,7 @@ use httporter_platform::{cache_bytes, cache_dir, default_log_dir, win};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{Manager, copy};
+use crate::renderer;
 use crate::session::{Session, blocking};
 use crate::{AppWindow, SettingsWindow, SiteSettingsData, SiteSettingsRow, Theme};
 
@@ -107,6 +109,7 @@ pub fn wire(window: &SettingsWindow) {
     window.on_clear_hash_cache(on(clear_hash_cache));
     window.on_show_activity(on(show_activity));
     window.on_open_log_folder(on(open_log_folder));
+    window.on_renderer_edited(on(renderer_edited));
 
     let (weak, mgr) = (window.as_weak(), manager.clone());
     window.on_tab_shown(move |tab| {
@@ -600,6 +603,10 @@ fn file_name(path: &Path) -> String {
 // ---- Advanced ----
 
 fn show_advanced(window: &SettingsWindow, m: &Arc<Manager>) {
+    // I5: the renderer, and whether the GPU one couldn't start.
+    let state = m.session.ui_state();
+    window.set_renderer(i32::from(state.renderer == renderer::GPU_RENDERER));
+    window.set_renderer_fell_back(renderer::fell_back(&state));
     let (session, weak) = (m.session.clone(), window.as_weak());
     m.link.rt().spawn(async move {
         let text = match session.hash_count().await {
@@ -610,6 +617,23 @@ fn show_advanced(window: &SettingsWindow, m: &Arc<Manager>) {
             window.set_hash_cache_text(text.into());
         });
     });
+}
+
+/// The renderer was chosen: kept for the next start. Choosing one (GPU again, say) also forgets
+/// that the GPU renderer couldn't start last time, so the next start tries what was chosen.
+fn renderer_edited(window: &SettingsWindow, m: &Arc<Manager>) {
+    let renderer = if window.get_renderer() == i32::from(renderer::GPU_RENDERER) {
+        renderer::GPU_RENDERER
+    } else {
+        0
+    };
+    let state = UiState {
+        renderer,
+        gpu_failed: false,
+        ..m.session.ui_state()
+    };
+    m.session.save_ui_state(&state);
+    window.set_renderer_fell_back(renderer::fell_back(&state));
 }
 
 fn clear_hash_cache(window: &SettingsWindow, m: &Arc<Manager>) {

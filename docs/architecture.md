@@ -66,8 +66,8 @@ Adding a provider: [CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-storage-provide
 
 ## Threads
 
-- **Main thread:** Slint's event loop (winit backend, software renderer, chosen in `main.rs`
-  unless `SLINT_BACKEND` says otherwise). It runs the callbacks and applies views, and does no
+- **Main thread:** Slint's event loop (winit backend; the software renderer, or the GPU one when
+  chosen in Settings › Advanced, picked in `renderer.rs` unless `SLINT_BACKEND` says otherwise). It runs the callbacks and applies views, and does no
   network or disk work.
 - **tokio runtime** (multi-threaded, built in `main.rs`): listings, connection tests, planning,
   compares and every transfer run as tasks on it. Tasks are spawned boxed (`rt.rs`), so the exe
