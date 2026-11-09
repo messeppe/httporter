@@ -28,8 +28,11 @@ use crate::{AppWindow, FileKind, FileRow, InspectorData};
 
 /// Previews are made of images up to this size.
 const PREVIEW_MAX_BYTES: u64 = 20 << 20;
-/// A preview fits in this many pixels each way (the 300 px panel, at twice its size).
-const PREVIEW_SIZE: u32 = 640;
+/// A preview is kept at no more than this many pixels each way (the box below at four times its
+/// width), and made the exact size it is shown at when it is shown.
+const PREVIEW_SIZE: u32 = 1080;
+/// inspector.slint's preview box in logical pixels: the 300 px panel less its padding, at 4:3.
+const PREVIEW_BOX: (f32, f32) = (270.0, 202.5);
 /// Local files up to this size get their SHA-256 shown (larger ones would keep the disk busy
 /// for a selection).
 const LOCAL_HASH_MAX_BYTES: u64 = 1 << 30;
@@ -187,7 +190,18 @@ fn apply(m: &Manager, ui: &AppWindow) {
         (state.data.clone(), state.preview.clone())
     };
     ui.set_inspector(data);
-    ui.set_inspector_image(preview.map(slint::Image::from_rgba8).unwrap_or_default());
+    // Averaged down to the pixels it is drawn at: the renderer's own shrinking only samples, which
+    // looks jagged.
+    let scale = ui.window().scale_factor();
+    let (width, height) = (
+        (PREVIEW_BOX.0 * scale) as u32,
+        (PREVIEW_BOX.1 * scale) as u32,
+    );
+    ui.set_inspector_image(
+        preview
+            .map(|pixels| slint::Image::from_rgba8(thumbs::scale_down(&pixels, width, height)))
+            .unwrap_or_default(),
+    );
 }
 
 /// [`apply`], from any thread.

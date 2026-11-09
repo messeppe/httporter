@@ -292,7 +292,7 @@ export component Inspector inherits Rectangle {
 
     background: Theme.content;
     border-radius: Theme.radius-md;
-    border-width: 0.5px;
+    border-width: 1phx;
     border-color: Theme.sep-strong;
     clip: true;
     accessible-role: region;
@@ -341,11 +341,12 @@ export component Inspector inherits Rectangle {
                 background: Theme.chip;
                 clip: true;
 
+                // The app makes the image exactly this many pixels, so it is drawn one to one.
                 if root.has-preview: Image {
-                    width: parent.width;
-                    height: parent.height;
+                    width: root.image.width * 1phx;
+                    height: root.image.height * 1phx;
                     source: root.image;
-                    image-fit: contain;
+                    image-fit: fill;
                     accessible-role: AccessibleRole.image;
                     accessible-label: @tr("Preview of {}", root.data.name);
                 }
@@ -469,7 +470,7 @@ export component Inspector inherits Rectangle {
                 if root.one: Rectangle {
                     background: Theme.content;
                     border-radius: Theme.radius-sm + 2px;
-                    border-width: 0.5px;
+                    border-width: 1phx;
                     border-color: Theme.sep-strong;
 
                     VerticalLayout {

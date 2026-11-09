@@ -43,7 +43,7 @@ component Segment inherits Rectangle {
     height: Theme.tab-height;
     border-radius: 6px;
     background: root.selected ? Theme.control : transparent;
-    border-width: root.selected ? 0.5px : 0px;
+    border-width: root.selected ? 1phx : 0px;
     border-color: Theme.control-border;
     accessible-role: radio-button;
     accessible-checkable: true;
@@ -566,7 +566,7 @@ export component AddSiteSheet inherits Rectangle {
             y: max(12px, min(64px, parent.height - self.height - 12px));
             background: Theme.sheet;
             border-radius: Theme.radius-xl;
-            border-width: 0.5px;
+            border-width: 1phx;
             border-color: Theme.sep-strong;
             drop-shadow-blur: 64px;
             drop-shadow-offset-y: 24px;
@@ -1120,7 +1120,7 @@ export component AddSiteSheet inherits Rectangle {
                                 height: Theme.control-height;
                                 border-radius: 7px;
                                 background: Theme.chip;
-                                border-width: 0.5px;
+                                border-width: 1phx;
                                 border-color: Theme.control-border;
 
                                 HorizontalLayout {

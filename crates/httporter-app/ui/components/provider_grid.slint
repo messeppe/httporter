@@ -32,7 +32,7 @@ component ProviderChoice inherits Rectangle {
     height: 44px + Theme.grow + Theme.grow-small;
     border-radius: Theme.radius-md;
     background: root.available ? Theme.content : Theme.chip;
-    border-width: root.selected ? 2px : 0.5px;
+    border-width: root.selected ? 2px : 1phx;
     border-color: root.selected ? Theme.accent : Theme.sep-strong;
     accessible-role: radio-button;
     accessible-checkable: true;

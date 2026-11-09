@@ -112,7 +112,7 @@ export component AttachedSheet inherits Rectangle {
             height: parent.height + Theme.radius-xl;
             background: Theme.sheet;
             border-radius: Theme.radius-xl;
-            border-width: 0.5px;
+            border-width: 1phx;
             border-color: Theme.sep-strong;
             accessible-role: form;
             accessible-label: root.label;
@@ -143,7 +143,7 @@ export component AlertCard inherits Rectangle {
         y: (parent.height - self.height) / 2;
         background: Theme.sheet;
         border-radius: Theme.radius-xl;
-        border-width: 0.5px;
+        border-width: 1phx;
         border-color: Theme.sep-strong;
         drop-shadow-blur: 64px;
         drop-shadow-offset-y: 24px;
@@ -645,7 +645,7 @@ export component ConflictSheet inherits Rectangle {
                     height: ConflictSizes.head + root.table-height;
                     background: Theme.content;
                     border-radius: Theme.radius-md;
-                    border-width: 0.5px;
+                    border-width: 1phx;
                     border-color: Theme.sep-strong;
                     clip: true;
 

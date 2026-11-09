@@ -2,7 +2,8 @@
 
 //! Thumbnails for the grid (T5): images up to 5 MB, scaled to fit 240 × 240 and kept as PNGs in
 //! `cache_dir("thumbs")` (named after the file's path, size and time), made 4 at a time on
-//! blocking threads, for the tiles in view only.
+//! blocking threads, for the tiles in view only. A tile gets its thumbnail averaged down to the
+//! exact pixels it is drawn at: the renderer's own shrinking only samples, which looks jagged.
 //!
 //! Images are read with Slint's own loader (the decoders the app links already). The PNGs are
 //! written uncompressed by [`write_png`], so that no encoder is linked for them; the cache is
@@ -34,9 +35,11 @@ use crate::{AppWindow, FileKind, FileRow, PaneBounds};
 const TILE_WIDTH: f32 = 120.0;
 const TILE_HEIGHT: f32 = 132.0;
 const GRID_PAD: f32 = 4.0;
+/// The picture's square in a tile: pane.slint's `Grid.thumb` less its 4 px margins.
+const TILE_IMAGE: f32 = 80.0;
 /// Larger images keep their kind's icon.
 const MAX_BYTES: u64 = 5 << 20;
-/// A thumbnail fits in this many pixels each way (a tile's square at twice its size).
+/// A cached thumbnail fits in this many pixels each way (a tile's picture at three times its size).
 const SIZE: u32 = 240;
 /// How often the tiles in view are looked at while the grid shows.
 const POLL: Duration = Duration::from_millis(200);
@@ -202,8 +205,9 @@ fn look(ui: &AppWindow, m: &Arc<Manager>) {
         }
         thumbs.gate.clone()
     };
+    let fit = (TILE_IMAGE * ui.window().scale_factor()) as u32;
     for (at, name, now) in wanted {
-        start(m, &gate, side, place.clone(), at, name, now);
+        start(m, &gate, side, place.clone(), at, name, now, fit);
     }
 }
 
@@ -215,7 +219,8 @@ enum Source {
 }
 
 /// Makes the thumbnail of `name` (row `at` of `side`, in the folder `place`) on the runtime, then
-/// shows it.
+/// shows it. `fit` is the picture's size on screen, in pixels.
+#[allow(clippy::too_many_arguments)]
 fn start(
     m: &Arc<Manager>,
     gate: &Arc<Semaphore>,
@@ -224,6 +229,7 @@ fn start(
     at: usize,
     name: String,
     now: String,
+    fit: u32,
 ) {
     let source = match side {
         Side::Local => m
@@ -247,7 +253,7 @@ fn start(
         let Ok(_turn) = gate.acquire_owned().await else {
             return;
         };
-        let Some(pixels) = make(&m, source).await else {
+        let Some(pixels) = make(&m, source, fit).await else {
             return;
         };
         let manager = m.clone();
@@ -264,9 +270,9 @@ fn cached_path(key: &str) -> PathBuf {
     cache_dir("thumbs").join(format!("{:016x}.png", hasher.finish()))
 }
 
-/// The thumbnail of `source`: from the cache, or made (and kept there). `None` for a file too
-/// large, one that can't be read or fetched, or one Slint can't decode.
-async fn make(m: &Manager, source: Source) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+/// The thumbnail of `source` at `fit` pixels: from the cache, or made (and kept there). `None`
+/// for a file too large, one that can't be read or fetched, or one Slint can't decode.
+async fn make(m: &Manager, source: Source, fit: u32) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     let (key, file) = match source {
         Source::Local(path) => {
             let meta = {
@@ -313,12 +319,12 @@ async fn make(m: &Manager, source: Source) -> Option<SharedPixelBuffer<Rgba8Pixe
         if out.exists()
             && let Some((pixels, _)) = decode_scaled(&out, SIZE)
         {
-            return Some(pixels);
+            return Some(scale_down(&pixels, fit, fit));
         }
         let (pixels, _) = decode_scaled(&file?, SIZE)?;
         // A thumbnail that can't be kept is made again next time.
         let _ = write_png(&out, &pixels);
-        Some(pixels)
+        Some(scale_down(&pixels, fit, fit))
     })
     .await
     .ok()
@@ -375,20 +381,24 @@ pub(super) fn decode_scaled(
     let image = slint::Image::load_from_path(path).ok()?;
     let size = image.size();
     let pixels = image.to_rgba8()?;
-    Some((scale_down(&pixels, max), (size.width, size.height)))
+    Some((scale_down(&pixels, max, max), (size.width, size.height)))
 }
 
-/// `src` scaled down (keeping its shape) to fit `max` × `max`, each pixel the average of those it
-/// covers (weighted by their alpha, so that transparent edges don't darken); `src` itself when it
-/// fits.
-fn scale_down(src: &SharedPixelBuffer<Rgba8Pixel>, max: u32) -> SharedPixelBuffer<Rgba8Pixel> {
+/// `src` scaled down (keeping its shape) to fit `max_w` × `max_h`, each pixel the average of those
+/// it covers (weighted by their alpha, so that transparent edges don't darken); `src` itself when
+/// it fits.
+pub(super) fn scale_down(
+    src: &SharedPixelBuffer<Rgba8Pixel>,
+    max_w: u32,
+    max_h: u32,
+) -> SharedPixelBuffer<Rgba8Pixel> {
     let (w, h) = (src.width(), src.height());
-    if (w <= max && h <= max) || w == 0 || h == 0 {
+    if (w <= max_w && h <= max_h) || w == 0 || h == 0 || max_w == 0 || max_h == 0 {
         return src.clone();
     }
-    let scale = (f64::from(max) / f64::from(w)).min(f64::from(max) / f64::from(h));
-    let tw = ((f64::from(w) * scale).round() as u32).clamp(1, max);
-    let th = ((f64::from(h) * scale).round() as u32).clamp(1, max);
+    let scale = (f64::from(max_w) / f64::from(w)).min(f64::from(max_h) / f64::from(h));
+    let tw = ((f64::from(w) * scale).round() as u32).clamp(1, max_w);
+    let th = ((f64::from(h) * scale).round() as u32).clamp(1, max_h);
     let span = |i: u32, to: u32, from: u32| {
         let start = (u64::from(i) * u64::from(from) / u64::from(to)) as u32;
         let end = ((u64::from(i + 1) * u64::from(from) / u64::from(to)) as u32)

@@ -78,7 +78,7 @@ component ModeSwitch inherits Rectangle {
         Rectangle {
             border-radius: 6px;
             background: root.current == 0 ? Theme.control : transparent;
-            border-width: root.current == 0 ? 0.5px : 0px;
+            border-width: root.current == 0 ? 1phx : 0px;
             border-color: Theme.control-border;
 
             HorizontalLayout {
@@ -103,7 +103,7 @@ component ModeSwitch inherits Rectangle {
         Rectangle {
             border-radius: 6px;
             background: root.current == 1 ? Theme.control : transparent;
-            border-width: root.current == 1 ? 0.5px : 0px;
+            border-width: root.current == 1 ? 1phx : 0px;
             border-color: Theme.control-border;
             opacity: root.second-enabled ? 1 : 0.45;
 
@@ -221,7 +221,7 @@ export component QuickLook inherits Rectangle {
             height: min(560px, parent.height - 32px);
             background: Theme.sheet;
             border-radius: 16px;
-            border-width: 0.5px;
+            border-width: 1phx;
             border-color: Theme.sep-strong;
             drop-shadow-blur: 64px;
             drop-shadow-offset-y: 24px;

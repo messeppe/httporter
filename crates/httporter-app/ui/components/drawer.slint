@@ -127,7 +127,7 @@ component TabButton inherits Rectangle {
     height: Theme.tab-height;
     border-radius: 6px;
     background: root.selected ? Theme.control : (area.has-hover ? Theme.hover : transparent);
-    border-width: root.selected ? 0.5px : 0px;
+    border-width: root.selected ? 1phx : 0px;
     border-color: Theme.control-border;
     forward-focus: key-focus;
     accessible-role: tab;
@@ -450,7 +450,7 @@ export component TransferDrawer inherits Rectangle {
 
     background: Theme.content;
     border-radius: Theme.radius-md;
-    border-width: 0.5px;
+    border-width: 1phx;
     border-color: Theme.sep-strong;
     clip: true;
     height: root.open ? root.head-height + root.list-height + 1px : 48px + Theme.grow;
