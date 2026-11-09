@@ -34,7 +34,7 @@ import { Icons } from "../icons.slint";
 import { CompareStatus, CompareSummary, FileKind, FileRow, PaneBounds } from "../types.slint";
 import { Activation, ToolButton } from "buttons.slint";
 import { Chip, StatusChip } from "chips.slint";
-import { VCenter } from "layout.slint";
+import { PixelImage, VCenter } from "layout.slint";
 
 // Sizes shared by the column headers and the rows (mockup `.cols, .row`: padding 0 12px, gap 8px).
 // The Status, Size and Modified columns are as wide as the window says (`Pane.col-*-width`, the
@@ -615,14 +615,8 @@ component PaneTile inherits Rectangle {
         border-width: root.drop-target ? 2px : 0px;
         border-color: Theme.accent;
 
-        // The app makes the thumbnail exactly this many pixels, so it is drawn one to one.
-        if root.item.thumb.width > 0: Image {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: root.item.thumb.width * 1phx;
-            height: root.item.thumb.height * 1phx;
+        if root.item.thumb.width > 0: PixelImage {
             source: root.item.thumb;
-            image-fit: fill;
             accessible-role: none;
         }
         if root.item.thumb.width == 0: Image {

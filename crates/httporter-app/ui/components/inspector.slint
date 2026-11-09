@@ -16,7 +16,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { InspectorData } from "../types.slint";
 import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
-import { VCenter } from "layout.slint";
+import { PixelImage, VCenter } from "layout.slint";
 
 // One line of the metadata (mockup: a 96 px label column, then the value). A mono value wraps
 // anywhere: checksums and content types have no spaces to wrap at.
@@ -341,12 +341,8 @@ export component Inspector inherits Rectangle {
                 background: Theme.chip;
                 clip: true;
 
-                // The app makes the image exactly this many pixels, so it is drawn one to one.
-                if root.has-preview: Image {
-                    width: root.image.width * 1phx;
-                    height: root.image.height * 1phx;
+                if root.has-preview: PixelImage {
                     source: root.image;
-                    image-fit: fill;
                     accessible-role: AccessibleRole.image;
                     accessible-label: @tr("Preview of {}", root.data.name);
                 }

@@ -7,3 +7,23 @@
 export component VCenter inherits VerticalLayout {
     alignment: center;
 }
+
+// An image the app has made exactly the size it is shown at, centred in its parent and drawn one
+// to one. It starts on a whole device pixel: at a fractional position the renderer would blend
+// each of its pixels with the next.
+export component PixelImage inherits Rectangle {
+    in property <image> source;
+
+    property <physical-length> left: root.absolute-position.x + (root.width - picture.width) / 2;
+    property <physical-length> top: root.absolute-position.y + (root.height - picture.height) / 2;
+
+    picture := Image {
+        x: Math.round(root.left / 1phx) * 1phx - root.absolute-position.x;
+        y: Math.round(root.top / 1phx) * 1phx - root.absolute-position.y;
+        width: root.source.width * 1phx;
+        height: root.source.height * 1phx;
+        source: root.source;
+        image-fit: fill;
+        accessible-role: none;
+    }
+}

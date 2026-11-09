@@ -22,10 +22,13 @@ use httporter_core::{
     DiffOp, Entry, ProviderKind, RemotePath, SiteRecord, diff_lines, encode_segment,
 };
 use httporter_platform::win;
-use slint::{ComponentHandle, Model, ModelRc, ModelTracker, SharedString, VecModel};
+use slint::{
+    ComponentHandle, Model, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString,
+    VecModel,
+};
 
 use super::highlight::{self, Highlighter, Span};
-use super::{Manager, Side, copy, edit};
+use super::{Manager, Side, copy, edit, thumbs};
 use crate::session::blocking;
 use crate::{AppWindow, CodeLine, CodeSpan, CompareStatus, QuickLookData, Theme};
 
@@ -35,6 +38,9 @@ const TEXT_MAX: usize = 2 << 20;
 const LINES_MAX: usize = 20_000;
 /// How much of a file of unknown kind is looked at to tell whether it is text.
 const SNIFF: usize = 8 << 10;
+/// An image is kept at no more than this many pixels each way, and made the exact size it is shown
+/// at when it is shown.
+const IMAGE_KEPT: u32 = 2048;
 
 /// What [`Manager::fetch_to_cache`] keeps Quick Look's copies of site files under.
 const PREVIEW: &str = "preview";
@@ -96,7 +102,8 @@ struct Text {
 
 enum View {
     Text(Text),
-    Image,
+    /// The picture (see [`IMAGE_KEPT`]) and its own size; `None` for one that can't be decoded.
+    Image(Option<(SharedPixelBuffer<Rgba8Pixel>, (u32, u32))>),
     Other,
 }
 
@@ -111,6 +118,8 @@ struct Loaded {
     footer: String,
     counterpart: Option<Counterpart>,
     diff: Option<(Arc<Vec<LineData>>, String)>,
+    /// The picture, to make it again when the room for it changes.
+    image: Option<SharedPixelBuffer<Rgba8Pixel>>,
 }
 
 /// What this view remembers between callbacks.
@@ -126,6 +135,8 @@ pub struct QuickLookState {
     items: Vec<Item>,
     index: usize,
     loaded: Option<Loaded>,
+    /// The room for an image in the panel, in logical pixels (`ql-image-room`).
+    room: (f32, f32),
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -157,6 +168,14 @@ pub fn install(ui: &AppWindow, m: &Arc<Manager>) {
         move |by| {
             if let Some(ui) = weak.upgrade() {
                 step(&ui, &m, by);
+            }
+        }
+    });
+    ui.on_ql_image_room({
+        let (m, weak) = (m.clone(), weak.clone());
+        move |width, height| {
+            if let Some(ui) = weak.upgrade() {
+                image_room(&ui, &m, (width, height));
             }
         }
     });
@@ -300,7 +319,7 @@ fn load(ui: &AppWindow, m: &Arc<Manager>) {
     rt.spawn(async move {
         let read = read_source(&m, &source).await;
         let counterpart = match &read {
-            Ok((_, _, View::Text(text))) if !text.cut => find_counterpart(&m, &source).await,
+            Ok((_, View::Text(text))) if !text.cut => find_counterpart(&m, &source).await,
             _ => None,
         };
         let weak = m.link.ui().clone();
@@ -318,9 +337,8 @@ fn open_site_label(m: &Manager) -> String {
     )
 }
 
-/// Reads the file of `source` (a site's through the preview cache): where its content is, its
-/// size and what it shows.
-async fn read_source(m: &Manager, source: &Source) -> Result<(PathBuf, u64, View), String> {
+/// Reads the file of `source` (a site's through the preview cache): its size and what it shows.
+async fn read_source(m: &Manager, source: &Source) -> Result<(u64, View), String> {
     let (file, name) = match source {
         Source::Local(path) => (path.clone(), file_name(path)),
         Source::Remote(site, entry) => (
@@ -328,11 +346,9 @@ async fn read_source(m: &Manager, source: &Source) -> Result<(PathBuf, u64, View
             entry.name().to_owned(),
         ),
     };
-    let path = file.clone();
-    let (size, view) = blocking(move || read_file(&path, &name))
+    blocking(move || read_file(&file, &name))
         .await
-        .map_err(copy::ql_read_failed)?;
-    Ok((file, size, view))
+        .map_err(copy::ql_read_failed)
 }
 
 fn file_name(path: &Path) -> String {
@@ -414,7 +430,7 @@ fn eol_of(text: &str) -> &'static str {
 fn read_file(path: &Path, name: &str) -> std::io::Result<(u64, View)> {
     let size = std::fs::metadata(path)?.len();
     if is_image(name) {
-        return Ok((size, View::Image));
+        return Ok((size, View::Image(thumbs::decode_scaled(path, IMAGE_KEPT))));
     }
     let mut bytes = Vec::new();
     File::open(path)?
@@ -551,14 +567,14 @@ fn loaded(
     generation: u64,
     item: Item,
     source: Source,
-    read: Result<(PathBuf, u64, View), String>,
+    read: Result<(u64, View), String>,
     counterpart: Option<Counterpart>,
 ) {
     let mut st = lock(&m.quicklook);
     if st.generation != generation || !ui.get_ql_open() {
         return;
     }
-    let (file, size, view) = match read {
+    let (size, view) = match read {
         Ok(read) => read,
         Err(error) => {
             drop(st);
@@ -607,6 +623,7 @@ fn loaded(
         footer: String::new(),
         counterpart: None,
         diff: None,
+        image: None,
     };
     match view {
         View::Text(text) => {
@@ -632,16 +649,16 @@ fn loaded(
             loaded.counterpart = counterpart;
             ui.set_ql_lines(lines_model(&loaded.lines));
         }
-        View::Image => {
+        View::Image(decoded) => {
             data.kind = KIND_IMAGE;
             data.diff_note = copy::QL_ONLY_TEXT_COMPARES.into();
-            match slint::Image::load_from_path(&file) {
-                Ok(image) => {
-                    let size = image.size();
-                    data.footer_right = copy::ql_image_footer(size.width, size.height).into();
-                    ui.set_ql_image(image);
+            match decoded {
+                Some((pixels, (width, height))) => {
+                    data.footer_right = copy::ql_image_footer(width, height).into();
+                    show_image(ui, st.room, &pixels);
+                    loaded.image = Some(pixels);
                 }
-                Err(_) => data.error = copy::QL_IMAGE_FAILED.into(),
+                None => data.error = copy::QL_IMAGE_FAILED.into(),
             }
         }
         View::Other => {
@@ -660,6 +677,28 @@ fn loaded(
         } else {
             ui.set_ql_mode(MODE_SOURCE);
         }
+    }
+}
+
+/// Shows `pixels` averaged down to the pixels of `room`: the renderer's own shrinking only
+/// samples, which looks jagged.
+fn show_image(ui: &AppWindow, room: (f32, f32), pixels: &SharedPixelBuffer<Rgba8Pixel>) {
+    let scale = ui.window().scale_factor();
+    let (width, height) = ((room.0 * scale) as u32, (room.1 * scale) as u32);
+    ui.set_ql_image(slint::Image::from_rgba8(thumbs::scale_down(
+        pixels, width, height,
+    )));
+}
+
+/// The room for an image changed (the panel shrinks with a small window).
+fn image_room(ui: &AppWindow, m: &Manager, room: (f32, f32)) {
+    let pixels = {
+        let mut st = lock(&m.quicklook);
+        st.room = room;
+        st.loaded.as_ref().and_then(|loaded| loaded.image.clone())
+    };
+    if let Some(pixels) = pixels {
+        show_image(ui, room, &pixels);
     }
 }
 

@@ -14,7 +14,7 @@ import { Icons } from "../icons.slint";
 import { CodeLine, EditConflictData, QuickLookData } from "../types.slint";
 import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
 import { AlertCard, Modal } from "sheets.slint";
-import { VCenter } from "layout.slint";
+import { PixelImage, VCenter } from "layout.slint";
 
 // The colours of `CodeSpan.style` (mockup `.code`: tags, attributes, strings, comments), plus
 // keywords and numbers.
@@ -179,8 +179,19 @@ export component QuickLook inherits Rectangle {
     callback open-browser();
     callback open-with();
     callback close();
+    // The room for an image, which the app makes the image fit exactly.
+    callback image-room(length, length);
 
-    init => { keys.focus(); }
+    property <length> room-width: body.width - 32px;
+    property <length> room-height: body.height - 32px;
+
+    changed room-width => { root.image-room(root.room-width, root.room-height); }
+    changed room-height => { root.image-room(root.room-width, root.room-height); }
+
+    init => {
+        keys.focus();
+        root.image-room(root.room-width, root.room-height);
+    }
 
     Modal {
         at-first-stop: close-button.has-focus;
@@ -316,7 +327,7 @@ export component QuickLook inherits Rectangle {
                 }
 
                 // Body: the text, the image, or the kind of file.
-                Rectangle {
+                body := Rectangle {
                     vertical-stretch: 1;
                     background: Theme.content;
 
@@ -357,13 +368,8 @@ export component QuickLook inherits Rectangle {
                         }
                     }
 
-                    if root.data.kind == 1 && root.data.error == "": Image {
-                        x: 16px;
-                        y: 16px;
-                        width: parent.width - 32px;
-                        height: parent.height - 32px;
+                    if root.data.kind == 1 && root.data.error == "": PixelImage {
                         source: root.image;
-                        image-fit: contain;
                     }
 
                     if root.data.kind == 2 && !root.data.busy && root.data.error == "": VerticalLayout {

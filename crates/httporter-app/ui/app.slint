@@ -561,6 +561,7 @@ export component AppWindow inherits Window {
     callback ql-set-mode(int);
     // -1 the previous file, 1 the next.
     callback ql-step(int);
+    callback ql-image-room(length, length);
     callback ql-open-browser();
     callback ql-open-with();
     callback ql-close();
@@ -1819,6 +1820,7 @@ export component AppWindow inherits Window {
         mode <=> root.ql-mode;
         set-mode(mode) => { root.ql-set-mode(mode); }
         step(by) => { root.ql-step(by); }
+        image-room(width, height) => { root.ql-image-room(width, height); }
         open-browser => { root.ql-open-browser(); }
         open-with => { root.ql-open-with(); }
         close => {
