@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# vendor/ holds third-party source patched for HTTPorter; it is not ours to build or lint.
+exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -100,3 +102,15 @@ opt-level = 3
 
 [profile.release.package.glow]
 opt-level = 3
+
+# Slint's software renderer, patched for ClearType-style (LCD) text: it draws glyphs in
+# grayscale only, and the text looked un-antialiased next to the rest of Windows. It is the exact
+# crate source of the version Slint pins (see vendor/i-slint-renderer-software/Cargo.toml) with
+# every change marked `// HTTPorter patch`, under Slint's own licence (LICENSES/ in that folder).
+# Keep the package name, so `[profile.release.package.i-slint-renderer-software]` still applies.
+#
+# To redo this after a Slint upgrade: copy the new version's crate out of the cargo registry over
+# vendor/i-slint-renderer-software in a commit of its own, re-apply the `// HTTPorter patch` spots
+# (the previous commit shows them as a clean diff), and run the text tests.
+[patch.crates-io]
+i-slint-renderer-software = { path = "vendor/i-slint-renderer-software" }
