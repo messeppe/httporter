@@ -52,8 +52,9 @@ SLINT_NOT_TAKEN = ("GPL-3.0-only", "LicenseRef-Slint-Software-3.0")
 # Third-party crates vendored and modified in this repository (name -> note).
 VENDORED: dict[str, str] = {
     "i-slint-renderer-software": (
-        "Modified for HTTPorter: ClearType-style (LCD) text, vendored as "
-        "vendor/i-slint-renderer-software; every change is marked `// HTTPorter patch`."
+        "Modified for HTTPorter: glyphs rasterised with DirectWrite on Windows (ClearType-style "
+        "LCD text), vendored as vendor/i-slint-renderer-software; every change is marked "
+        "`// HTTPorter patch`."
     ),
 }
 
@@ -229,6 +230,20 @@ def build(cargo):
             "chosen": None,
             "note": None,
             "records": [add_text("OFL.txt", read_text(INTER_OFL), "Inter 4.001")],
+        }
+    )
+
+    # Windows Terminal's DirectWrite gamma correction, ported into the vendored software renderer.
+    terminal = "Windows Terminal DirectWrite correction, in vendor/i-slint-renderer-software"
+    entries.append(
+        {
+            "title": terminal,
+            "licence": "MIT",
+            "source": ["https://github.com/microsoft/terminal"],
+            "chosen": None,
+            "note": "The gamma ratios, contrast enhancement and alpha correction in draw_functions.rs "
+            "are ported from src/renderer/atlas/dwrite_helpers.cpp and dwrite_helpers.hlsl.",
+            "records": [add_text("LICENSE", normalise(WINDOWS_TERMINAL_MIT), "Windows Terminal")],
         }
     )
 
@@ -443,6 +458,30 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
 CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 MATERIALS OR THE USE OR OTHER DEALINGS IN THE MATERIALS.
+"""
+
+# Windows Terminal's LICENSE (repository root).
+WINDOWS_TERMINAL_MIT = """Copyright (c) Microsoft Corporation. All rights reserved.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 """
 
 EXTRA_NOTICES = {

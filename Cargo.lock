@@ -1947,6 +1947,7 @@ dependencies = [
  "slint-build",
  "tempfile",
  "tokio",
+ "windows",
  "windows-sys 0.61.2",
 ]
 
@@ -2427,6 +2428,7 @@ dependencies = [
  "num-traits",
  "skrifa",
  "swash",
+ "windows",
  "zeno",
 ]
 

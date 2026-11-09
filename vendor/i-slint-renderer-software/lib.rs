@@ -26,6 +26,9 @@ mod text_mode; // HTTPorter patch
 
 // HTTPorter patch: ClearType-style text, chosen by the application.
 pub use self::text_mode::{TextMode, set_text_mode};
+// HTTPorter patch: re-read Windows' gamma and contrast (see `fonts::directwrite`).
+#[cfg(all(windows, feature = "systemfonts"))]
+pub use self::fonts::directwrite::refresh_text_settings;
 
 use self::fonts::GlyphRenderer;
 pub use self::minimal_software_window::MinimalSoftwareWindow;
@@ -456,9 +459,10 @@ pub struct SoftwareRenderer {
     rendering_metrics_collector: Option<Rc<RenderingMetricsCollector>>,
     #[cfg(feature = "systemfonts")]
     text_layout_cache: sharedparley::TextLayoutCache,
-    // HTTPorter patch: the mode the last frame was painted in. When the mode changes, every
-    // window needs a full repaint, or text outside the next dirty region keeps the old look.
-    text_mode_painted: Cell<TextMode>,
+    // HTTPorter patch: the generation of the text settings the last frame was painted with.
+    // When they change, every window needs a full repaint, or text outside the next dirty
+    // region keeps the old look.
+    text_generation_painted: Cell<u32>,
 }
 
 impl Default for SoftwareRenderer {
@@ -472,7 +476,7 @@ impl Default for SoftwareRenderer {
             repaint_buffer_type: Default::default(),
             #[cfg(feature = "systemfonts")]
             text_layout_cache: Default::default(),
-            text_mode_painted: Default::default(), // HTTPorter patch
+            text_generation_painted: Default::default(), // HTTPorter patch
         }
     }
 }
@@ -529,11 +533,11 @@ impl SoftwareRenderer {
         self.rotation.get()
     }
 
-    // HTTPorter patch: a mode change must repaint the whole window. Called before each frame is
-    // planned, so `apply_dirty_region` sees the forced refresh.
+    // HTTPorter patch: a change of the text settings must repaint the whole window. Called
+    // before each frame is planned, so `apply_dirty_region` sees the forced refresh.
     fn sync_text_mode(&self) {
-        let mode = text_mode::text_mode();
-        if self.text_mode_painted.replace(mode) != mode {
+        let generation = text_mode::generation();
+        if self.text_generation_painted.replace(generation) != generation {
             self.partial_rendering_state.force_screen_refresh();
         }
     }
@@ -2382,6 +2386,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         dst_height: target_rect.size.height as _,
                         rotation: self.rotation.orientation,
                         tiling,
+                        glyph_blend: None, // HTTPorter patch
                     };
 
                     self.processor.process_target_texture(&t, clipped_target.cast());
@@ -2444,6 +2449,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         dst_height: target_rect.size.height as _,
                         rotation: self.rotation.orientation,
                         tiling,
+                        glyph_blend: None, // HTTPorter patch
                     };
 
                     self.processor.process_target_texture(&t, clipped_target.cast());
@@ -2567,7 +2573,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                             // color already is mixed with global alpha
                                             alpha: color.alpha(),
                                             rotation: self.rotation.orientation,
-                                            lcd: false, // HTTPorter patch
+                                            glyph_blend: None, // HTTPorter patch
                                             dx: scale_delta,
                                             dy: scale_delta,
                                             off_x: Fixed::try_from_fixed(off_x).unwrap(),
@@ -2616,6 +2622,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                             dst_height: target_rect.size.height as _,
                             rotation: self.rotation.orientation,
                             tiling: None,
+                            glyph_blend: None, // HTTPorter patch
                         };
 
                         self.processor.process_target_texture(&t, clipped_target.cast());
@@ -3168,6 +3175,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                     dst_height: height as _,
                     rotation: self.rotation.orientation,
                     tiling: None,
+                    glyph_blend: None, // HTTPorter patch
                 };
                 self.processor
                     .process_target_texture(&t, geometry.cast().transformed(self.rotation));
@@ -3364,18 +3372,15 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
         let global_offset: euclid::Vector2D<f32, PhysicalPx> =
             self.current_state.offset.to_vector().cast() * self.scale_factor;
 
-        // HTTPorter patch: the quarter-pixel bins are gone, see below.
+        const SUBPIXEL_BINS: i32 = fonts::vectorfont::SUBPIXEL_BIN_COUNT;
 
         let color = self.alpha_color(color);
-        // HTTPorter patch: ClearType-style text where it is safe, and hinted grayscale where
-        // it is not, as Windows does: translucent text (opacity or a colour with alpha, the
-        // renderer has no layers: opacity is multiplied into this colour) and rotated windows.
-        let raster = fonts::vectorfont::GlyphRaster {
-            lcd: text_mode::text_mode() != TextMode::Grayscale
-                && color.alpha() == 255
-                && self.rotation.orientation == RenderingRotation::NoRotation,
-            curve: fonts::vectorfont::CoverageCurve::for_text(color),
-        };
+        // HTTPorter patch: ClearType-style text where it is safe, and grayscale where it is not,
+        // as Windows does: translucent text (opacity or a colour with alpha, the renderer has no
+        // layers: opacity is multiplied into this colour) and rotated windows.
+        let lcd = text_mode::text_mode() != TextMode::Grayscale
+            && color.alpha() == 255
+            && self.rotation.orientation == RenderingRotation::NoRotation;
         let physical_clip: euclid::Rect<i32, PhysicalPx> =
             (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
                 * self.scale_factor)
@@ -3392,12 +3397,18 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
             let abs_x = global_offset.x + positioned_glyph.x;
             let abs_y = global_offset.y + positioned_glyph.y + y_offset.get();
 
-            // HTTPorter patch: hinted glyphs land on a whole pixel, as Windows draws them.
-            // (The original quantized the pen to quarter pixels and rendered the fraction into
-            // the coverage, which smeared stems over two columns.)
-            let dst_int_x = abs_x.round() as i32;
+            // Quantize the horizontal position to SUBPIXEL_BINS positions per pixel.
+            // The integer part is the blit origin; the fractional part is rendered
+            // into the glyph coverage (see `render_vector_glyph`) instead of being
+            // discarded. This keeps inter-glyph spacing even: snapping the pen to a
+            // whole pixel (truncate or round) redistributes the sub-pixel advances
+            // unevenly between neighboring glyph pairs.
+            let quantized_x = (abs_x * SUBPIXEL_BINS as f32).round() as i32;
+            let dst_int_x = quantized_x.div_euclid(SUBPIXEL_BINS);
+            let subpixel_bin = quantized_x.rem_euclid(SUBPIXEL_BINS) as u8;
 
-            let Some(glyph) = font.render_vector_glyph(id, raster, slint_context) else {
+            // HTTPorter patch: `lcd`
+            let Some(glyph) = font.render_vector_glyph(id, subpixel_bin, lcd, slint_context) else {
                 continue;
             };
 
@@ -3436,6 +3447,13 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
                 }
             };
 
+            // HTTPorter patch: DirectWrite's coverage gets the gamma and contrast correction.
+            #[cfg(windows)]
+            let glyph_blend =
+                glyph.gamma.map(|gamma| draw_functions::GlyphBlend::new(gamma, color, glyph.lcd));
+            #[cfg(not(windows))]
+            let glyph_blend = None;
+
             let t = target_pixel_buffer::DrawTextureArgs {
                 data,
                 colorize: Some(color),
@@ -3447,6 +3465,7 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
                 dst_height: target_rect.size.height as _,
                 rotation: self.rotation.orientation,
                 tiling: None,
+                glyph_blend, // HTTPorter patch
             };
 
             self.processor.process_target_texture(&t, clipped_target.cast());

@@ -495,19 +495,21 @@ fn follow_look(window: &SettingsWindow) {
     look.unwrap_or_else(Look::now).put(window.global::<Theme>());
 }
 
-/// Windows may have changed its text size, "Animation effects" or font smoothing (its settings
-/// changed, or the window came back to the front): all are read again, and if any changed, every
-/// window's `Theme` gets them; a new smoothing also repaints the windows, because no property of
-/// theirs changed.
+/// Windows may have changed its text size, "Animation effects" or font smoothing, gamma and
+/// contrast (its settings changed, or the window came back to the front): all are read again,
+/// and if any changed, every window's `Theme` gets them; new smoothing or gamma also repaints
+/// the windows, because no property of theirs changed.
 pub fn system_settings_changed() {
     let look = Look::now();
+    // "Adjust ClearType text": the software renderer re-reads the system's gamma and contrast.
+    let gamma_changed = !cfg!(test) && slint::platform::software_renderer::refresh_text_settings();
     LOOKS.with(|looks| {
         let mut looks = looks.borrow_mut();
-        if looks.shown == Some(look) {
+        if looks.shown == Some(look) && !gamma_changed {
             return;
         }
         looks.shown = Some(look);
-        let repaint = look.apply_smoothing();
+        let repaint = look.apply_smoothing() || gamma_changed;
         if let Some(ui) = looks.main.as_ref().and_then(slint::Weak::upgrade) {
             look.put(ui.global::<Theme>());
             if repaint {

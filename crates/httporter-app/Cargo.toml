@@ -39,5 +39,7 @@ slint-build.workspace = true
 
 [dev-dependencies]
 i-slint-backend-testing.workspace = true
+# The text tests compare the renderer's pixels with DirectWrite's own (Windows-only, like the app).
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_DirectWrite", "Win32_Graphics_Gdi"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }

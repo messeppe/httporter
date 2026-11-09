@@ -242,7 +242,7 @@ impl Scene {
                 // draw_texture_line), so it is not opaque.
                 texture.format == TexturePixelFormat::Rgb
                     && texture.extra.alpha == 255
-                    && !texture.extra.lcd // HTTPorter patch
+                    && texture.extra.glyph_blend.is_none() // HTTPorter patch
             }
             SceneCommand::SharedBuffer { shared_buffer_index } => {
                 let buffer = &self.vectors.shared_buffers[*shared_buffer_index as usize];
@@ -373,9 +373,10 @@ pub struct SceneTextureExtra {
     pub colorize: Color,
     pub alpha: u8,
     pub rotation: RenderingRotation,
-    /// HTTPorter patch: the texture is a glyph with one coverage byte per channel, in
-    /// `TexturePixelFormat::Rgb` layout, to be blended per channel in the `colorize` colour.
-    pub lcd: bool,
+    /// HTTPorter patch: the texture is a DirectWrite glyph: its coverage is corrected for
+    /// gamma and contrast. In `TexturePixelFormat::Rgb` layout it has one coverage byte per
+    /// channel, blended per channel in the `colorize` colour.
+    pub glyph_blend: Option<super::draw_functions::GlyphBlend>,
 }
 
 impl SceneTextureExtra {
@@ -431,7 +432,7 @@ impl SceneTextureExtra {
                 colorize: texture.colorize.unwrap_or_default(),
                 alpha: texture.alpha,
                 rotation: texture.rotation,
-                lcd: texture.is_lcd(), // HTTPorter patch
+                glyph_blend: texture.glyph_blend, // HTTPorter patch
                 dx: Fixed::try_from_fixed(dx).ok()?,
                 dy: Fixed::try_from_fixed(dy).ok()?,
                 off_x: Fixed::try_from_fixed(dx * offset.x).ok()?,

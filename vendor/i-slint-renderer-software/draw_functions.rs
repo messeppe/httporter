@@ -29,7 +29,8 @@ pub(super) fn draw_texture_line(
         data,
         format,
         pixel_stride,
-        extra: super::SceneTextureExtra { colorize, alpha, rotation, dx, dy, off_x, off_y, lcd }, // HTTPorter patch: lcd
+        extra:
+            super::SceneTextureExtra { colorize, alpha, rotation, dx, dy, off_x, off_y, glyph_blend }, // HTTPorter patch: glyph_blend
     } = *texture;
 
     let source_size = texture.source_size().cast::<i32>();
@@ -89,7 +90,7 @@ pub(super) fn draw_texture_line(
                 data,
                 alpha,
                 colorize,
-                lcd, // HTTPorter patch
+                glyph_blend, // HTTPorter patch
                 (pixel_stride as usize, dy),
                 #[inline(always)]
                 |bpp| {
@@ -155,7 +156,7 @@ pub(super) fn draw_texture_line(
                 data,
                 alpha,
                 colorize,
-                lcd, // HTTPorter patch
+                glyph_blend, // HTTPorter patch
                 (stride, dy),
                 #[inline(always)]
                 |_| {
@@ -190,13 +191,17 @@ pub(super) fn draw_texture_line(
         data: &[u8],
         alpha: u8,
         color: Color,
-        lcd: bool, // HTTPorter patch
+        glyph_blend: Option<GlyphBlend>, // HTTPorter patch
         (stride, delta): (usize, Fixed<i32, 8>),
         mut pos: impl FnMut(usize) -> (usize, u8, u8),
     ) {
-        // HTTPorter patch: glyphs with separate coverage for red, green and blue.
-        if lcd {
-            blend_lcd_line(line_buffer, data, color, pos);
+        // HTTPorter patch: a DirectWrite glyph, with the gamma and contrast correction.
+        if let Some(blend) = glyph_blend {
+            if format == TexturePixelFormat::Rgb {
+                blend_lcd_line(line_buffer, data, color, blend, pos);
+            } else {
+                blend_gray_glyph_line(line_buffer, data, color, alpha, blend, pos);
+            }
             return;
         }
         match format {
@@ -362,27 +367,28 @@ impl ByteChannels {
         Some(Self { red, green, blue, alpha })
     }
 
-    /// Blends `fg` over the pixel with one coverage per channel: `out = dst + (fg - dst) * cov`.
-    /// A destination that is not opaque keeps premultiplied blending (average coverage).
+    /// Replaces each colour channel of the pixel with what `mix` makes of its old value.
+    /// A destination that is not opaque keeps premultiplied blending, through `fallback`.
     #[inline]
-    fn blend<T: TargetPixel>(&self, pixel: &mut T, fg: [u8; 3], cov: [u8; 3]) {
+    fn blend<T: TargetPixel>(
+        &self,
+        pixel: &mut T,
+        mix: impl Fn(u8, usize) -> u8,
+        fallback: impl FnOnce(&mut T),
+    ) {
         let ptr = (pixel as *mut T).cast::<u8>();
         // SAFETY: `of::<T>` found these offsets for this very `T`, so they are within its size,
         // and the bytes of a pixel are plain channel values. `ptr` is not used after `pixel` is.
         #[allow(unsafe_code)]
         unsafe {
             if self.alpha.is_some_and(|i| *ptr.add(i) != 0xff) {
-                pixel.blend(average_coverage(fg, cov));
+                fallback(pixel);
                 return;
             }
-            let mix = |index: usize, fg: u8, cov: u8| {
-                let p = ptr.add(index);
-                let cov = cov as u32;
-                *p = ((*p as u32 * (255 - cov) + fg as u32 * cov + 127) / 255) as u8;
-            };
-            mix(self.red, fg[0], cov[0]);
-            mix(self.green, fg[1], cov[1]);
-            mix(self.blue, fg[2], cov[2]);
+            for (channel, offset) in [self.red, self.green, self.blue].into_iter().enumerate() {
+                let byte = ptr.add(offset);
+                *byte = mix(*byte, channel);
+            }
         }
     }
 }
@@ -394,31 +400,227 @@ fn average_coverage(fg: [u8; 3], cov: [u8; 3]) -> PremultipliedRgbaColor {
     PremultipliedRgbaColor::premultiply(Color::from_argb_u8(alpha, fg[0], fg[1], fg[2]))
 }
 
+/// HTTPorter patch: Windows' text settings: what the correction below needs from them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TextGamma {
+    pub gamma: f32,
+    pub gamma_ratios: [f32; 4],
+    pub enhanced_contrast: f32,
+    pub grayscale_enhanced_contrast: f32,
+    pub cleartype_level: f32,
+    pub tables: &'static GammaTables,
+}
+
+/// HTTPorter patch: 8-bit channel values to gamma-linear light and back, for the ClearType
+/// blend, per pixel in `blend_lcd_line`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct GammaTables {
+    to_linear: [f32; 256],
+    from_linear: alloc::vec::Vec<u8>,
+}
+
+impl GammaTables {
+    /// Linear light is quantized finely enough to round-trip within a level at the dark end.
+    const STEPS: usize = 1 << 14;
+
+    pub(crate) fn new(gamma: f32) -> Self {
+        let to_linear = core::array::from_fn(|i| (i as f32 / 255.0).powf(gamma));
+        let from_linear = (0..=Self::STEPS)
+            .map(|i| ((i as f32 / Self::STEPS as f32).powf(1.0 / gamma) * 255.0 + 0.5) as u8)
+            .collect();
+        Self { to_linear, from_linear }
+    }
+
+    #[inline]
+    fn encode(&self, linear: f32) -> u8 {
+        self.from_linear[(linear.clamp(0.0, 1.0) * Self::STEPS as f32 + 0.5) as usize]
+    }
+}
+
+// HTTPorter patch: the correction DirectWrite applies when it blends text itself, which
+// CreateAlphaTexture leaves out. The contrast enhancement and, for grayscale, the alpha
+// correction are ported from Windows Terminal (as Zed does):
+// https://github.com/microsoft/terminal/blob/main/src/renderer/atlas/dwrite_helpers.cpp and
+// dwrite_helpers.hlsl, Copyright (c) Microsoft Corporation, MIT License (the text is in
+// THIRD-PARTY-NOTICES). The "thin font" contrast boost is not ported: the fonts it is for
+// (Courier New and the like) are not used here.
+//
+// ClearType is blended differently: `IDWriteBitmapRenderTarget::DrawGlyphRun` does the real
+// gamma-correct blend against the destination pixel, which Terminal's shader can't read and
+// approximates from the text colour alone (up to 22 levels off, measured against DrawGlyphRun).
+// This renderer can read the destination, so it does what Windows does.
+
+/// Terminal's `DWrite_GetGammaRatios`: the constants for [`GlyphBlend`] at a given gamma.
+pub(crate) fn gamma_ratios(gamma: f32) -> [f32; 4] {
+    const GAMMA_INCORRECT_TARGET_RATIOS: [[f32; 4]; 13] = [
+        [0.0000 / 4., 0.0000 / 4., 0.0000 / 4., 0.0000 / 4.], // gamma = 1.0
+        [0.0166 / 4., -0.0807 / 4., 0.2227 / 4., -0.0751 / 4.], // gamma = 1.1
+        [0.0350 / 4., -0.1760 / 4., 0.4325 / 4., -0.1370 / 4.], // gamma = 1.2
+        [0.0543 / 4., -0.2821 / 4., 0.6302 / 4., -0.1876 / 4.], // gamma = 1.3
+        [0.0739 / 4., -0.3963 / 4., 0.8167 / 4., -0.2287 / 4.], // gamma = 1.4
+        [0.0933 / 4., -0.5161 / 4., 0.9926 / 4., -0.2616 / 4.], // gamma = 1.5
+        [0.1121 / 4., -0.6395 / 4., 1.1588 / 4., -0.2877 / 4.], // gamma = 1.6
+        [0.1300 / 4., -0.7649 / 4., 1.3159 / 4., -0.3080 / 4.], // gamma = 1.7
+        [0.1469 / 4., -0.8911 / 4., 1.4644 / 4., -0.3234 / 4.], // gamma = 1.8
+        [0.1627 / 4., -1.0170 / 4., 1.6051 / 4., -0.3347 / 4.], // gamma = 1.9
+        [0.1773 / 4., -1.1420 / 4., 1.7385 / 4., -0.3426 / 4.], // gamma = 2.0
+        [0.1908 / 4., -1.2652 / 4., 1.8650 / 4., -0.3476 / 4.], // gamma = 2.1
+        [0.2031 / 4., -1.3864 / 4., 1.9851 / 4., -0.3501 / 4.], // gamma = 2.2
+    ];
+    const NORM13: f32 = (0x10000 as f64 / (255 * 255) as f64 * 4.0) as f32;
+    const NORM24: f32 = (0x100 as f64 / 255 as f64 * 4.0) as f32;
+
+    let index = ((gamma * 10.0 + 0.5) as isize).clamp(10, 22) - 10;
+    let ratios = &GAMMA_INCORRECT_TARGET_RATIOS[index as usize];
+    [NORM13 * ratios[0], NORM24 * ratios[1], NORM13 * ratios[2], NORM24 * ratios[3]]
+}
+
+/// Terminal's `DWrite_ApplyLightOnDarkContrastAdjustment`.
+fn light_on_dark_contrast(enhanced_contrast: f32, color: [f32; 3]) -> f32 {
+    let lightness = 0.30 * color[0] + 0.59 * color[1] + 0.11 * color[2];
+    enhanced_contrast * (4.0 * (0.75 - lightness)).clamp(0.0, 1.0)
+}
+
+/// Terminal's `DWrite_EnhanceContrast`.
+fn enhance_contrast(alpha: f32, k: f32) -> f32 {
+    alpha * (k + 1.0) / (alpha * k + 1.0)
+}
+
+/// Terminal's `DWrite_ApplyAlphaCorrection`.
+fn apply_alpha_correction(a: f32, f: f32, g: [f32; 4]) -> f32 {
+    a + a * (1.0 - a) * ((g[0] * f + g[1]) * a + (g[2] * f + g[3]))
+}
+
+/// HTTPorter patch: the correction for one text colour; computed once per glyph run.
+#[derive(Clone, Copy, Debug)]
+pub struct GlyphBlend {
+    contrast: f32,
+    /// The value each channel's correction depends on: the channel's own for ClearType, the
+    /// colour's intensity for grayscale, as Terminal does it.
+    f: [f32; 3],
+    gamma_ratios: [f32; 4],
+    cleartype_level: f32,
+    /// The text colour in gamma-linear light, and the tables to mix in that space.
+    fg_linear: [f32; 3],
+    tables: &'static GammaTables,
+}
+
+impl GlyphBlend {
+    pub(crate) fn new(gamma: TextGamma, color: Color, lcd: bool) -> Self {
+        let channel = |c: u8| c as f32 / 255.0;
+        let rgb = [channel(color.red()), channel(color.green()), channel(color.blue())];
+        if lcd {
+            Self {
+                contrast: light_on_dark_contrast(gamma.enhanced_contrast, rgb),
+                f: rgb,
+                gamma_ratios: gamma.gamma_ratios,
+                cleartype_level: gamma.cleartype_level,
+                fg_linear: [color.red(), color.green(), color.blue()]
+                    .map(|c| gamma.tables.to_linear[c as usize]),
+                tables: gamma.tables,
+            }
+        } else {
+            // Terminal's `DWrite_CalcColorIntensity`.
+            let intensity = 0.25 * rgb[0] + 0.5 * rgb[1] + 0.25 * rgb[2];
+            Self {
+                contrast: light_on_dark_contrast(gamma.grayscale_enhanced_contrast, rgb),
+                f: [intensity; 3],
+                gamma_ratios: gamma.gamma_ratios,
+                cleartype_level: 1.0,
+                fg_linear: [0.0; 3],
+                tables: gamma.tables,
+            }
+        }
+    }
+
+    /// The corrected coverage of one channel, 0 to 255.
+    #[inline]
+    fn correct(&self, coverage: u8, channel: usize) -> u8 {
+        let alpha = coverage as f32 / 255.0;
+        let contrasted = enhance_contrast(alpha, self.contrast);
+        let corrected = apply_alpha_correction(contrasted, self.f[channel], self.gamma_ratios);
+        (corrected.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    }
+
+    /// ClearType's blend of one channel: the gamma-correct mix of the text colour and the
+    /// destination, with the channel's contrast-enhanced coverage.
+    #[inline]
+    fn lcd_channel(&self, dst: u8, coverage: f32, channel: usize) -> u8 {
+        let a = enhance_contrast(coverage, self.contrast);
+        self.tables.encode(self.fg_linear[channel] * a + self.tables.to_linear[dst as usize] * (1.0 - a))
+    }
+
+    /// The ClearType level (0 is grayscale, 1 is full per-channel coverage).
+    #[inline]
+    fn level(&self, cov: [u8; 3]) -> [f32; 3] {
+        let average = (cov[0] as f32 + cov[1] as f32 + cov[2] as f32) / 3.0;
+        let level = self.cleartype_level;
+        [0, 1, 2].map(|c| average + (cov[c] as f32 - average) * level)
+    }
+}
+
 /// HTTPorter patch: one line of a glyph with three coverage bytes per pixel, in the given color.
 /// Only ever used with opaque text (`draw_glyph_run` falls back to grayscale below alpha 255).
 fn blend_lcd_line<T: TargetPixel>(
     line_buffer: &mut [T],
     data: &[u8],
     color: Color,
+    blend: GlyphBlend,
     mut pos: impl FnMut(usize) -> (usize, u8, u8),
 ) {
     let fg = [color.red(), color.green(), color.blue()];
+    // Without byte channels (RGB565 and the like) there is no destination to read: the average
+    // coverage, with the correction Terminal does without one.
+    let average = |cov: [u8; 3]| {
+        let levelled = blend.level(cov);
+        average_coverage(fg, [0, 1, 2].map(|c| blend.correct((levelled[c] + 0.5) as u8, c)))
+    };
     match ByteChannels::of::<T>() {
         Some(channels) => {
             for pix in line_buffer {
                 let p = pos(3).0;
                 let cov = [data[p], data[p + 1], data[p + 2]];
                 if cov != [0, 0, 0] {
-                    channels.blend(pix, fg, cov);
+                    let levelled = blend.level(cov);
+                    channels.blend(
+                        pix,
+                        |dst, c| blend.lcd_channel(dst, levelled[c] / 255.0, c),
+                        |pix| pix.blend(average(cov)),
+                    );
                 }
             }
         }
         None => {
             for pix in line_buffer {
                 let p = pos(3).0;
-                pix.blend(average_coverage(fg, [data[p], data[p + 1], data[p + 2]]));
+                let cov = [data[p], data[p + 1], data[p + 2]];
+                pix.blend(average(cov));
             }
         }
+    }
+}
+
+/// HTTPorter patch: one line of a DirectWrite grayscale glyph, with the correction applied.
+fn blend_gray_glyph_line(
+    line_buffer: &mut [impl TargetPixel],
+    data: &[u8],
+    color: Color,
+    alpha: u8,
+    blend: GlyphBlend,
+    mut pos: impl FnMut(usize) -> (usize, u8, u8),
+) {
+    for pix in line_buffer {
+        let p = pos(1).0;
+        if data[p] == 0 {
+            continue;
+        }
+        let corrected = blend.correct(data[p], 0);
+        pix.blend(PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+            ((corrected as u16 * alpha as u16) / 255) as u8,
+            color.red(),
+            color.green(),
+            color.blue(),
+        )));
     }
 }
 

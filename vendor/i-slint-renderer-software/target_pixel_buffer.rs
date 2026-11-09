@@ -86,6 +86,9 @@ pub struct DrawTextureArgs {
 
     /// If the texture is to be tiled, this contains the information about the tiling
     pub tiling: Option<TilingInfo>,
+
+    /// HTTPorter patch: set for a DirectWrite glyph, whose coverage is corrected when blended.
+    pub glyph_blend: Option<super::draw_functions::GlyphBlend>,
 }
 
 impl DrawTextureArgs {
@@ -135,14 +138,6 @@ impl DrawTextureArgs {
                 }
             }
         }
-    }
-
-    /// HTTPorter patch: whether the source is a glyph with per-channel coverage.
-    pub(super) fn is_lcd(&self) -> bool {
-        matches!(
-            &self.data,
-            TextureDataContainer::Shared { buffer: SharedBufferData::LcdMap { .. }, .. }
-        )
     }
 
     pub(super) fn source_size(&self) -> PhysicalSize {

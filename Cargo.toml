@@ -103,9 +103,9 @@ opt-level = 3
 [profile.release.package.glow]
 opt-level = 3
 
-# Slint's software renderer, patched for ClearType-style (LCD) text: it draws glyphs in
-# grayscale only, and the text looked un-antialiased next to the rest of Windows. It is the exact
-# crate source of the version Slint pins (see vendor/i-slint-renderer-software/Cargo.toml) with
+# Slint's software renderer, patched so that on Windows the glyphs are rasterised by DirectWrite
+# (ClearType, Windows' own shapes and spacing, as Windows Terminal, Zed, Alacritty and the browsers
+# do) instead of swash. It is the exact crate source of the version Slint pins (see vendor/i-slint-renderer-software/Cargo.toml) with
 # every change marked `// HTTPorter patch`, under Slint's own licence (LICENSES/ in that folder).
 # Keep the package name, so `[profile.release.package.i-slint-renderer-software]` still applies.
 #

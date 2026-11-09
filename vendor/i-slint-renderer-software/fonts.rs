@@ -51,6 +51,10 @@ pub struct RenderableVectorGlyph {
     pub glyph_origin_x: f32,
     /// HTTPorter patch: `alpha_map` holds three coverage bytes (R, G, B) per pixel.
     pub lcd: bool,
+    /// HTTPorter patch: the gamma and contrast to correct this glyph's coverage with: `Some`
+    /// for a DirectWrite glyph, `None` for one from swash.
+    #[cfg(windows)]
+    pub gamma: Option<crate::draw_functions::TextGamma>,
 }
 
 #[cfg(feature = "systemfonts")]
@@ -75,6 +79,10 @@ pub(super) use i_slint_core::textlayout::DEFAULT_FONT_SIZE;
 mod pixelfont;
 #[cfg(feature = "systemfonts")]
 pub mod vectorfont;
+
+// HTTPorter patch: Windows rasterises its own glyphs.
+#[cfg(all(windows, feature = "systemfonts"))]
+pub mod directwrite;
 
 #[cfg(feature = "systemfonts")]
 pub mod systemfonts;

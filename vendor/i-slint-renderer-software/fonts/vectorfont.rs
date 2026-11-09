@@ -20,58 +20,17 @@ struct FontUnit;
 type FontLength = euclid::Length<i32, FontUnit>;
 type FontScaleFactor = euclid::Scale<f32, FontUnit, PhysicalPx>;
 
-// HTTPorter patch: the glyph is hinted and placed on a whole pixel (see `draw_glyph_run`), so the
-// sub-pixel bins (SUBPIXEL_BIN_COUNT) are gone.
-
-/// HTTPorter patch: how a glyph's coverage is rasterised and shaped.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct GlyphRaster {
-    /// Per-channel coverage (ClearType-style) rather than one coverage per pixel.
-    pub lcd: bool,
-    /// The coverage curve, chosen by the text colour.
-    pub curve: CoverageCurve,
-}
-
-/// HTTPorter patch: the curve applied to the coverage, `cov^(1/boost)`, chosen by the luminance
-/// of the text colour because the same curve cannot match Windows for both polarities: light
-/// text on a dark background needs more ink than the linear blend gives, dark text on a light
-/// background slightly less (measured against GDI+ ClearType for both themes).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum CoverageCurve {
-    /// Light text (usually on dark): the boost the user chose, next to real ClearType.
-    LightText,
-    /// Dark text (usually on light).
-    DarkText,
-}
-
-impl CoverageCurve {
-    const LIGHT_BOOST: f32 = 1.25;
-    const DARK_BOOST: f32 = 0.95;
-
-    pub(crate) fn for_text(color: i_slint_core::Color) -> Self {
-        let luma = 299 * color.red() as u32 + 587 * color.green() as u32 + 114 * color.blue() as u32;
-        if luma >= 128 * 1000 { Self::LightText } else { Self::DarkText }
-    }
-
-    fn table(self) -> &'static [u8; 256] {
-        static LIGHT: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
-        static DARK: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
-        let (cell, boost) = match self {
-            Self::LightText => (&LIGHT, Self::LIGHT_BOOST),
-            Self::DarkText => (&DARK, Self::DARK_BOOST),
-        };
-        cell.get_or_init(|| {
-            core::array::from_fn(|i| {
-                let cov = (i as f32 / 255.0).powf(1.0 / boost);
-                (cov * 255.0).round().clamp(0.0, 255.0) as u8
-            })
-        })
-    }
-}
+/// Number of horizontal sub-pixel positions a glyph can be placed at. The
+/// shaper produces sub-pixel accurate pen positions, but glyph bitmaps live on
+/// the integer pixel grid; rendering each glyph at the nearest 1/N pixel bin
+/// (instead of snapping the pen to a whole pixel) keeps inter-glyph spacing
+/// even. 4 bins (quarter-pixel) is enough to remove the visible unevenness at
+/// UI text sizes while keeping the glyph cache small.
+pub(crate) const SUBPIXEL_BIN_COUNT: i32 = 4;
 
 /// Cache key includes blob id, font index, pixel size, glyph id, a hash of normalized
 /// variation coordinates (so different variable font instances produce distinct cache
-/// entries) and the way the glyph is rasterised (HTTPorter patch).
+/// entries), the horizontal sub-pixel bin and (HTTPorter patch) whether it is an LCD map.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct GlyphCacheKey {
     /// Font blob id.
@@ -84,8 +43,10 @@ struct GlyphCacheKey {
     glyph_id: core::num::NonZeroU16,
     /// Hash of the normalized variation coordinates.
     coords_hash: u64,
-    /// HTTPorter patch: LCD or grayscale, and the coverage curve.
-    raster: GlyphRaster,
+    /// Horizontal sub-pixel bin.
+    subpixel_bin: u8,
+    /// HTTPorter patch: three coverage bytes per pixel rather than one.
+    lcd: bool,
 }
 
 struct RenderableGlyphWeightScale;
@@ -112,9 +73,9 @@ i_slint_core::thread_local!(static GLYPH_CACHE: core::cell::RefCell<GlyphCache> 
         )
     )
 );
-// HTTPorter patch: the text mode the cached glyphs were made for.
-i_slint_core::thread_local!(static GLYPH_CACHE_MODE: core::cell::Cell<crate::TextMode> =
-    core::cell::Cell::new(crate::TextMode::default()));
+// HTTPorter patch: the generation of the text settings the cached glyphs were made for.
+i_slint_core::thread_local!(static GLYPH_CACHE_GENERATION: core::cell::Cell<u32> =
+    const { core::cell::Cell::new(0) });
 
 pub struct VectorFont {
     font_index: u32,
@@ -220,15 +181,16 @@ impl VectorFont {
     pub fn render_vector_glyph(
         &self,
         glyph_id: core::num::NonZeroU16,
-        raster: GlyphRaster, // HTTPorter patch: replaces the sub-pixel bin.
+        subpixel_bin: u8,
+        lcd: bool, // HTTPorter patch
         slint_context: &i_slint_core::SlintContext,
     ) -> Option<RenderableVectorGlyph> {
         GLYPH_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
 
-            // HTTPorter patch: a mode change drops the maps made for the old mode.
-            let mode = crate::text_mode::text_mode();
-            if GLYPH_CACHE_MODE.with(|m| m.replace(mode)) != mode {
+            // HTTPorter patch: a change of the text settings drops the maps made for the old ones.
+            let generation = crate::text_mode::generation();
+            if GLYPH_CACHE_GENERATION.with(|g| g.replace(generation)) != generation {
                 cache.clear();
             }
 
@@ -238,11 +200,51 @@ impl VectorFont {
                 pixel_size: self.pixel_size,
                 glyph_id,
                 coords_hash: self.coords_hash,
-                raster,
+                subpixel_bin,
+                lcd,
             };
 
             if let Some(entry) = cache.get(&cache_key) {
                 return Some(entry.clone());
+            }
+
+            let subpixel_offset_x = subpixel_bin as f32 / SUBPIXEL_BIN_COUNT as f32;
+
+            // HTTPorter patch: on Windows the glyph comes from DirectWrite. A face it can't
+            // handle (a variable font instance other than the default, or one it fails to load)
+            // keeps the swash path below, in grayscale.
+            #[cfg(windows)]
+            let directwrite = self
+                .normalized_coords
+                .iter()
+                .all(|&coord| coord == 0)
+                .then(|| {
+                    super::directwrite::rasterize(
+                        &self.font_blob,
+                        self.font_index,
+                        self.pixel_size.get() as f32,
+                        glyph_id.get(),
+                        subpixel_offset_x,
+                        lcd,
+                        crate::text_mode::text_mode() == crate::TextMode::LcdBgr,
+                    )
+                })
+                .flatten();
+            #[cfg(windows)]
+            if let Some(raster) = directwrite {
+                let glyph = RenderableVectorGlyph {
+                    x: Fixed::from_integer(raster.left),
+                    y: Fixed::from_integer(raster.top - raster.height as i32),
+                    width: PhysicalLength::new(raster.width.try_into().unwrap()),
+                    height: PhysicalLength::new(raster.height.try_into().unwrap()),
+                    alpha_map: raster.data.into(),
+                    pixel_stride: raster.width.try_into().unwrap(),
+                    glyph_origin_x: raster.left as f32,
+                    lcd: raster.lcd,
+                    gamma: super::directwrite::current_gamma(),
+                };
+                cache.put_with_weight(cache_key, glyph.clone()).ok();
+                return Some(glyph);
             }
 
             let glyph = {
@@ -251,41 +253,15 @@ impl VectorFont {
                 let mut scaler = ctx
                     .builder(font_ref)
                     .size(self.pixel_size.get() as f32)
-                    .hint(true) // HTTPorter patch
                     .normalized_coords(&self.normalized_coords)
                     .build();
-                // HTTPorter patch: per-channel coverage for ClearType-style text; no sub-pixel
-                // offset, the glyph lands on a whole pixel.
                 let image = swash::scale::Render::new(&[swash::scale::Source::Outline])
-                    .format(if raster.lcd {
-                        swash::zeno::Format::Subpixel
-                    } else {
-                        swash::zeno::Format::Alpha
-                    })
+                    .format(swash::zeno::Format::Alpha)
+                    .offset(swash::zeno::Vector::new(subpixel_offset_x, 0.0))
                     .render(&mut scaler, glyph_id.get())?;
 
                 let placement = image.placement;
-                // HTTPorter patch: the coverage curve, and three bytes per pixel for LCD maps
-                // (swash delivers RGBA; BGR panels swap red and blue here, at the source).
-                let curve = raster.curve.table();
-                let lcd = raster.lcd && image.content == swash::scale::image::Content::SubpixelMask;
-                let alpha_map: Rc<[u8]> = if lcd {
-                    let bgr = mode == crate::TextMode::LcdBgr;
-                    image
-                        .data
-                        .chunks_exact(4)
-                        .flat_map(|p| {
-                            let (r, g, b) = (
-                                curve[p[0] as usize],
-                                curve[p[1] as usize],
-                                curve[p[2] as usize],
-                            );
-                            if bgr { [b, g, r] } else { [r, g, b] }
-                        })
-                        .collect()
-                } else {
-                    image.data.iter().map(|&c| curve[c as usize]).collect()
-                };
+                let alpha_map: Rc<[u8]> = image.data.into();
 
                 Some(RenderableVectorGlyph {
                     x: Fixed::from_integer(placement.left),
@@ -295,7 +271,9 @@ impl VectorFont {
                     alpha_map,
                     pixel_stride: placement.width.try_into().unwrap(),
                     glyph_origin_x: placement.left as f32,
-                    lcd, // HTTPorter patch
+                    lcd: false, // HTTPorter patch
+                    #[cfg(windows)]
+                    gamma: None, // HTTPorter patch: no correction for swash's coverage
                 })
             };
 
@@ -380,9 +358,8 @@ impl super::GlyphRenderer for VectorFont {
         glyph_id: core::num::NonZeroU16,
         slint_context: &i_slint_core::SlintContext,
     ) -> Option<super::RenderableGlyph> {
-        // HTTPorter patch: this non-parley path takes plain alpha maps; the curve for light text.
-        let raster = GlyphRaster { lcd: false, curve: CoverageCurve::LightText };
-        self.render_vector_glyph(glyph_id, raster, slint_context).map(|glyph| super::RenderableGlyph {
+        // HTTPorter patch: this non-parley path takes plain alpha maps.
+        self.render_vector_glyph(glyph_id, 0, false, slint_context).map(|glyph| super::RenderableGlyph {
             x: glyph.x,
             y: glyph.y,
             width: glyph.width,
