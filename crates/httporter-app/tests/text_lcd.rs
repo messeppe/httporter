@@ -276,7 +276,22 @@ fn windows_row(
         let face = factory
             .CreateFontFace(face_type, &[Some(file)], 0, DWRITE_FONT_SIMULATIONS_NONE)
             .unwrap();
-        let params = factory.CreateRenderingParams().unwrap();
+        // Windows' own settings, with the mode and the hinting the renderer uses at this size.
+        let system = factory.CreateRenderingParams().unwrap();
+        let params = factory
+            .CreateCustomRenderingParams(
+                system.GetGamma(),
+                system.GetEnhancedContrast(),
+                system
+                    .cast::<IDWriteRenderingParams1>()
+                    .unwrap()
+                    .GetGrayscaleEnhancedContrast(),
+                system.GetClearTypeLevel(),
+                system.GetPixelGeometry(),
+                DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
+                DWRITE_GRID_FIT_MODE_DISABLED,
+            )
+            .unwrap();
         let interop = factory.GetGdiInterop().unwrap();
         let target = interop
             .CreateBitmapRenderTarget(None, WIDTH, HEIGHT)

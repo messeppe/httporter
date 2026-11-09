@@ -37,8 +37,22 @@ export component ToolButton inherits Rectangle {
     in property <string> description;
     in property <bool> enabled: true;
     in property <bool> active: false;
+    // The size of the icon (the mockup's stepper has the 14 px `.ic.sm`).
+    in property <length> icon-size: 16px;
+    // Held down, the button presses itself again and again, as a stepper's buttons do.
+    in property <bool> repeats: false;
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
+
+    property <bool> held: area.pressed && root.enabled;
+    // A held press has begun repeating: its release must not count as one more press.
+    property <bool> repeating: false;
+
+    changed held => {
+        if (!self.held) {
+            root.repeating = false;
+        }
+    }
 
     width: 32px;
     height: 28px;
@@ -59,8 +73,23 @@ export component ToolButton inherits Rectangle {
     Image {
         source: root.icon;
         colorize: Theme.label;
-        width: 16px;
-        height: 16px;
+        width: root.icon-size;
+        height: root.icon-size;
+    }
+
+    Timer {
+        interval: 400ms;
+        running: root.repeats && root.held && !root.repeating;
+        triggered => {
+            root.repeating = true;
+            root.clicked();
+        }
+    }
+
+    Timer {
+        interval: 60ms;
+        running: root.repeats && root.held && root.repeating;
+        triggered => { root.clicked(); }
     }
 
     FocusRing {
@@ -86,29 +115,38 @@ export component ToolButton inherits Rectangle {
 
     area := TouchArea {
         enabled: root.enabled;
-        clicked => { root.clicked(); }
+        clicked => {
+            if (!root.repeating) {
+                root.clicked();
+            }
+        }
     }
 }
 
 // 28 px labelled button (mockup `.btn`); `primary` fills with the accent colour, `destructive` writes
-// the label in red (mockup `.btn.destructive`).
+// the label in red (mockup `.btn.destructive`), `quiet` has no fill or outline and an accent label
+// (mockup `.btn.quiet`), `hairline` has the mockup's thin outline (the Settings window).
 // Keyboard behaviour is the same as ToolButton.
 export component CapsuleButton inherits Rectangle {
     in property <string> text;
     in property <image> icon;
     in property <bool> primary: false;
     in property <bool> destructive: false;
+    in property <bool> quiet: false;
+    in property <bool> hairline: false;
     in property <bool> enabled: true;
     out property <bool> has-focus: key-focus.has-focus;
     callback clicked();
 
+    property <color> ink: root.primary ? Theme.on-accent : (root.quiet ? Theme.accent-text : (root.destructive ? Theme.red : Theme.label));
+
     height: Theme.control-height;
     border-radius: self.height / 2;
-    background: root.primary ? Theme.accent : Theme.control;
+    background: root.quiet ? transparent : (root.primary ? Theme.accent : Theme.control);
     // A plain button is outlined in `field-border` (3:1 against the surface in both themes): the
     // white face of `control` has no other edge on a white sheet. The primary one is a fill.
-    border-width: root.primary ? 0.5px : 1px;
-    border-color: root.primary ? transparent : Theme.field-border;
+    border-width: root.quiet ? 0px : (root.primary ? 0.5px : (root.hairline ? 1phx : 1px));
+    border-color: root.primary ? transparent : (root.hairline ? Theme.control-border : Theme.field-border);
     opacity: root.enabled ? 1 : 0.45;
     forward-focus: key-focus;
     accessible-role: button;
@@ -129,14 +167,14 @@ export component CapsuleButton inherits Rectangle {
         if root.icon.width > 0: VCenter {
             Image {
                 source: root.icon;
-                colorize: root.primary ? Theme.on-accent : (root.destructive ? Theme.red : Theme.label);
+                colorize: root.ink;
                 width: 16px;
                 height: 16px;
             }
         }
         Text {
             text: root.text;
-            color: root.primary ? Theme.on-accent : (root.destructive ? Theme.red : Theme.label);
+            color: root.ink;
             font-size: Theme.font-body;
             font-weight: root.primary ? Theme.weight-semibold : Theme.weight-medium;
             vertical-alignment: center;

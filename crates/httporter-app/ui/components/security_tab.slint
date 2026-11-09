@@ -39,12 +39,15 @@ component ResetAlert inherits Rectangle {
                 spacing: 8px;
 
                 reset-button := CapsuleButton {
+
+                    hairline: true;
                     horizontal-stretch: 1;
                     text: @tr("Reset HTTPorter");
                     destructive: true;
                     clicked => { root.confirmed(); }
                 }
                 cancel-button := CapsuleButton {
+                    hairline: true;
                     horizontal-stretch: 1;
                     text: @tr("Cancel");
                     primary: true;
@@ -94,6 +97,8 @@ export component SecurityTab inherits Rectangle {
                         help: @tr("Stored in Windows Credential Manager, never in HTTPorter's files.");
 
                         CapsuleButton {
+
+                            hairline: true;
                             text: @tr("Open Credential Manager");
                             clicked => { root.open-credential-manager(); }
                         }
@@ -104,6 +109,8 @@ export component SecurityTab inherits Rectangle {
                         last: true;
 
                         CapsuleButton {
+
+                            hairline: true;
                             text: @tr("Remove Unused Keys");
                             enabled: root.unused-keys > 0;
                             clicked => { root.remove-unused-keys(); }
@@ -122,6 +129,8 @@ export component SecurityTab inherits Rectangle {
                         last: true;
 
                         reset-button := CapsuleButton {
+
+                            hairline: true;
                             text: @tr("Reset HTTPorter…");
                             destructive: true;
                             enabled: root.reset-allowed;

@@ -8,7 +8,7 @@
 // field it names (`bandwidth-error`, `proxy-error`). Nothing here knows about `TransferSettings`:
 // the properties hold the form as the user sees it (see `src/settings_view.rs`).
 
-import { ScrollView, Slider } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Activation, CapsuleButton, ToolButton } from "buttons.slint";
@@ -31,7 +31,7 @@ component TabButton inherits Rectangle {
     callback clicked();
 
     width: max(82px, name.preferred-width + 12px);
-    height: 54px + Theme.grow-small;
+    height: 50px + Theme.grow-small;
     border-radius: 8px;
     background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
     forward-focus: key-focus;
@@ -116,7 +116,7 @@ component Section inherits VerticalLayout {
 component Group inherits Rectangle {
     background: Theme.content;
     border-radius: Theme.radius-md;
-    border-width: 0.5px;
+    border-width: 1phx;
     border-color: Theme.sep-strong;
 
     VerticalLayout {
@@ -133,7 +133,8 @@ component GroupRow inherits Rectangle {
     // The last row of a group has no line under it.
     in property <bool> last: false;
 
-    min-height: 44px;
+    // The mockup's 44 px of content, its 8 px of padding, and the line under all but the last.
+    min-height: root.last ? 60px : 61px;
 
     HorizontalLayout {
         padding-left: 14px;
@@ -163,7 +164,9 @@ component GroupRow inherits Rectangle {
                 text: root.error;
             }
         }
+        // Only as wide as its controls: a Rectangle would otherwise share the row's spare width.
         VerticalLayout {
+            horizontal-stretch: 0;
             alignment: center;
 
             HorizontalLayout {
@@ -197,9 +200,9 @@ component Switch inherits Rectangle {
     height: 22px;
     border-radius: self.height / 2;
     background: root.checked ? Theme.accent : Theme.chip;
-    // The off switch is outlined so that it can be seen on the white group (3:1, WCAG 1.4.11).
-    border-width: 1px;
-    border-color: root.checked ? Theme.accent : Theme.field-border;
+    // The off switch keeps a thin outline so that it can be seen on the white group.
+    border-width: root.checked ? 0px : 1phx;
+    border-color: Theme.control-border;
     forward-focus: key-focus;
     accessible-role: switch;
     accessible-label: root.label;
@@ -208,8 +211,8 @@ component Switch inherits Rectangle {
     accessible-action-default => { root.toggle(); }
 
     Rectangle {
-        x: root.checked ? 17px : 1px;
-        y: 1px;
+        x: root.checked ? 18px : 2px;
+        y: 2px;
         width: 18px;
         height: 18px;
         border-radius: 9px;
@@ -253,9 +256,8 @@ component Switch inherits Rectangle {
 
 // The Transfers tab: the form, as the user sees it. The properties are the window's own (it binds
 // them with `<=>`); the tab only draws them and reports each edit. It is a component of its own
-// because the slider and the segmented control write to their own values when the user moves them,
-// which would cut them off from the form: `changed` handlers here keep them in step when the
-// window, or the other way of changing the value, sets it.
+// because the segmented control writes to its own value when the user moves it, which would cut
+// it off from the form: a `changed` handler here keeps it in step when the window sets the value.
 component TransfersTab inherits Rectangle {
     in-out property <int> simultaneous;
     in-out property <bool> adaptive;
@@ -285,7 +287,11 @@ component TransfersTab inherits Rectangle {
     property <[string]> upload-options: [@tr("Uploads: Ask once per batch"), @tr("Uploads: Replace if different"), @tr("Uploads: Skip"), @tr("Uploads: Replace all"), @tr("Uploads: Keep both")];
     property <[string]> download-options: [@tr("Downloads: Ask once per batch"), @tr("Downloads: Replace if different"), @tr("Downloads: Keep both"), @tr("Downloads: Replace all"), @tr("Downloads: Skip")];
 
-    changed simultaneous => { slider.value = root.simultaneous; }
+    // The two conflict pickers show their longest choice whole when the window has the room for
+    // that, and share what the row's text leaves when it has not (96 px of padding and gaps, 170 px
+    // for the text).
+    property <length> conflict-room: root.width - 96px - 170px;
+
     changed bandwidth-on => { bandwidth-mode.current = root.bandwidth-on ? 1 : 0; }
 
     // Moves the number of simultaneous transfers within 1 to 128 and reports it.
@@ -303,6 +309,7 @@ component TransfersTab inherits Rectangle {
             padding-top: 20px;
             padding-bottom: 22px;
             spacing: 18px;
+            alignment: start;
 
             Section {
                 title: @tr("Speed");
@@ -312,39 +319,41 @@ component TransfersTab inherits Rectangle {
                         title: @tr("Simultaneous transfers");
                         help: @tr("Per site. Bunny Storage allows up to 96 from one computer; S3 services up to 128.");
 
-                        slider := Slider {
-                            width: 150px;
-                            minimum: 1;
-                            maximum: 128;
-                            step: 1;
-                            value: root.simultaneous;
-                            accessible-label: @tr("Simultaneous transfers");
-                            changed(value) => { root.set-simultaneous(Math.round(value)); }
-                        }
-                        // Fewer, the number, More (mockup `.tgroup`).
-                        HorizontalLayout {
-                            spacing: 2px;
+                        // Fewer, the number, More (mockup `.tgroup`). Held down, the buttons repeat.
+                        Rectangle {
+                            background: Theme.control;
+                            border-radius: self.height / 2;
+                            border-width: 1phx;
+                            border-color: Theme.control-border;
+                            drop-shadow-blur: 1.5px;
+                            drop-shadow-offset-y: 0.5px;
+                            drop-shadow-color: Theme.shadow-control;
 
-                            VCenter {
+                            HorizontalLayout {
+                                padding: 2px;
+                                spacing: 2px;
+
                                 ToolButton {
                                     icon: Icons.minus;
+                                    icon-size: 14px;
+                                    repeats: true;
                                     label: @tr("Fewer");
                                     enabled: root.simultaneous > 1;
                                     clicked => { root.set-simultaneous(root.simultaneous - 1); }
                                 }
-                            }
-                            Text {
-                                min-width: 34px;
-                                text: root.simultaneous;
-                                color: Theme.label;
-                                font-size: Theme.font-body;
-                                font-weight: Theme.weight-semibold;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                            VCenter {
+                                Text {
+                                    min-width: 34px;
+                                    text: root.simultaneous;
+                                    color: Theme.label;
+                                    font-size: Theme.font-body;
+                                    font-weight: Theme.weight-semibold;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
                                 ToolButton {
                                     icon: Icons.plus;
+                                    icon-size: 14px;
+                                    repeats: true;
                                     label: @tr("More");
                                     enabled: root.simultaneous < 128;
                                     clicked => { root.set-simultaneous(root.simultaneous + 1); }
@@ -367,6 +376,8 @@ component TransfersTab inherits Rectangle {
                         help: @tr("Waits 1, 2, 4, 8 and 10 seconds between attempts.");
 
                         RegionPicker {
+
+                            hairline: true;
                             width: 140px;
                             model: root.retry-options;
                             label: @tr("Retries");
@@ -391,19 +402,14 @@ component TransfersTab inherits Rectangle {
                         }
                         VCenter {
                             Field {
+                                hairline: true;
                                 width: 90px;
                                 text <=> root.bandwidth-mb;
+                                suffix: @tr("MB/s");
                                 enabled: root.bandwidth-on;
                                 label: @tr("Limit");
                                 error: root.bandwidth-error;
                                 edited => { root.edited(); }
-                            }
-                        }
-                        VCenter {
-                            Text {
-                                text: @tr("MB/s");
-                                color: root.bandwidth-on ? Theme.label : Theme.label3;
-                                font-size: Theme.font-body;
                             }
                         }
                     }
@@ -419,6 +425,8 @@ component TransfersTab inherits Rectangle {
                         help: @tr("Every connection is encrypted with TLS 1.2 or newer.");
 
                         RegionPicker {
+
+                            hairline: true;
                             width: 200px;
                             model: root.protocol-options;
                             label: @tr("HTTP version");
@@ -440,6 +448,8 @@ component TransfersTab inherits Rectangle {
                         title: @tr("Request timeout");
 
                         RegionPicker {
+
+                            hairline: true;
                             width: 140px;
                             model: root.timeout-options;
                             label: @tr("Request timeout");
@@ -456,6 +466,8 @@ component TransfersTab inherits Rectangle {
                             spacing: 6px;
 
                             RegionPicker {
+
+                                hairline: true;
                                 width: 200px;
                                 open-up: true;
                                 model: root.proxy-options;
@@ -467,6 +479,7 @@ component TransfersTab inherits Rectangle {
                             // or leaving the field), not as it is typed: a password typed into it
                             // must never be saved half way.
                             if root.proxy-index == 2: Field {
+                                hairline: true;
                                 width: 200px;
                                 text <=> root.proxy-url;
                                 placeholder: @tr("http://proxy:8080");
@@ -503,25 +516,24 @@ component TransfersTab inherits Rectangle {
                         help: @tr("One choice per batch, never one dialog per file.");
                         last: true;
 
-                        VerticalLayout {
-                            spacing: 6px;
+                        RegionPicker {
 
-                            RegionPicker {
-                                width: 230px;
-                                open-up: true;
-                                model: root.upload-options;
-                                label: @tr("When uploading");
-                                current-index <=> root.upload-conflicts-index;
-                                selected => { root.edited(); }
-                            }
-                            RegionPicker {
-                                width: 230px;
-                                open-up: true;
-                                model: root.download-options;
-                                label: @tr("When downloading");
-                                current-index <=> root.download-conflicts-index;
-                                selected => { root.edited(); }
-                            }
+                            hairline: true;
+                            width: min(215px, root.conflict-room * 215 / 448);
+                            open-up: true;
+                            model: root.upload-options;
+                            label: @tr("When uploading");
+                            current-index <=> root.upload-conflicts-index;
+                            selected => { root.edited(); }
+                        }
+                        RegionPicker {
+                            hairline: true;
+                            width: min(233px, root.conflict-room * 233 / 448);
+                            open-up: true;
+                            model: root.download-options;
+                            label: @tr("When downloading");
+                            current-index <=> root.download-conflicts-index;
+                            selected => { root.edited(); }
                         }
                     }
                 }
@@ -531,6 +543,9 @@ component TransfersTab inherits Rectangle {
                 alignment: end;
 
                 CapsuleButton {
+
+                    hairline: true;
+                    quiet: true;
                     text: @tr("Restore Defaults");
                     clicked => { root.restore-defaults(); }
                 }
@@ -566,6 +581,8 @@ component PublishTab inherits Rectangle {
                         last: index == root.keys.length - 1;
 
                         CapsuleButton {
+
+                            hairline: true;
                             text: @tr("Forget Key");
                             clicked => { root.forget-key(key.id); }
                         }
@@ -713,7 +730,7 @@ export component SettingsWindow inherits Window {
     default-font-size: Theme.font-body;
     background: Theme.win;
     preferred-width: 760px;
-    preferred-height: 720px;
+    preferred-height: 890px;
     min-width: 620px;
     min-height: 420px;
 
@@ -724,7 +741,7 @@ export component SettingsWindow inherits Window {
         // tab buttons keep their own presses.
         Rectangle {
             background: Theme.chrome;
-            height: 98px + Theme.grow + Theme.grow-small;
+            height: 95px + Theme.grow + Theme.grow-small;
 
             caption-area := TouchArea {
                 pointer-event(event) => {
@@ -755,7 +772,7 @@ export component SettingsWindow inherits Window {
                 }
 
                 Rectangle {
-                    height: 66px + Theme.grow-small;
+                    height: 63px + Theme.grow-small;
                     accessible-role: tab-list;
                     accessible-label: @tr("Settings sections");
 
@@ -763,7 +780,7 @@ export component SettingsWindow inherits Window {
                         padding-left: 12px;
                         padding-right: 12px;
                         padding-top: 2px;
-                        padding-bottom: 10px;
+                        padding-bottom: 11px;
                         spacing: 4px;
                         alignment: center;
 

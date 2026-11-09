@@ -497,7 +497,7 @@ fn wire_applies_good_edits_shows_errors_and_restores_defaults() {
 }
 
 #[test]
-fn the_slider_and_the_segments_follow_values_set_by_the_app() {
+fn the_stepper_and_the_segments_follow_values_set_by_the_app() {
     let w = window();
     // The user moves them first …
     press(&w, AccessibleRole::Button, "Fewer");
@@ -512,8 +512,7 @@ fn the_slider_and_the_segments_follow_values_set_by_the_app() {
         },
     );
     slint::platform::update_timers_and_animations();
-    let slider = find(&w, AccessibleRole::Slider, "Simultaneous transfers");
-    assert_eq!(slider.accessible_value().as_deref(), Some("96"));
+    assert_eq!(w.get_simultaneous(), 96);
     assert_eq!(
         find(&w, AccessibleRole::RadioButton, "Off").accessible_checked(),
         Some(true)

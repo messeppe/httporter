@@ -44,7 +44,7 @@ export component Section inherits VerticalLayout {
 export component Group inherits Rectangle {
     background: Theme.content;
     border-radius: Theme.radius-md;
-    border-width: 0.5px;
+    border-width: 1phx;
     border-color: Theme.sep-strong;
 
     VerticalLayout {
@@ -61,7 +61,8 @@ export component GroupRow inherits Rectangle {
     // The last row of a group has no line under it.
     in property <bool> last: false;
 
-    min-height: 44px;
+    // The mockup's 44 px of content, its 8 px of padding, and the line under all but the last.
+    min-height: root.last ? 60px : 61px;
 
     HorizontalLayout {
         padding-left: 14px;
@@ -91,7 +92,9 @@ export component GroupRow inherits Rectangle {
                 text: root.error;
             }
         }
+        // Only as wide as its controls: a Rectangle would otherwise share the row's spare width.
         VerticalLayout {
+            horizontal-stretch: 0;
             alignment: center;
 
             HorizontalLayout {
@@ -131,9 +134,9 @@ export component Switch inherits Rectangle {
     height: 22px;
     border-radius: self.height / 2;
     background: root.checked ? Theme.accent : Theme.chip;
-    // The off switch is outlined so that it can be seen on the white group (3:1, WCAG 1.4.11).
-    border-width: 1px;
-    border-color: root.checked ? Theme.accent : Theme.field-border;
+    // The off switch keeps a thin outline so that it can be seen on the white group.
+    border-width: root.checked ? 0px : 1phx;
+    border-color: Theme.control-border;
     forward-focus: key-focus;
     opacity: root.enabled ? 1 : 0.45;
     accessible-role: switch;
@@ -144,8 +147,8 @@ export component Switch inherits Rectangle {
     accessible-action-default => { root.toggle(); }
 
     Rectangle {
-        x: root.checked ? 17px : 1px;
-        y: 1px;
+        x: root.checked ? 18px : 2px;
+        y: 2px;
         width: 18px;
         height: 18px;
         border-radius: 9px;
@@ -296,6 +299,8 @@ export component GeneralTab inherits Rectangle {
                         last: true;
 
                         CapsuleButton {
+
+                            hairline: true;
                             text: @tr("Clear");
                             clicked => { root.clear-preview-cache(); }
                         }
@@ -346,6 +351,8 @@ export component GeneralTab inherits Rectangle {
                         last: true;
 
                         CapsuleButton {
+
+                            hairline: true;
                             text: @tr("Check Now");
                             enabled: root.updates-available;
                             clicked => { root.check-now(); }
@@ -410,6 +417,7 @@ export component GeneralTab inherits Rectangle {
                             }
                             VCenter {
                                 CapsuleButton {
+                                    hairline: true;
                                     text: @tr("Third-Party Licenses…");
                                     enabled: root.licenses-available;
                                     clicked => { root.open-licenses(); }
@@ -690,7 +698,7 @@ export component SitesTab inherits Rectangle {
                 width: 210px;
                 background: Theme.content;
                 border-radius: Theme.radius-md;
-                border-width: 0.5px;
+                border-width: 1phx;
                 border-color: Theme.sep-strong;
                 clip: true;
                 accessible-role: list;
@@ -774,6 +782,7 @@ export component SitesTab inherits Rectangle {
                                         // Applied when finished (Return, or leaving the field), not as
                                         // it is typed.
                                         url-field := Field {
+                                            hairline: true;
                                             width: 220px;
                                             text <=> root.url-text;
                                             placeholder: @tr("https://cdn.example.com/");
@@ -799,6 +808,8 @@ export component SitesTab inherits Rectangle {
                                     last: true;
 
                                     RegionPicker {
+
+                                        hairline: true;
                                         width: 140px;
                                         model: root.expiry-options;
                                         label: @tr("Pre-signed links last");
@@ -818,6 +829,8 @@ export component SitesTab inherits Rectangle {
                                     help: root.form.upload-choice != "" ? @tr("Remembered for this site: {}", root.form.upload-choice) : @tr("The Transfers setting applies.");
 
                                     CapsuleButton {
+
+                                        hairline: true;
                                         text: @tr("Forget");
                                         enabled: root.form.upload-choice != "";
                                         clicked => { root.forget-choice(true); }
@@ -829,6 +842,8 @@ export component SitesTab inherits Rectangle {
                                     last: true;
 
                                     CapsuleButton {
+
+                                        hairline: true;
                                         text: @tr("Forget");
                                         enabled: root.form.download-choice != "";
                                         clicked => { root.forget-choice(false); }
@@ -849,6 +864,7 @@ export component SitesTab inherits Rectangle {
 
                                     VCenter {
                                         Field {
+                                            hairline: true;
                                             width: 220px;
                                             text <=> root.zone-404;
                                             placeholder: @tr("/404.html");
@@ -875,6 +891,8 @@ export component SitesTab inherits Rectangle {
                                     help: root.zone.regions != "" ? @tr("{}. Regions can be added but never removed.", root.zone.regions) : @tr("None. Regions can be added but never removed.");
 
                                     if !root.zone.adding: CapsuleButton {
+
+                                        hairline: true;
                                         text: @tr("Add Regions…");
                                         enabled: root.zone-editable;
                                         clicked => { root.zone-add-regions(); }
@@ -945,6 +963,8 @@ export component SitesTab inherits Rectangle {
                                     last: true;
 
                                     CapsuleButton {
+
+                                        hairline: true;
                                         text: root.zone.busy ? @tr("Saving…") : @tr("Save");
                                         enabled: root.zone-editable;
                                         clicked => { root.save-zone(); }
@@ -966,6 +986,7 @@ export component SitesTab inherits Rectangle {
 
                                     VCenter {
                                         Field {
+                                            hairline: true;
                                             width: 220px;
                                             text <=> root.cors-origins;
                                             placeholder: @tr("https://example.com");
@@ -984,6 +1005,7 @@ export component SitesTab inherits Rectangle {
 
                                     VCenter {
                                         Field {
+                                            hairline: true;
                                             width: 220px;
                                             text <=> root.cors-methods;
                                             placeholder: @tr("GET, HEAD");
@@ -1006,6 +1028,7 @@ export component SitesTab inherits Rectangle {
 
                                     VCenter {
                                         Field {
+                                            hairline: true;
                                             width: 220px;
                                             text <=> root.website-index;
                                             placeholder: @tr("index.html");
@@ -1024,6 +1047,7 @@ export component SitesTab inherits Rectangle {
 
                                     VCenter {
                                         Field {
+                                            hairline: true;
                                             width: 220px;
                                             text <=> root.website-error;
                                             placeholder: @tr("404.html");
@@ -1047,6 +1071,8 @@ export component SitesTab inherits Rectangle {
                                     last: true;
 
                                     CapsuleButton {
+
+                                        hairline: true;
                                         text: root.bucket.busy ? @tr("Saving…") : @tr("Save");
                                         enabled: root.bucket-editable;
                                         clicked => { root.save-bucket(); }
@@ -1064,11 +1090,14 @@ export component SitesTab inherits Rectangle {
             alignment: start;
 
             CapsuleButton {
+
+                hairline: true;
                 text: @tr("Export Sites…");
                 enabled: root.rows.length > 0;
                 clicked => { root.export-sites(); }
             }
             CapsuleButton {
+                hairline: true;
                 text: @tr("Import Sites…");
                 clicked => { root.import-sites(); }
             }
@@ -1115,10 +1144,13 @@ export component AdvancedTab inherits Rectangle {
                         last: true;
 
                         CapsuleButton {
+
+                            hairline: true;
                             text: @tr("Show Activity Log…");
                             clicked => { root.show-activity(); }
                         }
                         CapsuleButton {
+                            hairline: true;
                             text: @tr("Open Log Folder");
                             clicked => { root.open-log-folder(); }
                         }
@@ -1136,6 +1168,8 @@ export component AdvancedTab inherits Rectangle {
                         last: true;
 
                         CapsuleButton {
+
+                            hairline: true;
                             text: @tr("Clear");
                             clicked => { root.clear-hash-cache(); }
                         }

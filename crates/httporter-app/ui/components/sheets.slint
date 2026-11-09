@@ -332,8 +332,11 @@ export component Segmented inherits Rectangle {
         for option[i] in root.options: Rectangle {
             border-radius: 6px;
             background: i == root.current ? Theme.control : transparent;
-            border-width: i == root.current ? 0.5px : 0px;
+            border-width: i == root.current ? 1phx : 0px;
             border-color: Theme.control-border;
+            drop-shadow-blur: 1.5px;
+            drop-shadow-offset-y: 0.5px;
+            drop-shadow-color: i == root.current ? Theme.shadow-control : transparent;
             accessible-role: radio-button;
             accessible-checkable: true;
             accessible-checked: i == root.current;

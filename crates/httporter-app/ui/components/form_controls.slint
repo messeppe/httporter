@@ -29,6 +29,10 @@ export component Field inherits Rectangle {
     in property <length> trailing: 9px;
     // False dims the field and takes it out of the Tab order and editing (a limit that is turned off).
     in property <bool> enabled: true;
+    // The unit, shown right after the value and not part of it (mockup: "10 MB/s").
+    in property <string> suffix;
+    // The mockup's thin outline instead of the 3:1 one (the Settings window).
+    in property <bool> hairline: false;
     out property <bool> has-focus: input.has-focus;
     callback edited();
     // Return was pressed (not auto-repeat).
@@ -45,8 +49,8 @@ export component Field inherits Rectangle {
     forward-focus: input;
     border-radius: 7px;
     background: Theme.field;
-    border-width: 1px;
-    border-color: root.error != "" ? Theme.red : Theme.field-border;
+    border-width: root.hairline && root.error == "" ? 1phx : 1px;
+    border-color: root.error != "" ? Theme.red : (root.hairline ? Theme.control-border : Theme.field-border);
     opacity: root.enabled ? 1 : 0.5;
 
     // Where the text may be drawn: the 9 px inside the border, clipped so that a long value
@@ -107,7 +111,7 @@ export component Field inherits Rectangle {
                 selection-background-color: Theme.accent;
                 selection-foreground-color: Theme.on-accent;
                 accessible-label: root.label;
-                accessible-description: root.error;
+                accessible-description: root.error != "" ? root.error : root.suffix;
                 accessible-placeholder-text: root.placeholder;
                 accessible-value: root.input-type == InputType.password ? "" : self.text;
 
@@ -134,6 +138,16 @@ export component Field inherits Rectangle {
                     return reject;
                 }
             }
+        }
+
+        if root.suffix != "": Text {
+            x: input.x + input.preferred-width + 4px;
+            height: 100%;
+            text: root.suffix;
+            color: Theme.label;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            accessible-role: none;
         }
     }
 
@@ -282,6 +296,8 @@ export component RegionPicker inherits Rectangle {
     in property <string> error;
     // Open the list above the picker instead of below it, for one near the bottom of its window.
     in property <bool> open-up: false;
+    // The mockup's thin outline instead of the 3:1 one (the Settings window).
+    in property <bool> hairline: false;
     out property <bool> has-focus: key-focus.has-focus || popup.is-open;
     // The user chose another region.
     callback selected(int);
@@ -305,8 +321,8 @@ export component RegionPicker inherits Rectangle {
     forward-focus: key-focus;
     border-radius: 7px;
     background: Theme.field;
-    border-width: 1px;
-    border-color: root.error != "" ? Theme.red : Theme.field-border;
+    border-width: root.hairline && root.error == "" ? 1phx : 1px;
+    border-color: root.error != "" ? Theme.red : (root.hairline ? Theme.control-border : Theme.field-border);
     accessible-role: combobox;
     accessible-label: root.label;
     accessible-value: root.current-name;

@@ -240,12 +240,17 @@ pub(crate) fn rasterize(
 
 /// DirectWrite's recommended mode for this size, natural-measured at 96 DPI (the size is already
 /// in physical pixels). Outlines can't be rasterised to a bitmap: those become natural symmetric.
+///
+/// Hinting is always off, what Skia does for `SkFontHinting::kNone`, so that the bundled fonts
+/// have the shapes the mockups show in a browser, which get Inter without hints. The hints in
+/// Inter's static TTFs round its 7.1 px x-height at 13 px up to 8 px and leave the widths alone,
+/// which makes the text look condensed.
 unsafe fn rendering_mode(
     face: &IDWriteFontFace3,
     em_size: f32,
 ) -> Option<(DWRITE_RENDERING_MODE1, DWRITE_GRID_FIT_MODE)> {
     let mut mode = DWRITE_RENDERING_MODE1::default();
-    let mut grid_fit = DWRITE_GRID_FIT_MODE::default();
+    let mut recommended_grid_fit = DWRITE_GRID_FIT_MODE::default();
     // SAFETY: the two locals are valid for the call.
     unsafe {
         face.GetRecommendedRenderingMode(
@@ -258,12 +263,12 @@ unsafe fn rendering_mode(
             DWRITE_MEASURING_MODE_NATURAL,
             None,
             &mut mode,
-            &mut grid_fit,
+            &mut recommended_grid_fit,
         )
         .ok()?;
     }
     if mode == DWRITE_RENDERING_MODE1_OUTLINE {
         mode = DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC;
     }
-    Some((mode, grid_fit))
+    Some((mode, DWRITE_GRID_FIT_MODE_DISABLED))
 }

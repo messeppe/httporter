@@ -1671,6 +1671,14 @@ fn install_settings(ui: &AppWindow, transfers: &Arc<Transfers>) -> SettingsSlot 
 
 fn settings_window(transfers: &Arc<Transfers>) -> Option<SettingsWindow> {
     let window = SettingsWindow::new().ok()?;
+    // The height of the mockup, or the screen's where that is less.
+    if let Some((width, height)) =
+        win::default_placement(760, 890).and_then(|place| win::client_logical_size(&place))
+    {
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(width, height));
+    }
     settings_view::wire(&window, {
         let transfers = transfers.clone();
         move |settings| transfers.apply_settings(settings)
