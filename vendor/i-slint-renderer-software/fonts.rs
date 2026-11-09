@@ -49,6 +49,8 @@ pub struct RenderableVectorGlyph {
     pub alpha_map: Rc<[u8]>,
     pub pixel_stride: u16,
     pub glyph_origin_x: f32,
+    /// HTTPorter patch: `alpha_map` holds three coverage bytes (R, G, B) per pixel.
+    pub lcd: bool,
 }
 
 #[cfg(feature = "systemfonts")]

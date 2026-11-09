@@ -240,7 +240,9 @@ impl Scene {
                 let texture = &self.vectors.textures[*texture_index as usize];
                 // Below alpha 255 an RGB texture blends rather than overwrites (see
                 // draw_texture_line), so it is not opaque.
-                texture.format == TexturePixelFormat::Rgb && texture.extra.alpha == 255
+                texture.format == TexturePixelFormat::Rgb
+                    && texture.extra.alpha == 255
+                    && !texture.extra.lcd // HTTPorter patch
             }
             SceneCommand::SharedBuffer { shared_buffer_index } => {
                 let buffer = &self.vectors.shared_buffers[*shared_buffer_index as usize];
@@ -371,6 +373,9 @@ pub struct SceneTextureExtra {
     pub colorize: Color,
     pub alpha: u8,
     pub rotation: RenderingRotation,
+    /// HTTPorter patch: the texture is a glyph with one coverage byte per channel, in
+    /// `TexturePixelFormat::Rgb` layout, to be blended per channel in the `colorize` colour.
+    pub lcd: bool,
 }
 
 impl SceneTextureExtra {
@@ -426,6 +431,7 @@ impl SceneTextureExtra {
                 colorize: texture.colorize.unwrap_or_default(),
                 alpha: texture.alpha,
                 rotation: texture.rotation,
+                lcd: texture.is_lcd(), // HTTPorter patch
                 dx: Fixed::try_from_fixed(dx).ok()?,
                 dy: Fixed::try_from_fixed(dy).ok()?,
                 off_x: Fixed::try_from_fixed(dx * offset.x).ok()?,
@@ -439,7 +445,15 @@ impl SceneTextureExtra {
 #[derive(Clone)]
 pub enum SharedBufferData {
     SharedImage(SharedImageBuffer),
-    AlphaMap { data: Rc<[u8]>, width: u16 },
+    AlphaMap {
+        data: Rc<[u8]>,
+        width: u16,
+    },
+    /// HTTPorter patch: a glyph with three coverage bytes (R, G, B) per pixel.
+    LcdMap {
+        data: Rc<[u8]>,
+        width: u16,
+    },
 }
 
 impl SharedBufferData {
@@ -447,6 +461,7 @@ impl SharedBufferData {
         match self {
             SharedBufferData::SharedImage(image) => image.width() as usize,
             SharedBufferData::AlphaMap { width, .. } => *width as usize,
+            SharedBufferData::LcdMap { width, .. } => *width as usize, // HTTPorter patch
         }
     }
     #[allow(unused)]
@@ -454,6 +469,8 @@ impl SharedBufferData {
         match self {
             SharedBufferData::SharedImage(image) => image.height() as usize,
             SharedBufferData::AlphaMap { data, width, .. } => data.len() / *width as usize,
+            // HTTPorter patch
+            SharedBufferData::LcdMap { data, width, .. } => data.len() / (3 * *width as usize),
         }
     }
 }
@@ -495,6 +512,13 @@ impl SharedBufferCommand {
                 data: &data[start..end],
                 pixel_stride: *width,
                 format: TexturePixelFormat::AlphaMap,
+                extra: self.extra,
+            },
+            // HTTPorter patch
+            SharedBufferData::LcdMap { data, width } => SceneTexture {
+                data: &data[start * 3..end * 3],
+                pixel_stride: *width,
+                format: TexturePixelFormat::Rgb,
                 extra: self.extra,
             },
         }

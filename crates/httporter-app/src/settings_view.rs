@@ -21,7 +21,8 @@
 //! the window: only the account's name and id.
 //!
 //! Both windows' `Theme` follow Windows' text size and "Animation effects" ([`Look`]): read at
-//! start, and again whenever Windows may have changed them ([`system_settings_changed`]).
+//! start, and again whenever Windows may have changed them ([`system_settings_changed`]). The
+//! software renderer follows Windows' font smoothing (ClearType) the same way.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -404,21 +405,25 @@ fn wire_publish(window: &SettingsWindow) {
     });
 }
 
-// ---- Windows' text size and "Animation effects" (§9.1) ----
+// ---- Windows' text size, "Animation effects" and font smoothing (§9.1) ----
 
 /// What a window's `Theme` follows from Windows: the text size (Settings › Accessibility › Text
-/// size, 1.0 to 2.25) and whether to animate ("Animation effects").
+/// size, 1.0 to 2.25) and whether to animate ("Animation effects"). The software renderer also
+/// follows how Windows smooths text (ClearType).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
     pub text_scale: f32,
     pub motion: bool,
+    pub smoothing: httporter_platform::win::TextSmoothing,
 }
 
 impl Look {
-    /// What `Theme` assumes when told nothing: 100 %, with animations.
+    /// What `Theme` assumes when told nothing: 100 %, with animations (and ClearType, which only
+    /// the software renderer looks at).
     pub const PLAIN: Look = Look {
         text_scale: 1.0,
         motion: true,
+        smoothing: httporter_platform::win::TextSmoothing::ClearTypeRgb,
     };
 
     /// As Windows has them now. The tests' windows keep [`Look::PLAIN`], whatever the PC that
@@ -430,6 +435,7 @@ impl Look {
             Self {
                 text_scale: httporter_platform::win::text_scale(),
                 motion: httporter_platform::win::animations_enabled(),
+                smoothing: httporter_platform::win::text_smoothing(),
             }
         }
     }
@@ -437,6 +443,19 @@ impl Look {
     fn put(self, theme: Theme<'_>) {
         theme.set_text_scale(self.text_scale);
         theme.set_motion(self.motion);
+    }
+
+    /// Tells the software renderer how to smooth text. Returns whether that changed anything;
+    /// the caller then repaints every window, because no property of theirs changed.
+    fn apply_smoothing(self) -> bool {
+        use httporter_platform::win::TextSmoothing;
+        use slint::platform::software_renderer::{self, TextMode};
+        let mode = match self.smoothing {
+            TextSmoothing::Grayscale => TextMode::Grayscale,
+            TextSmoothing::ClearTypeRgb => TextMode::LcdRgb,
+            TextSmoothing::ClearTypeBgr => TextMode::LcdBgr,
+        };
+        software_renderer::set_text_mode(mode)
     }
 }
 
@@ -453,10 +472,12 @@ thread_local! {
     static LOOKS: RefCell<Looks> = RefCell::default();
 }
 
-/// Makes the main window follow Windows' text size and "Animation effects" from now on.
+/// Makes the main window follow Windows' text size, "Animation effects" and font smoothing from
+/// now on.
 pub fn install_look(ui: &AppWindow) {
     let look = Look::now();
     look.put(ui.global::<Theme>());
+    look.apply_smoothing();
     LOOKS.with(|looks| {
         let mut looks = looks.borrow_mut();
         looks.shown = Some(look);
@@ -474,9 +495,10 @@ fn follow_look(window: &SettingsWindow) {
     look.unwrap_or_else(Look::now).put(window.global::<Theme>());
 }
 
-/// Windows may have changed its text size or "Animation effects" (its settings changed, or the
-/// window came back to the front): both are read again, and if either changed, every window's
-/// `Theme` gets them.
+/// Windows may have changed its text size, "Animation effects" or font smoothing (its settings
+/// changed, or the window came back to the front): all are read again, and if any changed, every
+/// window's `Theme` gets them; a new smoothing also repaints the windows, because no property of
+/// theirs changed.
 pub fn system_settings_changed() {
     let look = Look::now();
     LOOKS.with(|looks| {
@@ -485,11 +507,18 @@ pub fn system_settings_changed() {
             return;
         }
         looks.shown = Some(look);
+        let repaint = look.apply_smoothing();
         if let Some(ui) = looks.main.as_ref().and_then(slint::Weak::upgrade) {
             look.put(ui.global::<Theme>());
+            if repaint {
+                ui.window().request_redraw();
+            }
         }
         if let Some(window) = looks.settings.as_ref().and_then(slint::Weak::upgrade) {
             look.put(window.global::<Theme>());
+            if repaint {
+                window.window().request_redraw();
+            }
         }
     });
 }

@@ -29,7 +29,7 @@ pub(super) fn draw_texture_line(
         data,
         format,
         pixel_stride,
-        extra: super::SceneTextureExtra { colorize, alpha, rotation, dx, dy, off_x, off_y },
+        extra: super::SceneTextureExtra { colorize, alpha, rotation, dx, dy, off_x, off_y, lcd }, // HTTPorter patch: lcd
     } = *texture;
 
     let source_size = texture.source_size().cast::<i32>();
@@ -89,6 +89,7 @@ pub(super) fn draw_texture_line(
                 data,
                 alpha,
                 colorize,
+                lcd, // HTTPorter patch
                 (pixel_stride as usize, dy),
                 #[inline(always)]
                 |bpp| {
@@ -154,6 +155,7 @@ pub(super) fn draw_texture_line(
                 data,
                 alpha,
                 colorize,
+                lcd, // HTTPorter patch
                 (stride, dy),
                 #[inline(always)]
                 |_| {
@@ -188,9 +190,15 @@ pub(super) fn draw_texture_line(
         data: &[u8],
         alpha: u8,
         color: Color,
+        lcd: bool, // HTTPorter patch
         (stride, delta): (usize, Fixed<i32, 8>),
         mut pos: impl FnMut(usize) -> (usize, u8, u8),
     ) {
+        // HTTPorter patch: glyphs with separate coverage for red, green and blue.
+        if lcd {
+            blend_lcd_line(line_buffer, data, color, pos);
+            return;
+        }
         match format {
             TexturePixelFormat::Rgb => {
                 for pix in line_buffer {
@@ -308,6 +316,109 @@ pub(super) fn draw_texture_line(
                 }
             }
         };
+    }
+}
+
+/// HTTPorter patch: where a pixel type keeps its channels, for per-channel (LCD) blending.
+///
+/// `TargetPixel` can only blend one coverage for all channels, and the pixel type the winit
+/// software backend really draws into (`SoftBufferPixel`, a private `u32` wrapper, 0xAARRGGBB)
+/// lives in another crate, so the channels are found by probing the layout of `from_rgb`.
+struct ByteChannels {
+    red: usize,
+    green: usize,
+    blue: usize,
+    /// The fourth byte of a pixel with one, which `from_rgb` set to 255.
+    alpha: Option<usize>,
+}
+
+impl ByteChannels {
+    /// The layout of `T`, or `None` when it is not 3 or 4 plain bytes (RGB565 and the like).
+    fn of<T: TargetPixel>() -> Option<Self> {
+        let size = core::mem::size_of::<T>();
+        if size != 3 && size != 4 {
+            return None;
+        }
+        let probe = T::from_rgb(0x12, 0x34, 0x56);
+        let mut bytes = [0u8; 4];
+        // SAFETY: `size` bytes of `probe`, a plain `Copy` value, are read into a buffer that
+        // holds at least that many. The only pixel types with the sizes accepted here are
+        // Rgb8Pixel, PremultipliedRgbaColor and the winit backend's u32 SoftBufferPixel, none of
+        // which has padding.
+        #[allow(unsafe_code)]
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core::ptr::addr_of!(probe).cast::<u8>(),
+                bytes.as_mut_ptr(),
+                size,
+            );
+        }
+        let find = |value: u8| bytes[..size].iter().position(|&b| b == value);
+        let (red, green, blue) = (find(0x12)?, find(0x34)?, find(0x56)?);
+        let alpha = (0..size).find(|&i| i != red && i != green && i != blue);
+        if alpha.is_some_and(|i| bytes[i] != 0xff) {
+            return None;
+        }
+        Some(Self { red, green, blue, alpha })
+    }
+
+    /// Blends `fg` over the pixel with one coverage per channel: `out = dst + (fg - dst) * cov`.
+    /// A destination that is not opaque keeps premultiplied blending (average coverage).
+    #[inline]
+    fn blend<T: TargetPixel>(&self, pixel: &mut T, fg: [u8; 3], cov: [u8; 3]) {
+        let ptr = (pixel as *mut T).cast::<u8>();
+        // SAFETY: `of::<T>` found these offsets for this very `T`, so they are within its size,
+        // and the bytes of a pixel are plain channel values. `ptr` is not used after `pixel` is.
+        #[allow(unsafe_code)]
+        unsafe {
+            if self.alpha.is_some_and(|i| *ptr.add(i) != 0xff) {
+                pixel.blend(average_coverage(fg, cov));
+                return;
+            }
+            let mix = |index: usize, fg: u8, cov: u8| {
+                let p = ptr.add(index);
+                let cov = cov as u32;
+                *p = ((*p as u32 * (255 - cov) + fg as u32 * cov + 127) / 255) as u8;
+            };
+            mix(self.red, fg[0], cov[0]);
+            mix(self.green, fg[1], cov[1]);
+            mix(self.blue, fg[2], cov[2]);
+        }
+    }
+}
+
+/// HTTPorter patch: the fallback for pixels without byte channels: the mean of the three
+/// coverages, drawn as a plain alpha.
+fn average_coverage(fg: [u8; 3], cov: [u8; 3]) -> PremultipliedRgbaColor {
+    let alpha = ((cov[0] as u32 + cov[1] as u32 + cov[2] as u32) / 3) as u8;
+    PremultipliedRgbaColor::premultiply(Color::from_argb_u8(alpha, fg[0], fg[1], fg[2]))
+}
+
+/// HTTPorter patch: one line of a glyph with three coverage bytes per pixel, in the given color.
+/// Only ever used with opaque text (`draw_glyph_run` falls back to grayscale below alpha 255).
+fn blend_lcd_line<T: TargetPixel>(
+    line_buffer: &mut [T],
+    data: &[u8],
+    color: Color,
+    mut pos: impl FnMut(usize) -> (usize, u8, u8),
+) {
+    let fg = [color.red(), color.green(), color.blue()];
+    match ByteChannels::of::<T>() {
+        Some(channels) => {
+            for pix in line_buffer {
+                let p = pos(3).0;
+                let cov = [data[p], data[p + 1], data[p + 2]];
+                if cov != [0, 0, 0] {
+                    channels.blend(pix, fg, cov);
+                }
+            }
+        }
+        None => {
+            for pix in line_buffer {
+                let p = pos(3).0;
+                pix.blend(average_coverage(fg, [data[p], data[p + 1], data[p + 2]]));
+            }
+        }
     }
 }
 

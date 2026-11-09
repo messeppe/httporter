@@ -22,7 +22,7 @@ mod titlebar;
 mod tray;
 mod watch;
 
-pub use a11y::{animations_enabled, text_scale};
+pub use a11y::{TextSmoothing, animations_enabled, text_scale, text_smoothing};
 pub use clipboard::{clipboard_files, set_clipboard_text};
 pub use lock::{PROFILE_LOCK_PREFIX, ProfileLock};
 pub use notify::{ensure_app_identity, notify, notify_or_flash};

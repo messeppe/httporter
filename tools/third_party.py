@@ -49,8 +49,13 @@ LICENCE_DIRS = ("licenses", "license")  # compared lower-case
 SLINT_CHOSEN = "LicenseRef-Slint-Royalty-free-2.0"
 SLINT_NOT_TAKEN = ("GPL-3.0-only", "LicenseRef-Slint-Software-3.0")
 
-# Third-party crates vendored and modified in this repository (name -> note). None at present.
-VENDORED: dict[str, str] = {}
+# Third-party crates vendored and modified in this repository (name -> note).
+VENDORED: dict[str, str] = {
+    "i-slint-renderer-software": (
+        "Modified for HTTPorter: ClearType-style (LCD) text, vendored as "
+        "vendor/i-slint-renderer-software; every change is marked `// HTTPorter patch`."
+    ),
+}
 
 # Crates whose published package ships no licence file. Each entry was checked against the
 # crate's upstream repository: the licence HTTPorter takes (from the crate's expression),

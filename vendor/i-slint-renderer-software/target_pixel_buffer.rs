@@ -125,9 +125,24 @@ impl DrawTextureArgs {
                         stride,
                         size,
                     ),
+                    // HTTPorter patch: three coverage bytes per pixel, in the RGB layout.
+                    SharedBufferData::LcdMap { data, .. } => TextureData::new(
+                        &data[start * 3..end * 3],
+                        TexturePixelFormat::Rgb,
+                        stride * 3,
+                        size,
+                    ),
                 }
             }
         }
+    }
+
+    /// HTTPorter patch: whether the source is a glyph with per-channel coverage.
+    pub(super) fn is_lcd(&self) -> bool {
+        matches!(
+            &self.data,
+            TextureDataContainer::Shared { buffer: SharedBufferData::LcdMap { .. }, .. }
+        )
     }
 
     pub(super) fn source_size(&self) -> PhysicalSize {

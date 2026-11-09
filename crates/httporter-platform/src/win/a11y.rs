@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The Windows accessibility settings the window follows: text size and "Animation effects".
+//! The Windows accessibility settings the window follows: text size, "Animation effects" and
+//! how text is smoothed (ClearType).
 //!
-//! Both are read when asked, never cached: the app reads them at start and again when Windows
+//! All are read when asked, never cached: the app reads them at start and again when Windows
 //! may have changed them (a settings change, or the window coming back to the front), and they
 //! cost a few microseconds each.
 
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    FE_FONTSMOOTHINGCLEARTYPE, FE_FONTSMOOTHINGORIENTATIONBGR, SPI_GETCLIENTAREAANIMATION,
+    SPI_GETFONTSMOOTHING, SPI_GETFONTSMOOTHINGORIENTATION, SPI_GETFONTSMOOTHINGTYPE,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
 };
 use windows::core::{BOOL, w};
 
@@ -70,6 +73,61 @@ pub fn animations_enabled() -> bool {
     read.is_err() || on.as_bool()
 }
 
+/// How Windows wants text smoothed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextSmoothing {
+    /// Plain grayscale smoothing: ClearType is off, or smoothing is off altogether (the app
+    /// never draws text without smoothing).
+    Grayscale,
+    /// ClearType, on a panel with red, green, blue stripes.
+    ClearTypeRgb,
+    /// ClearType, on a panel with blue, green, red stripes.
+    ClearTypeBgr,
+}
+
+/// How Windows wants text smoothed right now: SPI_GETFONTSMOOTHING, SPI_GETFONTSMOOTHINGTYPE and
+/// SPI_GETFONTSMOOTHINGORIENTATION. A setting that can't be read counts as ClearType on an RGB
+/// panel, the Windows default.
+pub fn text_smoothing() -> TextSmoothing {
+    let mut enabled = BOOL(1);
+    let mut kind = FE_FONTSMOOTHINGCLEARTYPE;
+    let mut orientation = 1u32;
+    // SAFETY: each of these writes one BOOL or UINT to the pointer it is given, which points at
+    // the matching local for the length of the call.
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_GETFONTSMOOTHING,
+            0,
+            Some((&raw mut enabled).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        let _ = SystemParametersInfoW(
+            SPI_GETFONTSMOOTHINGTYPE,
+            0,
+            Some((&raw mut kind).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        let _ = SystemParametersInfoW(
+            SPI_GETFONTSMOOTHINGORIENTATION,
+            0,
+            Some((&raw mut orientation).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    classify_smoothing(enabled.as_bool(), kind, orientation)
+}
+
+/// What the three settings mean.
+fn classify_smoothing(enabled: bool, kind: u32, orientation: u32) -> TextSmoothing {
+    if !enabled || kind != FE_FONTSMOOTHINGCLEARTYPE {
+        TextSmoothing::Grayscale
+    } else if orientation == FE_FONTSMOOTHINGORIENTATIONBGR {
+        TextSmoothing::ClearTypeBgr
+    } else {
+        TextSmoothing::ClearTypeRgb
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +144,40 @@ mod tests {
         assert_eq!(clamp_scale(None), 1.0);
     }
 
+    /// ClearType needs smoothing on and the type set to ClearType; everything else is grayscale.
+    /// The orientation only matters for ClearType.
+    #[test]
+    fn smoothing_settings_follow_what_windows_says() {
+        const STANDARD: u32 = 1;
+        const RGB: u32 = 1;
+        const BGR: u32 = 0;
+        let cleartype = FE_FONTSMOOTHINGCLEARTYPE;
+        assert_eq!(
+            classify_smoothing(true, cleartype, RGB),
+            TextSmoothing::ClearTypeRgb
+        );
+        assert_eq!(
+            classify_smoothing(true, cleartype, BGR),
+            TextSmoothing::ClearTypeBgr
+        );
+        assert_eq!(
+            classify_smoothing(true, STANDARD, RGB),
+            TextSmoothing::Grayscale
+        );
+        assert_eq!(
+            classify_smoothing(true, STANDARD, BGR),
+            TextSmoothing::Grayscale
+        );
+        assert_eq!(
+            classify_smoothing(false, cleartype, RGB),
+            TextSmoothing::Grayscale
+        );
+        assert_eq!(
+            classify_smoothing(false, STANDARD, BGR),
+            TextSmoothing::Grayscale
+        );
+    }
+
     /// Both are read from the desktop's settings, so only their range is known; reading them
     /// again (as the app does whenever Windows may have changed them) must keep working.
     #[test]
@@ -94,6 +186,7 @@ mod tests {
             let scale = text_scale();
             assert!((MIN_SCALE..=MAX_SCALE).contains(&scale), "{scale}");
             let _ = animations_enabled();
+            let _ = text_smoothing();
         }
     }
 }
