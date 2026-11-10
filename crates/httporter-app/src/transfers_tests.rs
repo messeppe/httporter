@@ -1824,3 +1824,144 @@ fn a_build_for_settings_changed_since_is_not_handed_over() {
     wait_for("A's limits", || (limit() == Some(2)).then_some(()));
     assert_eq!(b.t.session.settings(), a);
 }
+
+// ---- T10: resume per site (M14), undo, and the reset while transfers run ----
+
+/// Review M14: Resume goes on site by site. A site whose password can't be read keeps its
+/// unfinished jobs in the journal (offered again later); the other site's jobs run.
+#[test]
+fn resume_goes_on_per_site_and_keeps_a_site_it_cannot_open() {
+    let crashed: BeforeInstall<'_> = &|sites, local, journal| {
+        let mut records: Vec<JobRecord> = [(&sites[0], "one.txt"), (&sites[1], "two.txt")]
+            .into_iter()
+            .map(|(site, name)| {
+                let path = local.join(name);
+                std::fs::write(&path, name).unwrap();
+                JobRecord {
+                    id: 0,
+                    batch: format!("b-{name}"),
+                    site: site.id.clone(),
+                    job: Job::Upload {
+                        local: path,
+                        remote: rp(name),
+                        size: name.len() as u64,
+                    },
+                    state: JobState::Queued,
+                    error: None,
+                    multipart: None,
+                }
+            })
+            .collect();
+        journal.insert(&mut records).unwrap();
+    };
+    let b = bed_with(
+        MockProvider::new(bunny_like()),
+        &["zone-one", "zone-two"],
+        crashed,
+    );
+    assert_eq!(
+        b.ui.get_resume_banner_text(),
+        "2 transfers didn't finish last time."
+    );
+    // The second site's password is gone (a wiped Credential Manager).
+    let second = b.sites[1].id.clone();
+    httporter_platform::CredentialStore::delete(
+        &*b.creds,
+        &httporter_platform::CredentialKey::site(&second),
+    )
+    .unwrap();
+    b.t.session.hub().invalidate(&second);
+
+    b.ui.invoke_resume_banner_resume();
+    b.wait_stored("one.txt", "one.txt");
+    b.wait_idle();
+    wait_for("the first site's job to be done", || {
+        let left = b.journal.unfinished().unwrap();
+        (left.len() == 1).then_some(left)
+    });
+    let left = b.journal.unfinished().unwrap();
+    assert_eq!(left[0].site, second, "the second site's job waits");
+    assert_eq!(left[0].state, JobState::Queued);
+    assert_eq!(b.stored("two.txt"), None);
+}
+
+#[test]
+fn undo_brings_back_what_its_toast_reports() {
+    use crate::comfort::undo::{self, UndoAction};
+    use httporter_core::{Favorite, PlaceKind, TabState};
+
+    let b = bed(MockProvider::new(bunny_like()));
+    let m = crate::manage::manager().expect("the window's manager");
+    let favorite = Favorite {
+        id: 0,
+        kind: PlaceKind::Local,
+        name: "Uploads".to_owned(),
+        local: Some(b.local.path().to_path_buf()),
+        site: None,
+        remote: None,
+    };
+    let has_favorite = || {
+        b.rt()
+            .block_on(b.t.session.favorites())
+            .iter()
+            .any(|f| f.name == "Uploads")
+    };
+    assert!(!has_favorite());
+    let tab = TabState {
+        site: Some(b.sites[0].id.clone()),
+        remote: None,
+        local: None,
+    };
+    undo::push(&b.ui, UndoAction::RestoreFavorite(favorite.clone()));
+    undo::push(
+        &b.ui,
+        UndoAction::ReopenTab {
+            tab: tab.clone(),
+            index: 3,
+        },
+    );
+    assert_eq!(b.ui.get_toasts().row_count(), 2);
+
+    // The favorite's own toast: its Undo restores the favorite, not the newer tab.
+    let favorite_toast = b.ui.get_toasts().row_data(0).unwrap().id;
+    crate::comfort::toast::act(&b.ui, favorite_toast);
+    wait_for("the favorite to come back", || has_favorite().then_some(()));
+    assert_eq!(b.ui.get_toasts().row_count(), 1);
+    assert!(undo::has_closed_tab());
+
+    // Ctrl+Shift+T: the tab comes back, and its toast goes.
+    let tabs = b.ui.get_tabs().row_count();
+    assert!(undo::reopen_tab(&b.ui, &m));
+    assert_eq!(b.ui.get_tabs().row_count(), tabs + 1);
+    assert_eq!(b.ui.get_toasts().row_count(), 0);
+    assert!(!undo::reopen_tab(&b.ui, &m));
+    assert!(!undo::undo(&b.ui, &m), "nothing left to undo");
+
+    // Ctrl+Z undoes the newest.
+    undo::push(&b.ui, UndoAction::ReopenTab { tab, index: 0 });
+    undo::push(&b.ui, UndoAction::RestoreFavorite(favorite));
+    assert!(undo::undo(&b.ui, &m));
+    assert!(undo::has_closed_tab(), "the older tab is still kept");
+    assert_eq!(undo::kept().len(), 1);
+}
+
+/// Review focus 4 (I5): Reset HTTPorter… is refused while transfers run, and allowed once they
+/// are done.
+#[test]
+fn a_reset_is_refused_while_transfers_run() {
+    let b = busy_bed();
+    let m = crate::manage::manager().expect("the window's manager");
+    let window = SettingsWindow::new().unwrap();
+    let (allowed, busy) = crate::system::reset_shown(&window, &m);
+    assert!(!allowed);
+    assert!(!window.get_reset_allowed());
+    assert_eq!(window.get_reset_note(), busy);
+
+    b.t.engine.cancel_all();
+    b.wait_idle();
+    wait_for("a reset to be allowed", || {
+        crate::system::reset_shown(&window, &m).0.then_some(())
+    });
+    assert!(window.get_reset_allowed());
+    assert_eq!(window.get_reset_note(), "");
+}

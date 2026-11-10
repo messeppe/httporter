@@ -1795,3 +1795,38 @@ async fn until_cancelled_gives_the_work_unless_cancel_comes_first() {
     assert_eq!(task.await.unwrap(), None);
     assert!(dropped.load(Ordering::SeqCst), "the work was dropped");
 }
+
+// ---- M8: the connections ready follow the engine ----
+
+/// Review M8: "N connections ready" says what the engine lets the site run now, when its
+/// slow-down is below the setting; the setting otherwise.
+#[tokio::test]
+async fn connections_ready_follow_the_engines_slow_down() {
+    let mock = site_mock();
+    let s = saved(&mock).await;
+    let view = select(&s, 0).await;
+    let ready = |n: usize| crate::copy::status_right("HTTP/2", "sg.storage.bunnycdn.com", Some(n));
+    assert_eq!(view.status_right, ready(32));
+    let site = s.sites()[0].id.clone();
+
+    assert!(s.set_engine_limit(&site, Some(4)));
+    assert_eq!(s.remote_view().status_right, ready(4));
+    assert!(
+        !s.set_engine_limit(&site, Some(4)),
+        "the same limit is no change"
+    );
+    assert!(s.set_engine_limit(&site, Some(1)));
+    assert_eq!(s.remote_view().status_right, ready(1));
+    assert!(s.remote_view().status_right.ends_with("1 connection ready"));
+    // Above the setting, the setting holds.
+    assert!(s.set_engine_limit(&site, Some(64)));
+    assert_eq!(s.remote_view().status_right, ready(32));
+    // Not known any more: the setting.
+    assert!(s.set_engine_limit(&site, Some(2)));
+    assert!(s.set_engine_limit(&site, None));
+    assert!(!s.set_engine_limit(&site, None));
+    assert_eq!(s.remote_view().status_right, ready(32));
+    // Another site's slow-down is not this one's.
+    assert!(s.set_engine_limit(&httporter_core::SiteId::new(), Some(3)));
+    assert_eq!(s.remote_view().status_right, ready(32));
+}

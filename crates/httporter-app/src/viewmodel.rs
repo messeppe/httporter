@@ -587,6 +587,32 @@ mod tests {
     }
 
     #[test]
+    fn column_widths_stay_between_60_and_400() {
+        // A saved 0 is the default; anything else is clamped.
+        assert_eq!(column_width(0, SIZE_WIDTH), SIZE_WIDTH);
+        assert_eq!(column_width(10, SIZE_WIDTH), MIN_WIDTH);
+        assert_eq!(column_width(60, SIZE_WIDTH), 60.0);
+        assert_eq!(column_width(250, MODIFIED_WIDTH), 250.0);
+        assert_eq!(column_width(400, STATUS_WIDTH), 400.0);
+        assert_eq!(column_width(u16::MAX, STATUS_WIDTH), MAX_WIDTH);
+        // Saving: within the limits, whole pixels, and 0 for the default.
+        assert_eq!(saved_width(SIZE_WIDTH, SIZE_WIDTH), 0);
+        assert_eq!(saved_width(SIZE_WIDTH + 0.4, SIZE_WIDTH), 0);
+        assert_eq!(saved_width(12.0, SIZE_WIDTH), 60);
+        assert_eq!(saved_width(150.6, SIZE_WIDTH), 151);
+        assert_eq!(saved_width(9_000.0, SIZE_WIDTH), 400);
+        assert_eq!(saved_width(f32::NAN, SIZE_WIDTH), 0);
+        assert_eq!(saved_width(f32::INFINITY, SIZE_WIDTH), 0);
+        // What is saved reads back as it was.
+        for width in [60.0, 99.0, 333.0, 400.0] {
+            assert_eq!(
+                column_width(saved_width(width, SIZE_WIDTH), SIZE_WIDTH),
+                width
+            );
+        }
+    }
+
+    #[test]
     fn column_numbers_map_to_sort_keys() {
         assert_eq!(sort_key_for_column(0), SortKey::Name);
         assert_eq!(sort_key_for_column(1), SortKey::Size);

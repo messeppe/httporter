@@ -485,4 +485,79 @@ mod tests {
         assert_eq!(down.dest, PathBuf::from("C:\\out"));
         assert!(parse_str(&["download", "s:/x", "o", "--overwrite", "--skip-existing"]).is_err());
     }
+
+    /// Review focus 4: what cmd and PowerShell hand over arrives as typed. Nothing is expanded or
+    /// decoded: `%`, `#`, spaces and Unicode stay in names, places and paths.
+    #[test]
+    fn names_and_paths_keep_spaces_percents_hashes_and_unicode() {
+        for name in [
+            "My Site",
+            "100% #1",
+            "%USERPROFILE%",
+            "Café Été 日本",
+            "a=b",
+        ] {
+            let Ok(Command::Publish(args)) = parse_str(&["publish", "--profile", name]) else {
+                panic!("publish --profile {name}");
+            };
+            assert_eq!(args.profile, name);
+            let inline = format!("--profile={name}");
+            let Ok(Command::Publish(args)) = parse_str(&["publish", &inline]) else {
+                panic!("publish {inline}");
+            };
+            assert_eq!(args.profile, name, "after the first = only");
+        }
+        // A profile named by its id is just a name to the parser.
+        let Ok(Command::Publish(args)) = parse_str(&[
+            "publish",
+            "--profile",
+            "0b0f3c1e-5d7a-4c1e-9b1a-2f6d1c7e8a90",
+        ]) else {
+            panic!("by id");
+        };
+        assert_eq!(args.profile, "0b0f3c1e-5d7a-4c1e-9b1a-2f6d1c7e8a90");
+        // A blank profile is no profile.
+        assert!(parse_str(&["publish", "--profile", "  "]).is_err());
+
+        let Ok(Command::Upload(up)) = parse_str(&[
+            "upload",
+            "C:\\My Files\\Grüße 100% #1.txt",
+            "--",
+            "-dash.txt",
+            "Café Site:/a b/%20/#x",
+        ]) else {
+            panic!("upload");
+        };
+        assert_eq!(
+            up.sources,
+            [
+                PathBuf::from("C:\\My Files\\Grüße 100% #1.txt"),
+                PathBuf::from("-dash.txt")
+            ]
+        );
+        assert_eq!(up.target.site, "Café Site");
+        assert_eq!(up.target.path, RemotePath::parse("a b/%20/#x").unwrap());
+        // A backslash after the colon starts the path too.
+        let Ok(Command::Ls(ls)) = parse_str(&["ls", "日本:\\docs\\a b"]) else {
+            panic!("ls");
+        };
+        assert_eq!(ls.target.site, "日本");
+        assert_eq!(ls.target.path, RemotePath::parse("docs/a b").unwrap());
+    }
+
+    #[test]
+    fn arguments_that_are_not_text_are_refused() {
+        use std::os::windows::ffi::OsStringExt;
+        let broken = OsString::from_wide(&[0x0061, 0xD800]);
+        let args = vec![
+            OsString::from("publish"),
+            OsString::from("--profile"),
+            broken,
+        ];
+        assert!(parse(&args).is_err());
+        // A local path need not be text: Windows names it.
+        let broken = OsString::from_wide(&[0x0061, 0xD800]);
+        let args = vec![OsString::from("upload"), broken, OsString::from("s:/x")];
+        assert!(matches!(parse(&args), Ok(Command::Upload(_))));
+    }
 }

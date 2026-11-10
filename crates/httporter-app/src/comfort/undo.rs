@@ -145,3 +145,91 @@ fn tab_title(tab: &TabState) -> String {
         .map(|m| manage::tabs::title(&m, tab))
         .unwrap_or_default()
 }
+
+/// The actions kept, oldest first (the tests look at the list).
+#[cfg(test)]
+pub(crate) fn kept() -> Vec<UndoAction> {
+    KEPT.with(|kept| kept.borrow().iter().map(|k| k.action.clone()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use httporter_core::PlaceKind;
+    use slint::Model;
+
+    use super::*;
+
+    fn window() -> AppWindow {
+        thread_local! {
+            static STARTED: Cell<bool> = const { Cell::new(false) };
+        }
+        if !STARTED.with(|started| started.replace(true)) {
+            i_slint_backend_testing::init_no_event_loop();
+        }
+        AppWindow::new().unwrap()
+    }
+
+    fn favorite(name: &str) -> Favorite {
+        Favorite {
+            id: 7,
+            kind: PlaceKind::Local,
+            name: name.to_owned(),
+            local: Some(std::path::PathBuf::from("D:\\site")),
+            site: None,
+            remote: None,
+        }
+    }
+
+    fn names(actions: &[UndoAction]) -> Vec<String> {
+        actions
+            .iter()
+            .map(|action| match action {
+                UndoAction::RestoreFavorite(f) => f.name.clone(),
+                UndoAction::ReopenTab { index, .. } => format!("tab {index}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_last_twenty_actions_are_kept() {
+        let ui = window();
+        for i in 0..25 {
+            push(&ui, UndoAction::RestoreFavorite(favorite(&format!("f{i}"))));
+        }
+        let kept = kept();
+        assert_eq!(kept.len(), KEEP);
+        assert_eq!(KEEP, 20);
+        let expected: Vec<String> = (5..25).map(|i| format!("f{i}")).collect();
+        assert_eq!(names(&kept), expected);
+        // Undo names the newest; the toasts stay three.
+        assert_eq!(next_undo(), Some(copy::undo_restore_favorite("f24")));
+        assert_eq!(ui.get_toasts().row_count(), toast::MAX_SHOWN);
+        assert!(!has_closed_tab());
+    }
+
+    #[test]
+    fn a_closed_tab_and_a_removed_favorite_each_have_their_toast() {
+        let ui = window();
+        assert_eq!(next_undo(), None);
+        push(&ui, UndoAction::RestoreFavorite(favorite("Uploads")));
+        let toasts = ui.get_toasts();
+        let shown = toasts.row_data(0).unwrap();
+        assert_eq!(shown.text, copy::favorite_removed("Uploads"));
+        assert_eq!(shown.action, copy::UNDO);
+        push(
+            &ui,
+            UndoAction::ReopenTab {
+                tab: TabState::default(),
+                index: 2,
+            },
+        );
+        assert!(has_closed_tab());
+        // Without a manager a tab has no title.
+        assert_eq!(next_undo(), Some(copy::undo_reopen_tab("")));
+        assert_eq!(
+            ui.get_toasts().row_data(1).unwrap().text,
+            copy::tab_closed("")
+        );
+        assert_eq!(names(&kept()), ["Uploads", "tab 2"]);
+    }
+}

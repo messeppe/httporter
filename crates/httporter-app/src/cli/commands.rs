@@ -679,8 +679,12 @@ async fn publish(ctx: &HeadlessCtx, args: PublishArgs) -> i32 {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::time::Instant;
+
+    use httporter_core::{MockOp, ProfileId};
 
     use super::*;
+    use crate::headless_tests::{Bed, bed, deletes, rp};
 
     #[test]
     fn names_are_found_in_any_case_and_ids_first() {
@@ -725,5 +729,189 @@ mod tests {
     #[test]
     fn a_missing_local_path_says_where() {
         assert!(copy::local_missing(Path::new("C:\\nope")).contains("C:\\nope"));
+    }
+
+    // ---- The commands over a mock site (T10) ----
+
+    fn run(b: &Bed, command: Command) -> i32 {
+        b.rt().block_on(dispatch(&b.ctx, command))
+    }
+
+    fn publish_of(profile: &str) -> PublishArgs {
+        PublishArgs {
+            profile: profile.to_owned(),
+            dry_run: false,
+            yes: false,
+            no_delete: false,
+            purge: None,
+            scheduled: false,
+        }
+    }
+
+    fn publish(profile: &str) -> Command {
+        Command::Publish(publish_of(profile))
+    }
+
+    #[test]
+    fn publish_finds_its_profile_by_name_in_any_case_or_by_id() {
+        let name = "Café Été 100% #1 & co";
+        let b = bed(&[], name);
+        b.file("a b%#é.txt", "x");
+        assert_eq!(run(&b, publish("café été 100% #1 & CO")), exit::OK);
+        assert_eq!(b.stored("a b%#é.txt").as_deref(), Some("x"));
+        b.file("ü/c.txt", "c");
+        let id = b.profile.id.0.to_uppercase();
+        assert_eq!(run(&b, publish(&id)), exit::OK);
+        assert_eq!(b.stored("ü/c.txt").as_deref(), Some("c"));
+        assert_eq!(run(&b, publish("Café")), exit::CONFIG, "names match whole");
+        assert_eq!(run(&b, publish("nobody")), exit::CONFIG);
+    }
+
+    #[test]
+    fn a_name_two_profiles_share_is_refused_with_their_ids() {
+        let b = bed(&[], "Blog");
+        let twin = ProfileRecord {
+            id: ProfileId::new(),
+            name: "BLOG".to_owned(),
+            ..b.profile.clone()
+        };
+        b.rt()
+            .block_on(b.ctx.session.save_profile(twin.clone()))
+            .unwrap();
+        b.file("a.txt", "a");
+        assert_eq!(run(&b, publish("blog")), exit::CONFIG);
+        assert_eq!(b.mock.calls(MockOp::Upload), 0);
+        let candidates = vec![
+            ("Blog".to_owned(), b.profile.id.0.clone()),
+            ("BLOG".to_owned(), twin.id.0.clone()),
+        ];
+        let text = copy::ambiguous(copy::PROFILE, "blog", &candidates);
+        assert!(text.contains(&b.profile.id.0) && text.contains(&twin.id.0));
+        // By its id, either one runs.
+        assert_eq!(run(&b, publish(&twin.id.0)), exit::OK);
+        assert_eq!(b.stored("a.txt").as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn publish_exits_4_for_the_guard_1_when_busy_and_0_otherwise() {
+        let old: Vec<(String, &str)> = (0..10).map(|i| (format!("old{i}.txt"), "o")).collect();
+        let remote: Vec<(&str, &str)> = old.iter().map(|(p, c)| (p.as_str(), *c)).collect();
+        let b = bed(&remote, "Blog");
+        b.file("new.txt", "n");
+        let dry = PublishArgs {
+            dry_run: true,
+            ..publish_of("Blog")
+        };
+        assert_eq!(run(&b, Command::Publish(dry)), exit::OK);
+        assert_eq!(b.mock.calls(MockOp::Upload), 0);
+        assert_eq!(run(&b, publish("Blog")), exit::GUARD);
+        assert_eq!(b.stored("new.txt").as_deref(), Some("n"), "the uploads ran");
+        assert_eq!(deletes(&b.mock), 0);
+        let no_delete = PublishArgs {
+            no_delete: true,
+            ..publish_of("Blog")
+        };
+        assert_eq!(run(&b, Command::Publish(no_delete)), exit::OK);
+        assert_eq!(deletes(&b.mock), 0);
+
+        let held = b
+            .rt()
+            .block_on(crate::publish::flow::lock_profile(
+                &b.profile.id,
+                Duration::ZERO,
+            ))
+            .unwrap();
+        let yes = PublishArgs {
+            yes: true,
+            ..publish_of("Blog")
+        };
+        assert_eq!(run(&b, Command::Publish(yes.clone())), exit::FAILURES);
+        assert!(b.stored("old0.txt").is_some());
+        drop(held);
+        assert_eq!(run(&b, Command::Publish(yes)), exit::OK);
+        assert!(b.stored("old0.txt").is_none());
+    }
+
+    #[test]
+    fn wrong_credentials_exit_3_at_once_and_never_ask() {
+        let b = bed(&[], "Blog");
+        let file = b.file("a.txt", "a");
+        b.forget_password();
+        let started = Instant::now();
+        assert_eq!(run(&b, publish("Blog")), exit::AUTH);
+        let ls = Command::Ls(LsArgs {
+            target: Remote {
+                site: "testzone".to_owned(),
+                path: RemotePath::root(),
+            },
+            json: false,
+        });
+        assert_eq!(run(&b, ls), exit::AUTH);
+        let upload = Command::Upload(UploadArgs {
+            sources: vec![file],
+            target: Remote {
+                site: "testzone".to_owned(),
+                path: RemotePath::root(),
+            },
+            conflicts: None,
+        });
+        assert_eq!(run(&b, upload), exit::AUTH);
+        assert!(started.elapsed() < Duration::from_secs(2), "S9: within 2 s");
+        assert_eq!(b.mock.calls(MockOp::Upload), 0);
+    }
+
+    #[test]
+    fn a_scheduled_run_whose_schedule_is_off_publishes_nothing() {
+        let b = bed(&[], "Blog");
+        b.file("a.txt", "a");
+        let scheduled = PublishArgs {
+            scheduled: true,
+            profile: b.profile.id.0.clone(),
+            ..publish_of("")
+        };
+        assert_eq!(run(&b, Command::Publish(scheduled)), exit::CONFIG);
+        assert_eq!(b.mock.calls(MockOp::Upload), 0);
+    }
+
+    #[test]
+    fn upload_and_ls_take_sites_by_name_or_id_and_paths_with_any_characters() {
+        let b = bed(&[], "Blog");
+        let file = b.file("up/Grüße 100% #2.txt", "g");
+        let to = |site: &str, path: &str| Remote {
+            site: site.to_owned(),
+            path: rp(path),
+        };
+        let upload = |site: &str, sources: Vec<std::path::PathBuf>| {
+            Command::Upload(UploadArgs {
+                sources,
+                target: to(site, "my folder/%20 #x"),
+                conflicts: None,
+            })
+        };
+        assert_eq!(run(&b, upload("TESTZONE", vec![file.clone()])), exit::OK);
+        assert_eq!(
+            b.stored("my folder/%20 #x/Grüße 100% #2.txt").as_deref(),
+            Some("g")
+        );
+        // By id, in any case.
+        let id = b.site.id.0.to_uppercase();
+        assert_eq!(run(&b, upload(&id, vec![file.clone()])), exit::OK);
+        assert_eq!(
+            b.stored("my folder/%20 #x/Grüße 100% #2.txt").as_deref(),
+            Some("g")
+        );
+        assert_eq!(run(&b, upload("elsewhere", vec![file])), exit::CONFIG);
+        let missing = b.local.path().join("not here.txt");
+        assert_eq!(run(&b, upload("testzone", vec![missing])), exit::CONFIG);
+        let ls = |json| {
+            Command::Ls(LsArgs {
+                target: to("testzone", "my folder"),
+                json,
+            })
+        };
+        assert_eq!(run(&b, ls(false)), exit::OK);
+        assert_eq!(run(&b, ls(true)), exit::OK);
+        assert_eq!(run(&b, Command::Sites), exit::OK);
+        assert_eq!(run(&b, Command::Profiles), exit::OK);
     }
 }

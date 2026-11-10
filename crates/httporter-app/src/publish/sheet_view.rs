@@ -1148,3 +1148,202 @@ pub fn install(ui: &AppWindow, p: &Arc<Publisher>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use httporter_core::{CompareBy, DeleteGuard, ProfileExtras, RemotePath, SiteId};
+    use httporter_transfer::CompareItem;
+    use slint::SharedString;
+
+    use super::*;
+
+    fn site(provider: ProviderKind) -> SiteRecord {
+        SiteRecord {
+            id: SiteId::new(),
+            name: "testzone".to_owned(),
+            provider,
+            container: "testzone".to_owned(),
+            region: "sg".to_owned(),
+            host: "testzone.b-cdn.net".to_owned(),
+            s3: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn profile(site: &SiteRecord, remove_extras: bool) -> ProfileRecord {
+        ProfileRecord {
+            id: ProfileId::new(),
+            site: site.id.clone(),
+            name: "Blog".to_owned(),
+            local_dir: PathBuf::from("D:\\site"),
+            remote_dir: RemotePath::root(),
+            skip_rules: Vec::new(),
+            remove_extras,
+            purge: PurgeMode::Changed,
+            guard: DeleteGuard::default(),
+            created_at: Utc::now(),
+            last_published_at: None,
+            cache_control: None,
+            extras: ProfileExtras::default(),
+        }
+    }
+
+    fn item(rel: String, status: Status) -> CompareItem {
+        CompareItem {
+            rel,
+            status,
+            local_size: (status != Status::RemoteOnly).then_some(10),
+            remote_size: (status != Status::New).then_some(10),
+            by: CompareBy::Size,
+            by_date: false,
+        }
+    }
+
+    /// `n` files of `status`, named `<prefix><i>.txt`.
+    fn files(n: usize, prefix: &str, status: Status) -> Vec<CompareItem> {
+        (0..n)
+            .map(|i| item(format!("{prefix}{i}.txt"), status))
+            .collect()
+    }
+
+    fn compared(items: Vec<CompareItem>) -> CompareResult {
+        CompareResult {
+            local_root: PathBuf::from("D:\\site"),
+            remote_root: RemotePath::root(),
+            items,
+            remote_folders: 0,
+            skipped_local: 0,
+            secrets: Vec::new(),
+            regions: 1,
+        }
+    }
+
+    /// The sheet for `profile` once the compare found `items`, as it is drawn.
+    fn drawn(
+        site: &SiteRecord,
+        profile: ProfileRecord,
+        items: Vec<CompareItem>,
+    ) -> (Sheet, PublishSheetData) {
+        let mut sheet = Sheet::new(1, profile, site.clone(), 4);
+        sheet.compared(compared(items), None);
+        let (data, _) = sheet.render();
+        (sheet, data)
+    }
+
+    #[test]
+    fn the_button_says_how_many_files_or_review_deletions() {
+        let bunny = site(ProviderKind::Bunny);
+
+        // While comparing: plain Publish, busy.
+        let mut comparing = Sheet::new(1, profile(&bunny, false), bunny.clone(), 4);
+        let (data, rows) = comparing.render();
+        assert_eq!(data.button_label, copy::PUBLISH);
+        assert!(data.busy && !data.can_publish && rows.is_empty());
+
+        let mut items = files(3, "new", Status::New);
+        items.extend(files(2, "changed", Status::Changed));
+        let (_, data) = drawn(&bunny, profile(&bunny, false), items);
+        assert_eq!(data.button_label, "Publish 5 Files");
+        assert!(!data.needs_review);
+
+        let (_, data) = drawn(&bunny, profile(&bunny, false), files(1, "a", Status::New));
+        assert_eq!(data.button_label, "Publish 1 File");
+
+        let (_, data) = drawn(&bunny, profile(&bunny, false), files(4, "s", Status::Same));
+        assert_eq!(data.button_label, copy::PUBLISH);
+        assert!(!data.can_publish);
+        assert_eq!(data.same, 4);
+
+        // Deleting 20 of 20 remote files trips the guard (more than 10 %).
+        let removing = files(20, "old", Status::RemoteOnly);
+        let (_, data) = drawn(&bunny, profile(&bunny, true), removing.clone());
+        assert_eq!(data.button_label, copy::REVIEW_DELETIONS);
+        assert_eq!(data.button_label, "Review Deletions\u{2026}");
+        assert!(data.needs_review);
+        assert_eq!(data.deletes, 20);
+        // Without Remove extras nothing is deleted, and nothing is left to do.
+        let (_, data) = drawn(&bunny, profile(&bunny, false), removing);
+        assert_eq!(data.button_label, copy::PUBLISH);
+        assert!(!data.needs_review);
+        assert_eq!(data.remote_only, 20);
+        // One delete in a hundred remote files is under the guard: it counts as a file to do.
+        let mut items = files(99, "same", Status::Same);
+        items.extend(files(1, "old", Status::RemoteOnly));
+        let (_, data) = drawn(&bunny, profile(&bunny, true), items);
+        assert_eq!(data.button_label, "Publish 1 File");
+        assert!(!data.needs_review);
+    }
+
+    #[test]
+    fn more_than_300_urls_purge_the_whole_zone_instead() {
+        let bunny = site(ProviderKind::Bunny);
+        let (sheet, data) = drawn(&bunny, profile(&bunny, false), files(300, "f", Status::New));
+        assert_eq!(sheet.purge, PurgeMode::Changed);
+        assert_eq!(sheet.zone_because, None);
+        assert_eq!(data.purge, 1);
+        assert_eq!(data.purge_note, "");
+
+        let (sheet, data) = drawn(&bunny, profile(&bunny, false), files(301, "f", Status::New));
+        assert_eq!(sheet.purge, PurgeMode::Zone);
+        assert_eq!(sheet.zone_because, Some(301));
+        assert_eq!(data.purge, 2);
+        assert_eq!(data.purge_note, copy::zone_is_faster(301));
+        assert_eq!(
+            data.purge_note,
+            "301 URLs to purge \u{2014} purging the whole zone is faster."
+        );
+
+        // A folder's index.html is three URLs: 100 of them are exactly 300, 101 are past it.
+        let pages = |n: usize| -> Vec<CompareItem> {
+            (0..n)
+                .map(|i| item(format!("p{i}/index.html"), Status::Changed))
+                .collect()
+        };
+        let (sheet, _) = drawn(&bunny, profile(&bunny, false), pages(100));
+        assert_eq!(sheet.zone_because, None);
+        let (sheet, _) = drawn(&bunny, profile(&bunny, false), pages(101));
+        assert_eq!(sheet.zone_because, Some(303));
+
+        // A profile that doesn't purge is left alone.
+        let mut off = profile(&bunny, false);
+        off.purge = PurgeMode::Off;
+        let (sheet, _) = drawn(&bunny, off, files(500, "f", Status::New));
+        assert_eq!(sheet.purge, PurgeMode::Off);
+
+        // S3 has no CDN to purge.
+        let s3 = site(ProviderKind::S3);
+        let (sheet, data) = drawn(&s3, profile(&s3, false), files(500, "f", Status::New));
+        assert_eq!(sheet.purge, PurgeMode::Off);
+        assert_eq!(data.purge, 0);
+        assert!(!data.purge_enabled);
+        assert_eq!(data.purge_note, copy::PURGE_NEEDS_BUNNY);
+    }
+
+    #[test]
+    fn the_sheet_shows_what_is_drawn() {
+        thread_local! {
+            static STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        if !STARTED.with(|started| started.replace(true)) {
+            i_slint_backend_testing::init_no_event_loop();
+        }
+        let ui = AppWindow::new().unwrap();
+        let bunny = site(ProviderKind::Bunny);
+        let mut sheet = Sheet::new(1, profile(&bunny, true), bunny.clone(), 4);
+        sheet.compared(compared(files(20, "old", Status::RemoteOnly)), None);
+        let (data, rows) = sheet.render();
+        apply(&ui, data, rows);
+        let shown = ui.get_publish_sheet();
+        assert_eq!(
+            shown.button_label,
+            SharedString::from("Review Deletions\u{2026}")
+        );
+        assert!(shown.needs_review);
+        // The group's header and its 20 files.
+        assert_eq!(ui.get_plan_rows().row_count(), 21);
+        let header = ui.get_plan_rows().row_data(0).unwrap();
+        assert!(header.header && header.checked);
+        assert_eq!(header.group, PlanGroup::Deleted);
+    }
+}

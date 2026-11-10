@@ -970,4 +970,49 @@ mod tests {
         put_task(&fake, &record).unwrap();
         assert_eq!(look_up(&fake, &name).1, Some((six, 0)));
     }
+
+    /// Schedule → the task's trigger: what Task Scheduler is handed for each kind of repeat is
+    /// the profile's schedule as saved, with this program, and the purge flag the schedule asks.
+    #[test]
+    fn the_scheduler_is_handed_the_schedules_trigger_fields() {
+        let weekly = Schedule {
+            enabled: true,
+            repeat: ScheduleRepeat::Weekly {
+                days: [true, false, true, false, true, false, false],
+            },
+            at_minutes: 6 * 60 + 30,
+            purge: Some(PurgeMode::Changed),
+        };
+        let hourly = Schedule {
+            enabled: true,
+            repeat: ScheduleRepeat::Hourly { every: 3 },
+            at_minutes: 15,
+            purge: Some(PurgeMode::Off),
+        };
+        for (schedule, purge) in [
+            (weekly, Some("changed")),
+            (hourly, Some("none")),
+            (daily(23 * 60 + 59), None),
+        ] {
+            let fake = FakeScheduler::new();
+            let record = profile("Café 100% #1", Some(schedule.clone()));
+            put_task(&fake, &record).unwrap();
+            let tasks = fake.tasks();
+            assert_eq!(tasks.len(), 1);
+            let task = &tasks[0];
+            assert_eq!(task.name, win::task_name(&record.id));
+            assert_eq!(task.schedule, schedule);
+            assert_eq!(task.exe, std::env::current_exe().unwrap());
+            let flag = task
+                .args
+                .iter()
+                .position(|arg| arg == "--purge")
+                .map(|at| task.args[at + 1].as_str());
+            assert_eq!(flag, purge);
+            // The profile is named by its id: no name, quoting or secret on the command line.
+            assert!(task.args.contains(&record.id.0));
+            assert!(!task.args.iter().any(|arg| arg.contains("Café")));
+            assert!(task.description.contains("Café 100% #1"));
+        }
+    }
 }
