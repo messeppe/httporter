@@ -636,3 +636,114 @@ async fn a_zone_that_is_gone_is_not_found() {
         Err(ProviderError::NotFound)
     );
 }
+
+// ---- Open questions of the I6 plan, checked against Bunny's API reference ----
+
+/// The reference (`PullZoneAddModel.Name`) gives only `minLength: 1`, no pattern; the name
+/// becomes the host name label `{name}.b-cdn.net`, where hyphens are allowed inside. The test
+/// pull zone itself is called `httporter-test-sg`.
+#[tokio::test]
+async fn pull_zone_names_may_hold_hyphens_inside() {
+    for good in ["httporter-test-sg", "a-b", "a--b", "x1-2-3"] {
+        assert_eq!(pull_zone_name_problem(good), None, "{good}");
+    }
+    assert_eq!(
+        pull_zone_name_problem("-cdn"),
+        Some(ZoneNameProblem::Hyphen)
+    );
+    assert_eq!(
+        pull_zone_name_problem("cdn-"),
+        Some(ZoneNameProblem::Hyphen)
+    );
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/pullzone"))
+        .and(body_json(json!({
+            "Name": "httporter-test-sg",
+            "OriginType": 2,
+            "StorageZoneId": 501,
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(pull_zone(
+            9101,
+            "httporter-test-sg",
+            501,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let pull = account(&server)
+        .create_pull_zone("httporter-test-sg", 501)
+        .await
+        .unwrap();
+    assert_eq!(pull.hostnames, ["httporter-test-sg.b-cdn.net"]);
+}
+
+/// Both checks send `{"Name": …}` (the reference's `ZoneAvailabilityRequestModel`); the
+/// reference names no answer fields, and `Available` is what live answers carry.
+#[tokio::test]
+async fn availability_sends_name_and_reads_available() {
+    let server = MockServer::start().await;
+    for path_ in [
+        "/storagezone/checkavailability",
+        "/pullzone/checkavailability",
+    ] {
+        Mock::given(method("POST"))
+            .and(path(path_))
+            .and(header("content-type", "application/json"))
+            .and(body_json(json!({ "Name": "httporter-test-new" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "Available": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let account = account(&server);
+    assert!(
+        account
+            .zone_name_available("httporter-test-new")
+            .await
+            .unwrap()
+    );
+    assert!(
+        account
+            .pull_zone_name_available("httporter-test-new")
+            .await
+            .unwrap()
+    );
+}
+
+/// The reference marks `Custom404FilePath` nullable and says nothing about clearing; the code
+/// clears it by sending an empty string, also for a path of only white space.
+#[tokio::test]
+async fn a_blank_404_path_is_sent_as_an_empty_string() {
+    let server = MockServer::start().await;
+    let mut zone = storage_zone(501, "httporter-site", "SG", true);
+    zone["Custom404FilePath"] = json!("/404.html");
+    Mock::given(method("GET"))
+        .and(path("/storagezone/501"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(zone))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/storagezone/501"))
+        .and(body_json(json!({
+            "Custom404FilePath": "",
+            "Rewrite404To200": false,
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    account(&server)
+        .update_zone_settings(
+            501,
+            &ZoneSettings {
+                custom_404_path: Some("   ".into()),
+                rewrite_404_to_200: false,
+                replication: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+}
