@@ -511,6 +511,9 @@ async fn manage_smoke_on_the_r2_test_bucket() {
             moved.failed.len()
         );
         assert_eq!((moved.copied, moved.deleted), (1, 1));
+        for (path, why) in &moved.failed {
+            say!("  move failed: {} ({})", path.as_str(), why);
+        }
         assert!(moved.failed.is_empty());
         assert!(provider.stat(&renamed).await.is_ok());
         assert_eq!(

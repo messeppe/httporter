@@ -218,6 +218,8 @@ pub async fn run_move(
         .collect();
     let down = run_batch(engine, &target, deletes).await?;
     outcome.deleted = down.done.len() as u64;
+    // Bunny's listings lag behind its deletes: a file deleted a moment ago may still be listed.
+    let just_deleted: HashSet<&RemotePath> = down.done.iter().collect();
     let files_gone = down.failed.is_empty() && down.cancelled.is_empty();
     outcome.failed.extend(down.failed);
     outcome.failed.extend(
@@ -230,10 +232,16 @@ pub async fn run_move(
         let mut folders = Vec::new();
         for from in top_folders(plan) {
             match walk(&*target.provider, &from).await {
-                Ok(left) if left.iter().all(|entry| entry.is_folder) => folders.push(Job::Delete {
-                    remote: from,
-                    folder: true,
-                }),
+                Ok(left)
+                    if left
+                        .iter()
+                        .all(|entry| entry.is_folder || just_deleted.contains(&entry.path)) =>
+                {
+                    folders.push(Job::Delete {
+                        remote: from,
+                        folder: true,
+                    });
+                }
                 Ok(_) => outcome
                     .failed
                     .push((from, messages::MOVE_FOLDER_NOT_EMPTY.to_owned())),
