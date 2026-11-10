@@ -40,21 +40,81 @@ global ConflictSizes {
 // control took it (`confirm`, the default button) and Tab and Shift+Tab at the ends of the Tab
 // order (`focus-first`, `focus-last`). The dialog says where the focus is with `at-first-stop` and
 // `at-last-stop`.
+//
+// Motion (I7), the same for every dialog because it lives here: coming in, the scrim fades in and
+// the dialog slides down `enter-offset` and fades in, growing from `enter-scale` (a spring with no
+// bounce; Quick Look's `pop` has a little). The dialog is usable at once: the focus and the keys
+// work while it moves. Going (`leave(how)`): the scrim and the dialog fade, the dialog rises, and
+// when that is over `left(how)` says so, so that the window closes it then. A dialog leaves this
+// way when it closes itself (Escape, Cancel, an alert's buttons); when the app decides whether it
+// closes (Create, Save), it goes at once. If the app keeps it open after `left`, it comes back.
 export component Modal inherits Rectangle {
     // The focus is on the first control of the dialog.
     in property <bool> at-first-stop;
     // The focus is on the last control of the dialog.
     in property <bool> at-last-stop;
+    // The dimming over the window behind.
+    in property <brush> scrim: Theme.scrim;
+    // Where the dialog comes in from (above its place) and how small it starts.
+    in property <length> enter-offset: -12px;
+    in property <float> enter-scale: 0.97;
+    // Quick Look's entrance: a spring with a little bounce.
+    in property <bool> pop: false;
+    // The exit is playing; the dialog takes no more clicks or keys.
+    out property <bool> leaving: false;
     callback cancel();
     callback confirm();
     callback focus-first();
     callback focus-last();
+    // The exit that `leave(how)` started is over.
+    callback left(int);
 
-    background: Theme.scrim;
+    // 0 → 1 as the dialog comes in, and 0 → 1 as it goes.
+    property <float> shown: 0;
+    property <float> popped: 0;
+    property <float> gone: 0;
+    property <float> appear: root.pop ? root.popped : root.shown;
+    property <int> how: 0;
+
+    animate shown { duration: Theme.motion-sheet; easing: spring(0); }
+    animate popped { duration: Theme.motion-sheet; easing: spring(0.15); }
+    animate gone { duration: Theme.motion-exit; easing: ease-in; }
+
+    // Plays the exit, then says `left(how)`. A second call while it plays is ignored, so that a
+    // double click or a held key closes once.
+    public function leave(how: int) {
+        if (!root.leaving) {
+            root.how = how;
+            root.leaving = true;
+            root.gone = 1;
+            trap.focus();
+        }
+    }
+
+    init => {
+        root.shown = 1;
+        root.popped = 1;
+    }
+
+    Rectangle {
+        background: root.scrim;
+        opacity: root.shown * (1 - root.gone);
+    }
 
     // Swallows the pointer: nothing behind the dialog sees a click, hover or scroll.
     TouchArea {
         scroll-event(event) => { accept }
+    }
+
+    Timer {
+        interval: Theme.motion-exit;
+        running: root.leaving;
+        triggered => {
+            root.leaving = false;
+            root.left(root.how);
+            // Normally the window has closed the dialog; if it kept it, it comes back.
+            root.gone = 0;
+        }
     }
 
     // Not a Tab stop itself; it takes the focus when blank space on the dialog is clicked.
@@ -63,6 +123,9 @@ export component Modal inherits Rectangle {
         height: parent.height;
         focus-on-tab-navigation: false;
         key-pressed(event) => {
+            if (root.leaving) {
+                return accept;
+            }
             if (event.text == Key.Escape) {
                 root.cancel();
                 return accept;
@@ -86,20 +149,99 @@ export component Modal inherits Rectangle {
             return reject;
         }
 
-        @children
+        // The dialog, moved, faded and scaled as one. (`transform-scale` is drawn once the
+        // software renderer draws scaled elements; the fade and the slide carry the motion
+        // without it.)
+        Rectangle {
+            y: root.enter-offset * (1 - root.appear + root.gone);
+            width: parent.width;
+            height: parent.height;
+            opacity: min(1, root.appear) * (1 - root.gone);
+            transform-scale: root.enter-scale + (1 - root.enter-scale) * (root.appear - root.gone);
+
+            @children
+        }
+
+        // While the exit plays, a click does nothing (the dialog's buttons were pressed already).
+        if root.leaving: TouchArea { }
+    }
+}
+
+// Clicks on the dimmed window around a dialog's card (the "hole"): the card nods sideways, 8 px
+// on a bouncy spring, the way a macOS sheet answers a click outside it. It goes under the card and
+// fills the dialog; the card adds `offset` to its x. Clicks on the card itself go by it.
+export component OutsideNudge inherits Rectangle {
+    in property <length> hole-x;
+    in property <length> hole-y;
+    in property <length> hole-width;
+    in property <length> hole-height;
+    out property <length> offset: 0px;
+
+    animate offset { duration: Theme.motion-control; easing: spring(0.3); }
+
+    function nudge() {
+        // With animations off in Windows there is nothing to see.
+        if (Theme.motion) {
+            root.offset = 8px;
+            back.running = true;
+        }
+    }
+
+    back := Timer {
+        interval: Theme.motion-hover;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.offset = 0px;
+        }
+    }
+
+    // Above, below, left and right of the card.
+    TouchArea {
+        y: 0px;
+        height: max(0px, root.hole-y);
+        clicked => { root.nudge(); }
+    }
+    TouchArea {
+        y: root.hole-y + root.hole-height;
+        height: max(0px, parent.height - self.y);
+        clicked => { root.nudge(); }
+    }
+    TouchArea {
+        x: 0px;
+        y: root.hole-y;
+        width: max(0px, root.hole-x);
+        height: root.hole-height;
+        clicked => { root.nudge(); }
+    }
+    TouchArea {
+        x: root.hole-x + root.hole-width;
+        y: root.hole-y;
+        width: max(0px, parent.width - self.x);
+        height: root.hole-height;
+        clicked => { root.nudge(); }
     }
 }
 
 // A sheet that hangs from the toolbar (the way a macOS sheet hangs from the title bar): flat at
 // the top, rounded below. It fills its parent and draws the sheet centred under the toolbar, as
-// high as its content and as wide as `sheet-width` allows.
+// high as its content and as wide as `sheet-width` allows. A click beside it nudges it.
 export component AttachedSheet inherits Rectangle {
     in property <length> sheet-width: 460px;
     // What assistive technology calls the sheet.
     in property <string> label;
 
+    property <length> base-x: (root.width - sheet.width) / 2;
+
+    nudger := OutsideNudge {
+        hole-x: root.base-x;
+        hole-y: sheet.y;
+        hole-width: sheet.width;
+        hole-height: sheet.height;
+    }
+
     sheet := Rectangle {
-        x: (parent.width - self.width) / 2;
+        x: root.base-x + nudger.offset;
         y: Theme.toolbar-height;
         width: min(root.sheet-width, parent.width - 32px);
         height: content.preferred-height;
@@ -128,7 +270,7 @@ export component AttachedSheet inherits Rectangle {
 
 // An alert (mockup `.alert`): a compact card in the middle of the window with a tinted tile, a
 // bold title, a line of text and then whatever the alert puts under them (the children). It fills
-// its parent and draws the card centred.
+// its parent and draws the card centred. A click beside it nudges it.
 export component AlertCard inherits Rectangle {
     in property <image> icon;
     in property <color> tint;
@@ -136,10 +278,19 @@ export component AlertCard inherits Rectangle {
     in property <string> title;
     in property <string> body;
 
+    property <length> base-x: (root.width - card.width) / 2;
+
+    nudger := OutsideNudge {
+        hole-x: root.base-x;
+        hole-y: card.y;
+        hole-width: card.width;
+        hole-height: card.height;
+    }
+
     card := Rectangle {
         width: min(340px, parent.width - 32px);
         height: content.preferred-height;
-        x: (parent.width - self.width) / 2;
+        x: root.base-x + nudger.offset;
         y: (parent.height - self.height) / 2;
         background: Theme.sheet;
         border-radius: Theme.radius-xl;
@@ -325,18 +476,39 @@ export component Segmented inherits Rectangle {
     accessible-label: root.label;
     accessible-enabled: root.enabled;
 
+    // Where the chosen option is, which the pill slides to. Until it has been placed once it
+    // snaps there (no slide when the control appears).
+    property <length> pill-x: 2px;
+    property <length> pill-width: 0px;
+    property <bool> pill-placed: false;
+
+    // The chosen option's pill (mockup `.seg .on`): one piece under the options that slides
+    // between them on a spring.
+    Rectangle {
+        x: root.pill-x;
+        y: 2px;
+        width: root.pill-width;
+        height: parent.height - 4px;
+        border-radius: 6px;
+        background: Theme.control;
+        border-width: 1phx;
+        border-color: Theme.control-border;
+        drop-shadow-blur: 1.5px;
+        drop-shadow-offset-y: 0.5px;
+        drop-shadow-color: Theme.shadow-control;
+        visible: root.current >= 0 && root.current < root.options.length;
+
+        animate x, width {
+            duration: root.pill-placed ? Theme.motion-control : 1ms;
+            easing: spring(0.15);
+        }
+    }
+
     HorizontalLayout {
         padding: 2px;
         spacing: 2px;
 
         for option[i] in root.options: Rectangle {
-            border-radius: 6px;
-            background: i == root.current ? Theme.control : transparent;
-            border-width: i == root.current ? 1phx : 0px;
-            border-color: Theme.control-border;
-            drop-shadow-blur: 1.5px;
-            drop-shadow-offset-y: 0.5px;
-            drop-shadow-color: i == root.current ? Theme.shadow-control : transparent;
             accessible-role: radio-button;
             accessible-checkable: true;
             accessible-checked: i == root.current;
@@ -363,6 +535,22 @@ export component Segmented inherits Rectangle {
                 clicked => {
                     key-focus.focus();
                     root.select(i);
+                }
+            }
+
+            // On the chosen option: tells the pill where to go, also when the option moves or
+            // changes width (a longer translation, a larger text size).
+            if i == root.current: Rectangle {
+                width: 0px;
+                height: 0px;
+                property <length> at: parent.x;
+                property <length> wide: parent.width;
+                changed at => { root.pill-x = self.at; }
+                changed wide => { root.pill-width = self.wide; }
+                init => {
+                    root.pill-x = self.at;
+                    root.pill-width = self.wide;
+                    root.pill-placed = true;
                 }
             }
         }
@@ -549,11 +737,18 @@ export component ConflictSheet inherits Rectangle {
 
     init => { mode-control.focus(); }
 
-    Modal {
+    modal := Modal {
         at-first-stop: mode-control.has-focus;
         at-last-stop: continue-button.has-focus;
-        cancel => { root.cancelled(); }
-        confirm => { root.continued(root.mode, root.remember); }
+        cancel => { self.leave(0); }
+        confirm => { self.leave(1); }
+        left(how) => {
+            if (how == 1) {
+                root.continued(root.mode, root.remember);
+            } else {
+                root.cancelled();
+            }
+        }
         focus-first => { mode-control.focus(); }
         focus-last => { continue-button.focus(); }
 
@@ -757,12 +952,12 @@ export component ConflictSheet inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
                 cancel-button := CapsuleButton {
                     text: root.cancel-label;
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 continue-button := CapsuleButton {
                     text: @tr("Continue");
                     primary: true;
-                    clicked => { root.continued(root.mode, root.remember); }
+                    clicked => { modal.leave(1); }
                 }
             }
         }
@@ -796,10 +991,11 @@ export component NewFolderSheet inherits Rectangle {
         name-field.select-all();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: name-field.has-focus;
         at-last-stop: create-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         confirm => { root.submit(); }
         focus-first => { name-field.focus(); }
         focus-last => { create-button.focus(); }
@@ -852,7 +1048,7 @@ export component NewFolderSheet inherits Rectangle {
 
                 cancel-button := CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 create-button := CapsuleButton {
                     text: @tr("Create");
@@ -882,11 +1078,18 @@ export component DeleteAlert inherits Rectangle {
 
     init => { cancel-button.focus(); }
 
-    Modal {
+    modal := Modal {
         at-first-stop: root.purge-available ? purge-check.has-focus : delete-button.has-focus;
         at-last-stop: cancel-button.has-focus;
-        cancel => { root.cancelled(); }
-        confirm => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        confirm => { self.leave(0); }
+        left(how) => {
+            if (how == 1) {
+                root.confirmed();
+            } else {
+                root.cancelled();
+            }
+        }
         focus-first => {
             if (root.purge-available) {
                 purge-check.focus();
@@ -931,13 +1134,13 @@ export component DeleteAlert inherits Rectangle {
                     horizontal-stretch: 1;
                     text: root.delete-label;
                     destructive: true;
-                    clicked => { root.confirmed(); }
+                    clicked => { modal.leave(1); }
                 }
                 cancel-button := CapsuleButton {
                     horizontal-stretch: 1;
                     text: @tr("Cancel");
                     primary: true;
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
             }
         }
@@ -954,11 +1157,18 @@ export component RemoveSiteAlert inherits Rectangle {
 
     init => { cancel-button.focus(); }
 
-    Modal {
+    modal := Modal {
         at-first-stop: remove-button.has-focus;
         at-last-stop: cancel-button.has-focus;
-        cancel => { root.cancelled(); }
-        confirm => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        confirm => { self.leave(0); }
+        left(how) => {
+            if (how == 1) {
+                root.confirmed();
+            } else {
+                root.cancelled();
+            }
+        }
         focus-first => { remove-button.focus(); }
         focus-last => { cancel-button.focus(); }
 
@@ -976,13 +1186,13 @@ export component RemoveSiteAlert inherits Rectangle {
                     horizontal-stretch: 1;
                     text: @tr("Remove");
                     destructive: true;
-                    clicked => { root.confirmed(); }
+                    clicked => { modal.leave(1); }
                 }
                 cancel-button := CapsuleButton {
                     horizontal-stretch: 1;
                     text: @tr("Cancel");
                     primary: true;
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
             }
         }
@@ -1007,7 +1217,7 @@ export component ImportSheet inherits Rectangle {
 
     function submit() {
         if (root.has-profiles) {
-            root.profile-chosen(profile-list.current);
+            modal.leave(1);
         } else {
             root.env-file();
         }
@@ -1031,10 +1241,17 @@ export component ImportSheet inherits Rectangle {
 
     init => { root.focus-first(); }
 
-    Modal {
+    modal := Modal {
         at-first-stop: root.has-profiles ? profile-list.has-focus : env-button.has-focus;
         at-last-stop: root.has-profiles ? use-button.has-focus : cancel-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left(how) => {
+            if (how == 1) {
+                root.profile-chosen(profile-list.current);
+            } else {
+                root.cancelled();
+            }
+        }
         confirm => { root.submit(); }
         focus-first => { root.focus-first(); }
         focus-last => { root.focus-last(); }
@@ -1110,13 +1327,13 @@ export component ImportSheet inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
                 cancel-button := CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 use-button := CapsuleButton {
                     text: @tr("Use Profile");
                     primary: true;
                     enabled: root.has-profiles;
-                    clicked => { root.profile-chosen(profile-list.current); }
+                    clicked => { modal.leave(1); }
                 }
             }
         }
@@ -1134,11 +1351,20 @@ export component QuitAlert inherits Rectangle {
 
     init => { keep-button.focus(); }
 
-    Modal {
+    modal := Modal {
         at-first-stop: pause-button.has-focus;
         at-last-stop: keep-button.has-focus;
-        cancel => { root.keep-running(); }
-        confirm => { root.keep-running(); }
+        cancel => { self.leave(0); }
+        confirm => { self.leave(0); }
+        left(how) => {
+            if (how == 1) {
+                root.pause-and-quit();
+            } else if (how == 2) {
+                root.cancel-and-quit();
+            } else {
+                root.keep-running();
+            }
+        }
         focus-first => { pause-button.focus(); }
         focus-last => { keep-button.focus(); }
 
@@ -1154,17 +1380,17 @@ export component QuitAlert inherits Rectangle {
 
                 pause-button := CapsuleButton {
                     text: @tr("Pause and Quit");
-                    clicked => { root.pause-and-quit(); }
+                    clicked => { modal.leave(1); }
                 }
                 CapsuleButton {
                     text: @tr("Cancel and Quit");
                     destructive: true;
-                    clicked => { root.cancel-and-quit(); }
+                    clicked => { modal.leave(2); }
                 }
                 keep-button := CapsuleButton {
                     text: @tr("Keep Running");
                     primary: true;
-                    clicked => { root.keep-running(); }
+                    clicked => { modal.leave(0); }
                 }
             }
         }

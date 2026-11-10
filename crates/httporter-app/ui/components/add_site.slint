@@ -32,6 +32,7 @@ import { CapsuleButton } from "buttons.slint";
 import { CheckLine, ErrorLine, Field, FormRow, RadioList, RegionPicker, SecretField } from "form_controls.slint";
 import { ProviderGrid } from "provider_grid.slint";
 import { VCenter } from "layout.slint";
+import { Modal, OutsideNudge } from "sheets.slint";
 
 // One option of the "Sign in with" segmented control (mockup `.seg`).
 component Segment inherits Rectangle {
@@ -334,8 +335,6 @@ export component AddSiteSheet inherits Rectangle {
     callback reveal();
     callback cancel();
 
-    background: Theme.scrim;
-
     property <int> provider: grid.selected;
     property <int> sign-in-mode: sign-in.current;
     property <bool> bunny: root.provider == 0;
@@ -488,10 +487,12 @@ export component AddSiteSheet inherits Rectangle {
                 region-box.focus();
             } else if (root.password-error != "") {
                 password-field.focus();
+                root.shake(1);
             }
         } else if (root.account-mode) {
             if (root.key-error != "") {
                 key-field.focus();
+                root.shake(2);
             }
         } else if (root.s3-errors.account-id != "") {
             account-field.focus();
@@ -503,8 +504,49 @@ export component AddSiteSheet inherits Rectangle {
             bucket-field.focus();
         } else if (root.s3-errors.key-id != "") {
             key-id-field.focus();
+            root.shake(4);
         } else if (root.s3-errors.secret != "") {
             secret-field.focus();
+            root.shake(3);
+        }
+    }
+
+    // The credential field that shakes (1 password, 2 account key, 3 secret access key, 4 access
+    // key ID), how far it is out of place, and which swing it is on.
+    property <int> shaking: 0;
+    property <length> shake-x: 0px;
+    property <int> swing: 0;
+
+    animate shake-x { duration: Theme.motion-sheet / 6; easing: ease-in-out; }
+
+    // A wrong password or key: the field swings three times, smaller each time, in 0.35 s (the
+    // macOS login window). Not with animations off in Windows.
+    function shake(which: int) {
+        if (Theme.motion) {
+            root.shaking = which;
+            root.swing = 0;
+            root.shake-x = 10px;
+            swinger.running = true;
+        }
+    }
+
+    swinger := Timer {
+        interval: Theme.motion-sheet / 6;
+        running: false;
+        triggered => {
+            root.swing += 1;
+            if (root.swing == 1) {
+                root.shake-x = -10px;
+            } else if (root.swing == 2) {
+                root.shake-x = 6px;
+            } else if (root.swing == 3) {
+                root.shake-x = -6px;
+            } else if (root.swing == 4) {
+                root.shake-x = 2px;
+            } else {
+                root.shake-x = 0px;
+                self.running = false;
+            }
         }
     }
 
@@ -527,42 +569,37 @@ export component AddSiteSheet inherits Rectangle {
         root.refresh-endpoint();
     }
 
-    // Swallows the pointer: nothing behind the sheet sees a click, hover or scroll.
-    TouchArea {
-        scroll-event(event) => { accept }
-    }
+    // The shared modal frame (sheets.slint): the scrim swallows the pointer, the keyboard stays
+    // inside, and the sheet comes in and goes out the way every sheet does. Return is left to the
+    // fields and buttons (Return in a text field presses the default button).
+    modal := Modal {
+        at-first-stop: root.on-first-stop;
+        at-last-stop: root.on-last-stop;
+        cancel => {
+            // Escape closes the bucket list first, and the sheet when there is none.
+            if (root.buckets-open) {
+                root.buckets-open = false;
+            } else {
+                self.leave(0);
+            }
+        }
+        confirm => { }
+        focus-first => { root.focus-first-stop(); }
+        focus-last => { root.focus-last-stop(); }
+        left => { root.cancel(); }
 
-    // Keeps the keyboard inside the sheet. It is not a Tab stop itself; it takes the focus when
-    // blank space on the sheet is clicked.
-    trap := FocusScope {
-        width: parent.width;
-        height: parent.height;
-        focus-on-tab-navigation: false;
-        key-pressed(event) => {
-            if (event.text == Key.Escape) {
-                // Escape closes the bucket list first, and the sheet when there is none.
-                if (root.buckets-open) {
-                    root.buckets-open = false;
-                } else {
-                    root.cancel();
-                }
-                return accept;
-            }
-            if (event.text == Key.Tab && !event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && root.on-last-stop) {
-                root.focus-first-stop();
-                return accept;
-            }
-            if ((event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && (root.on-first-stop || trap.has-focus)) {
-                root.focus-last-stop();
-                return accept;
-            }
-            return reject;
+        // A click beside the sheet nudges it.
+        nudger := OutsideNudge {
+            hole-x: (parent.width - sheet.width) / 2;
+            hole-y: sheet.y;
+            hole-width: sheet.width;
+            hole-height: sheet.height;
         }
 
         sheet := Rectangle {
             width: min(760px, parent.width - 32px);
             height: content.preferred-height;
-            x: (parent.width - self.width) / 2;
+            x: (parent.width - self.width) / 2 + nudger.offset;
             y: max(12px, min(64px, parent.height - self.height - 12px));
             background: Theme.sheet;
             border-radius: Theme.radius-xl;
@@ -704,18 +741,25 @@ export component AddSiteSheet inherits Rectangle {
 
                         FormRow {
                             label: @tr("Password");
-                            password-field := SecretField {
-                                label: @tr("Password");
-                                show-label: @tr("Show password");
-                                hide-label: @tr("Hide password");
-                                placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : (root.secret-imported ? @tr("Imported. Leave empty to use it.") : "");
-                                error: root.password-error;
-                                edited => {
-                                    root.password-error = "";
-                                    root.touched();
+                            Rectangle {
+                                // As high as a field (the field moves inside it when it shakes).
+                                height: Theme.control-height;
+
+                                password-field := SecretField {
+                                    label: @tr("Password");
+                                    x: root.shaking == 1 ? root.shake-x : 0px;
+                                    width: parent.width;
+                                    show-label: @tr("Show password");
+                                    hide-label: @tr("Hide password");
+                                    placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : (root.secret-imported ? @tr("Imported. Leave empty to use it.") : "");
+                                    error: root.password-error;
+                                    edited => {
+                                        root.password-error = "";
+                                        root.touched();
+                                    }
+                                    accepted => { root.submit(); }
+                                    reveal-toggled => { root.reveal(); }
                                 }
-                                accepted => { root.submit(); }
-                                reveal-toggled => { root.reveal(); }
                             }
                             if root.password-error != "": ErrorLine { text: root.password-error; }
                             Text {
@@ -736,18 +780,25 @@ export component AddSiteSheet inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 8px;
 
-                                key-field := SecretField {
+                                Rectangle {
                                     horizontal-stretch: 1;
-                                    label: @tr("Account key");
-                                    show-label: @tr("Show account key");
-                                    hide-label: @tr("Hide account key");
-                                    error: root.key-error;
-                                    edited => {
-                                        root.key-error = "";
-                                        root.touched();
+                                    // As high as a field (the field moves inside it when it shakes).
+                                    height: Theme.control-height;
+
+                                    key-field := SecretField {
+                                        label: @tr("Account key");
+                                        x: root.shaking == 2 ? root.shake-x : 0px;
+                                        width: parent.width;
+                                        show-label: @tr("Show account key");
+                                        hide-label: @tr("Hide account key");
+                                        error: root.key-error;
+                                        edited => {
+                                            root.key-error = "";
+                                            root.touched();
+                                        }
+                                        accepted => { root.submit(); }
+                                        reveal-toggled => { root.reveal(); }
                                     }
-                                    accepted => { root.submit(); }
-                                    reveal-toggled => { root.reveal(); }
                                 }
                                 find-button := CapsuleButton {
                                     text: @tr("Find Zones");
@@ -1076,14 +1127,21 @@ export component AddSiteSheet inherits Rectangle {
                         Collapsible {
                             FormRow {
                                 label: @tr("Access key ID");
-                                key-id-field := Field {
-                                    label: @tr("Access key ID");
-                                    error: root.s3-errors.key-id;
-                                    edited => {
-                                        root.s3-errors.key-id = "";
-                                        root.touched();
+                                Rectangle {
+                                    // As high as a field (the field moves inside it when it shakes).
+                                    height: Theme.control-height;
+
+                                    key-id-field := Field {
+                                        label: @tr("Access key ID");
+                                        x: root.shaking == 4 ? root.shake-x : 0px;
+                                        width: parent.width;
+                                        error: root.s3-errors.key-id;
+                                        edited => {
+                                            root.s3-errors.key-id = "";
+                                            root.touched();
+                                        }
+                                        accepted => { root.submit(); }
                                     }
-                                    accepted => { root.submit(); }
                                 }
                                 if root.s3-errors.key-id != "": ErrorLine { text: root.s3-errors.key-id; }
                             }
@@ -1092,18 +1150,25 @@ export component AddSiteSheet inherits Rectangle {
                         Collapsible {
                             FormRow {
                                 label: @tr("Secret access key");
-                                secret-field := SecretField {
-                                    label: @tr("Secret access key");
-                                    show-label: @tr("Show secret access key");
-                                    hide-label: @tr("Hide secret access key");
-                                    placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : (root.secret-imported ? @tr("Imported. Leave empty to use it.") : "");
-                                    error: root.s3-errors.secret;
-                                    edited => {
-                                        root.s3-errors.secret = "";
-                                        root.touched();
+                                Rectangle {
+                                    // As high as a field (the field moves inside it when it shakes).
+                                    height: Theme.control-height;
+
+                                    secret-field := SecretField {
+                                        label: @tr("Secret access key");
+                                        x: root.shaking == 3 ? root.shake-x : 0px;
+                                        width: parent.width;
+                                        show-label: @tr("Show secret access key");
+                                        hide-label: @tr("Hide secret access key");
+                                        placeholder: root.editing ? @tr("Saved. Leave empty to keep it.") : (root.secret-imported ? @tr("Imported. Leave empty to use it.") : "");
+                                        error: root.s3-errors.secret;
+                                        edited => {
+                                            root.s3-errors.secret = "";
+                                            root.touched();
+                                        }
+                                        accepted => { root.submit(); }
+                                        reveal-toggled => { root.reveal(); }
                                     }
-                                    accepted => { root.submit(); }
-                                    reveal-toggled => { root.reveal(); }
                                 }
                                 if root.s3-errors.secret != "": ErrorLine { text: root.s3-errors.secret; }
                             }
@@ -1192,7 +1257,7 @@ export component AddSiteSheet inherits Rectangle {
                     Rectangle { horizontal-stretch: 1; }
                     cancel-button := CapsuleButton {
                         text: @tr("Cancel");
-                        clicked => { root.cancel(); }
+                        clicked => { modal.leave(0); }
                     }
                     add-button := CapsuleButton {
                         text: root.add-text;

@@ -196,10 +196,11 @@ export component ScheduleSheet inherits Rectangle {
         on-switch.focus();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: on-switch.has-focus;
         at-last-stop: save-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         confirm => { root.submit(); }
         focus-first => { on-switch.focus(); }
         focus-last => { save-button.focus(); }
@@ -412,7 +413,7 @@ export component ScheduleSheet inherits Rectangle {
 
                 CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 save-button := CapsuleButton {
                     text: @tr("Save");
