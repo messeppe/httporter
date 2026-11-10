@@ -21,6 +21,7 @@ mod fonts;
 mod minimal_software_window;
 #[cfg(feature = "path")]
 mod path;
+mod scale_layer; // HTTPorter patch
 mod scene;
 mod text_mode; // HTTPorter patch
 
@@ -463,6 +464,10 @@ pub struct SoftwareRenderer {
     // When they change, every window needs a full repaint, or text outside the next dirty
     // region keeps the old look.
     text_generation_painted: Cell<u32>,
+    // HTTPorter patch: whether the last frame drew a scaled element (`scale_layer`). Its
+    // resampling reaches a pixel past what the partial renderer marks dirty, so the next
+    // frame's dirty region is widened by that much.
+    scaled_last_frame: Cell<bool>,
 }
 
 impl Default for SoftwareRenderer {
@@ -477,6 +482,7 @@ impl Default for SoftwareRenderer {
             #[cfg(feature = "systemfonts")]
             text_layout_cache: Default::default(),
             text_generation_painted: Default::default(), // HTTPorter patch
+            scaled_last_frame: Default::default(),       // HTTPorter patch
         }
     }
 }
@@ -645,6 +651,18 @@ impl SoftwareRenderer {
         window_inner
             .draw_contents(|components, post_render| {
                 let logical_size = (size.cast() / factor).cast();
+                // HTTPorter patch: the reach of a scaled element's resampling (see the field).
+                let widen = |region: &DirtyRegion| {
+                    if !self.scaled_last_frame.get() {
+                        return region.clone();
+                    }
+                    let reach = 2. / factor.get();
+                    let mut wider = DirtyRegion::default();
+                    for b in region.iter() {
+                        wider.add_box(b.inflate(reach, reach));
+                    }
+                    wider.intersection(LogicalRect::from_size(logical_size))
+                };
 
                 match self.repaint_buffer_type.get() {
                     RepaintBufferType::NewBuffer => {
@@ -658,6 +676,7 @@ impl SoftwareRenderer {
                             logical_size,
                             None,
                         );
+                        renderer.dirty_region = widen(&renderer.dirty_region); // HTTPorter patch
                     }
                     RepaintBufferType::SwappedBuffers => {
                         let dirty_region_for_this_frame =
@@ -667,7 +686,8 @@ impl SoftwareRenderer {
                                 logical_size,
                                 Some(self.prev_frame_dirty.take()),
                             );
-                        self.prev_frame_dirty.set(dirty_region_for_this_frame);
+                        renderer.dirty_region = widen(&renderer.dirty_region); // HTTPorter patch
+                        self.prev_frame_dirty.set(widen(&dirty_region_for_this_frame)); // HTTPorter patch
                     }
                 }
 
@@ -723,6 +743,7 @@ impl SoftwareRenderer {
                 } else {
                     post_render(&mut renderer.actual_renderer);
                 }
+                self.scaled_last_frame.set(renderer.actual_renderer.drew_layer); // HTTPorter patch
 
                 self.measure_frame_rendered(&mut renderer);
 
@@ -1287,7 +1308,8 @@ impl RendererSealed for SoftwareRenderer {
     }
 
     fn supports_transformations(&self) -> bool {
-        false
+        // HTTPorter patch: `transform-scale` is drawn (see `scale_layer`); rotation is not.
+        true
     }
 }
 
@@ -1635,6 +1657,12 @@ trait ProcessScene {
         stroke_line_join: i_slint_core::items::LineJoin,
         stroke_miter_limit: f32,
     );
+
+    /// HTTPorter patch: the bounding box of what this frame repaints, in the target's physical
+    /// pixels, when the processor knows it. A scaled element's layer covers no more than that.
+    fn dirty_bounds(&self) -> Option<PhysicalRect> {
+        None
+    }
 }
 
 fn process_rectangle_impl(
@@ -1926,6 +1954,11 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
 }
 
 impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<'_, B> {
+    // HTTPorter patch
+    fn dirty_bounds(&self) -> Option<PhysicalRect> {
+        Some(self.dirty_region.bounding_rect())
+    }
+
     fn process_scene_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
         self.process_texture_impl(geometry, texture);
     }
@@ -2223,6 +2256,10 @@ struct SceneBuilder<'a, T> {
     rotation: RotationInfo,
     #[cfg(feature = "systemfonts")]
     text_layout_cache: &'a sharedparley::TextLayoutCache,
+    /// HTTPorter patch: the layers of the scaled elements being drawn, innermost last.
+    layers: Vec<scale_layer::ScaleLayer>,
+    /// HTTPorter patch: whether a scaled element was drawn this frame.
+    drew_layer: bool,
 }
 
 impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
@@ -2250,6 +2287,16 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             rotation: RotationInfo { orientation, screen_size },
             #[cfg(feature = "systemfonts")]
             text_layout_cache,
+            layers: Vec::new(), // HTTPorter patch
+            drew_layer: false,  // HTTPorter patch
+        }
+    }
+
+    /// HTTPorter patch: where drawing goes: the innermost open layer, or the target.
+    fn draw_target(&mut self) -> &mut dyn ProcessScene {
+        match self.layers.last_mut() {
+            Some(layer) => &mut layer.target,
+            None => &mut self.processor,
         }
     }
 
@@ -2389,7 +2436,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         glyph_blend: None, // HTTPorter patch
                     };
 
-                    self.processor.process_target_texture(&t, clipped_target.cast());
+                    self.draw_target().process_target_texture(&t, clipped_target.cast()); // HTTPorter patch
                 }
             }
 
@@ -2452,7 +2499,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         glyph_blend: None, // HTTPorter patch
                     };
 
-                    self.processor.process_target_texture(&t, clipped_target.cast());
+                    self.draw_target().process_target_texture(&t, clipped_target.cast()); // HTTPorter patch
                 } else {
                     unimplemented!("The image cannot be rendered")
                 }
@@ -2493,7 +2540,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                 geometry.cast(),
                                 selection.selection_background.into(),
                             );
-                            self.processor.process_rectangle(&args, geometry);
+                            self.draw_target().process_rectangle(&args, geometry); // HTTPorter patch
                         }
                     }
                     let scale_delta = paragraph.layout.font.scale_delta();
@@ -2580,10 +2627,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                             off_y: Fixed::try_from_fixed(off_y).unwrap(),
                                         },
                                     };
-                                    self.processor.process_scene_texture(
-                                        geometry.transformed(self.rotation),
-                                        texture,
-                                    );
+                                    let geometry = geometry.transformed(self.rotation);
+                                    self.draw_target().process_scene_texture(geometry, texture); // HTTPorter patch
                                     continue;
                                 };
 
@@ -2625,7 +2670,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                             glyph_blend: None, // HTTPorter patch
                         };
 
-                        self.processor.process_target_texture(&t, clipped_target.cast());
+                        self.draw_target().process_target_texture(&t, clipped_target.cast()); // HTTPorter patch
                     }
                     core::ops::ControlFlow::Continue(())
                 },
@@ -2704,7 +2749,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                 target_pixel_buffer::DrawRectangleArgs::from_rect(geom, rect.background());
             args.alpha = (self.current_state.alpha * 255.) as u8;
             args.rotation = self.rotation.orientation;
-            self.processor.process_rectangle(&args, clipped);
+            self.draw_target().process_rectangle(&args, clipped); // HTTPorter patch
         }
     }
 
@@ -2753,7 +2798,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                 rotation: self.rotation.orientation,
             };
 
-            self.processor.process_rectangle(&args, clipped);
+            self.draw_target().process_rectangle(&args, clipped); // HTTPorter patch
         }
     }
 
@@ -2985,7 +3030,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                     geometry.cast(),
                     self.alpha_color(text_visual_representation.cursor_color).into(),
                 );
-                self.processor.process_rectangle(&args, geometry);
+                self.draw_target().process_rectangle(&args, geometry); // HTTPorter patch
             }
         }
     }
@@ -3050,7 +3095,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         if !fill_brush.is_transparent() {
             let fill_color = self.alpha_color(fill_brush.color());
             if fill_color.alpha() > 0 {
-                self.processor.process_filled_path(
+                self.draw_target().process_filled_path( // HTTPorter patch
                     physical_geom,
                     clipped_geom,
                     zeno_commands.clone(),
@@ -3069,7 +3114,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                 let stroke_line_cap = path.stroke_line_cap();
                 let stroke_line_join = path.stroke_line_join();
                 let stroke_miter_limit = path.stroke_miter_limit();
-                self.processor.process_stroked_path(
+                self.draw_target().process_stroked_path( // HTTPorter patch
                     physical_geom,
                     clipped_geom,
                     zeno_commands,
@@ -3117,15 +3162,41 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 
     fn current_transform(&self) -> i_slint_core::lengths::ItemTransform {
         let v = self.current_state.offset.to_vector().cast::<f32>();
-        i_slint_core::lengths::ItemTransform::translation(v.x, v.y)
+        let transform = i_slint_core::lengths::ItemTransform::translation(v.x, v.y);
+        // HTTPorter patch: through each open layer to the window.
+        self.layers.iter().rev().fold(transform, |t, layer| t.then(&layer.to_outer))
     }
 
     fn rotate(&mut self, _angle_in_degrees: f32) {
         // TODO (#6068)
     }
 
-    fn scale(&mut self, _x_factor: f32, _y_factor: f32) {
-        // TODO
+    fn scale(&mut self, x_factor: f32, y_factor: f32) {
+        // HTTPorter patch: a scaled element is drawn into a layer (see `scale_layer`), closed by
+        // the `restore_state` that ends the element. Scale 1 keeps the old path.
+        if x_factor == 1. && y_factor == 1. {
+            return;
+        }
+        if self.rotation.orientation != RenderingRotation::NoRotation {
+            return;
+        }
+        let dirty = if self.layers.is_empty() { self.processor.dirty_bounds() } else { None };
+        match scale_layer::open(
+            x_factor,
+            y_factor,
+            self.current_state,
+            dirty,
+            self.rotation.screen_size,
+            self.scale_factor,
+            self.state_stack.len(),
+        ) {
+            scale_layer::ScaleOutcome::Unscaled => {}
+            scale_layer::ScaleOutcome::Hidden => self.current_state.alpha = 0.,
+            scale_layer::ScaleOutcome::Layer(layer, inner) => {
+                self.layers.push(layer);
+                self.current_state = inner;
+            }
+        }
     }
 
     fn apply_opacity(&mut self, opacity: f32) {
@@ -3137,6 +3208,14 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
     }
 
     fn restore_state(&mut self) {
+        // HTTPorter patch: the end of a scaled element draws its layer.
+        if self.layers.last().is_some_and(|layer| layer.depth == self.state_stack.len())
+            && let Some(layer) = self.layers.pop()
+        {
+            self.drew_layer = true;
+            let scale_factor = self.scale_factor;
+            scale_layer::composite(&layer, scale_factor, self.draw_target());
+        }
         self.current_state = self.state_stack.pop().unwrap();
     }
 
@@ -3177,8 +3256,8 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                     tiling: None,
                     glyph_blend: None, // HTTPorter patch
                 };
-                self.processor
-                    .process_target_texture(&t, geometry.cast().transformed(self.rotation));
+                let geometry = geometry.cast().transformed(self.rotation);
+                self.draw_target().process_target_texture(&t, geometry); // HTTPorter patch
             }
         });
     }
@@ -3259,7 +3338,8 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 }
 
 impl<T: ProcessScene> i_slint_core::item_rendering::ItemRendererFeatures for SceneBuilder<'_, T> {
-    const SUPPORTS_TRANSFORMATIONS: bool = false;
+    // HTTPorter patch: scaling is drawn, so the partial renderer must see it (dirty regions).
+    const SUPPORTS_TRANSFORMATIONS: bool = true;
 }
 
 #[cfg(feature = "systemfonts")]
@@ -3344,7 +3424,7 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
             args.border = Brush::SolidColor(border_color);
         }
 
-        self.processor.process_rectangle(&args, clip);
+        self.draw_target().process_rectangle(&args, clip); // HTTPorter patch
     }
 
     fn draw_glyph_run(
@@ -3468,7 +3548,7 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
                 glyph_blend, // HTTPorter patch
             };
 
-            self.processor.process_target_texture(&t, clipped_target.cast());
+            self.draw_target().process_target_texture(&t, clipped_target.cast()); // HTTPorter patch
         }
     }
 }
