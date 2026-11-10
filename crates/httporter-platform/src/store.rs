@@ -2453,4 +2453,457 @@ mod tests {
             Err(StoreError::NewerSchema { found: 99, .. })
         ));
     }
+
+    // --- T10: schema v3 and v4, profiles, history, CDN links, hash cache, favorites ---------
+
+    use httporter_core::ProfileExtras;
+
+    fn profile_of(site: &SiteId, name: &str) -> ProfileRecord {
+        ProfileRecord {
+            id: ProfileId::new(),
+            site: site.clone(),
+            name: name.to_owned(),
+            local_dir: std::path::PathBuf::from(r"D:\site\public"),
+            remote_dir: RemotePath::parse("www").unwrap(),
+            skip_rules: vec![".env".into(), "node_modules/".into()],
+            remove_extras: false,
+            purge: PurgeMode::Changed,
+            guard: DeleteGuard::default(),
+            created_at: Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap(),
+            last_published_at: None,
+            cache_control: None,
+            extras: ProfileExtras::default(),
+        }
+    }
+
+    fn publish_of(profile: &ProfileId, minute: u32, files: Vec<HistoryFile>) -> HistoryRecord {
+        HistoryRecord {
+            id: 0,
+            profile: profile.clone(),
+            started_at: Utc.with_ymd_and_hms(2026, 11, 5, 10, 0, 0).unwrap()
+                + chrono::Duration::minutes(i64::from(minute)),
+            finished_at: Utc.with_ymd_and_hms(2026, 11, 5, 10, 0, 30).unwrap()
+                + chrono::Duration::minutes(i64::from(minute)),
+            result: PublishResult::Ok,
+            uploaded: 1,
+            deleted: 0,
+            skipped: 0,
+            failed: 0,
+            bytes: 10,
+            purge: PurgeResult::Urls(1),
+            verified: true,
+            remote_files: 3,
+            remote_folders: 1,
+            regions: 2,
+            files,
+            source: HistorySource::App,
+        }
+    }
+
+    fn hfile(path: &str, action: FileAction, outcome: FileOutcome) -> HistoryFile {
+        HistoryFile {
+            path: RemotePath::parse(path).unwrap(),
+            action,
+            outcome,
+            size: 42,
+        }
+    }
+
+    fn link(account: &AccountId) -> CdnLink {
+        CdnLink {
+            account: account.clone(),
+            zones: vec![CdnZone {
+                id: 7,
+                name: "pull".into(),
+                hostnames: vec!["cdn.example".into(), "www.example.com".into()],
+            }],
+            checked_at: Utc.with_ymd_and_hms(2026, 11, 6, 8, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn migration_v2_to_v3_on_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("httporter.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..2] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO sites VALUES ('s-1', 'Main', 'bunny', 'main-zone', 'de',
+                     'storage.bunnycdn.com', '2026-10-29T12:30:45Z', NULL, NULL, NULL);
+                 INSERT INTO settings VALUES ('k', '1');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+        let st = Store::open(&path).unwrap();
+        assert_eq!(user_version(&st.conn).unwrap(), MIGRATIONS.len() as u32);
+        assert_eq!(names(&st), ["Main"]);
+        assert_eq!(st.settings::<u32>("k"), 1);
+        let site = SiteId("s-1".into());
+        let profile = profile_of(&site, "Blog");
+        st.add_profile(&profile).unwrap();
+        st.add_history(&publish_of(&profile.id, 0, Vec::new()))
+            .unwrap();
+        st.put_cdn_link(&site, &link(&AccountId::new())).unwrap();
+        assert_eq!(st.list_profiles().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_v3_to_v4_on_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("httporter.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..3] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                r#"INSERT INTO profiles VALUES ('p-1', 's-1', 'Blog', 'D:\site', 'www',
+                     '[".env"]', 1, '"zone"', 50, 20, '2026-11-01T10:00:00Z',
+                     '2026-11-02T10:00:00Z');"#,
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+        }
+        let st = Store::open(&path).unwrap();
+        assert_eq!(user_version(&st.conn).unwrap(), MIGRATIONS.len() as u32);
+        let profile = st.list_profiles().unwrap().remove(0);
+        assert_eq!(profile.name, "Blog");
+        assert_eq!(profile.skip_rules, [".env"]);
+        assert!(profile.remove_extras);
+        assert_eq!(profile.purge, PurgeMode::Zone);
+        assert_eq!(
+            profile.guard,
+            DeleteGuard {
+                files: 50,
+                percent: 20
+            }
+        );
+        assert_eq!(profile.cache_control, None, "the new column starts empty");
+        assert!(profile.last_published_at.is_some());
+        assert!(st.favorites().unwrap().is_empty());
+        assert_eq!(st.hash_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn profiles_add_list_update_and_remove() {
+        let st = Store::open_in_memory().unwrap();
+        let site = SiteId::new();
+        let zeta = profile_of(&site, "zeta");
+        let mut alpha = profile_of(&site, "Alpha");
+        alpha.cache_control = Some("max-age=60".into());
+        st.add_profile(&zeta).unwrap();
+        st.add_profile(&alpha).unwrap();
+        assert!(st.add_profile(&alpha).is_err(), "the same id twice");
+        assert_eq!(st.list_profiles().unwrap(), [alpha.clone(), zeta.clone()]);
+
+        // A publish moves last_published_at; an edit saved later must not put it back.
+        st.add_history(&publish_of(&alpha.id, 0, Vec::new()))
+            .unwrap();
+        let mut edited = alpha.clone();
+        edited.name = "Alpha 2".into();
+        edited.remove_extras = true;
+        edited.skip_rules = Vec::new();
+        edited.purge = PurgeMode::Off;
+        edited.cache_control = None;
+        st.update_profile(&edited).unwrap();
+        let stored = st
+            .list_profiles()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == alpha.id)
+            .unwrap();
+        assert_eq!(
+            stored.last_published_at,
+            Some(Utc.with_ymd_and_hms(2026, 11, 5, 10, 0, 30).unwrap())
+        );
+        assert_eq!(
+            ProfileRecord {
+                last_published_at: None,
+                ..stored
+            },
+            edited
+        );
+
+        assert!(matches!(
+            st.update_profile(&profile_of(&site, "ghost")),
+            Err(StoreError::ProfileNotFound)
+        ));
+        st.remove_profile(&alpha.id).unwrap();
+        st.remove_profile(&alpha.id).unwrap();
+        assert!(st.list_history(&alpha.id, "").unwrap().is_empty());
+        assert_eq!(st.list_profiles().unwrap(), [zeta]);
+    }
+
+    #[test]
+    fn add_history_sets_last_published_and_trims_at_201() {
+        let st = Store::open_in_memory().unwrap();
+        let site = SiteId::new();
+        let profile = profile_of(&site, "Blog");
+        let other = profile_of(&site, "Other");
+        st.add_profile(&profile).unwrap();
+        st.add_profile(&other).unwrap();
+        st.add_history(&publish_of(&other.id, 0, Vec::new()))
+            .unwrap();
+        let mut ids = Vec::new();
+        for minute in 0..=HISTORY_KEEP as u32 {
+            let files = vec![hfile("www/a.txt", FileAction::Upload, FileOutcome::Done)];
+            ids.push(
+                st.add_history(&publish_of(&profile.id, minute, files))
+                    .unwrap(),
+            );
+        }
+        let history = st.list_history(&profile.id, "").unwrap();
+        assert_eq!(history.len(), HISTORY_KEEP);
+        assert_eq!(history[0].id, *ids.last().unwrap(), "newest first");
+        assert!(history.iter().all(|h| h.id != ids[0]), "the oldest went");
+        assert!(history.iter().all(|h| h.files.is_empty()));
+        assert!(st.history_files(ids[0]).unwrap().is_empty());
+        assert_eq!(st.history_files(ids[1]).unwrap().len(), 1);
+        assert_eq!(
+            st.list_history(&other.id, "").unwrap().len(),
+            1,
+            "per profile"
+        );
+        let stored = st
+            .list_profiles()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == profile.id)
+            .unwrap();
+        assert_eq!(stored.last_published_at, Some(history[0].finished_at));
+    }
+
+    #[test]
+    fn history_files_round_trip_search_and_purge_update() {
+        let st = Store::open_in_memory().unwrap();
+        let profile = profile_of(&SiteId::new(), "Blog");
+        st.add_profile(&profile).unwrap();
+        let files = vec![
+            hfile("www/blog/index.html", FileAction::Upload, FileOutcome::Done),
+            hfile(
+                "www/blog/big.png",
+                FileAction::Upload,
+                FileOutcome::Failed("Access Denied".into()),
+            ),
+            hfile(
+                "www/old 100%.txt",
+                FileAction::Delete,
+                FileOutcome::Cancelled,
+            ),
+            hfile(
+                "www/kept.txt",
+                FileAction::Delete,
+                FileOutcome::NotRun("Not deleted because uploads failed.".into()),
+            ),
+        ];
+        let mut partial = publish_of(&profile.id, 0, files.clone());
+        partial.result = PublishResult::Partial;
+        partial.purge = PurgeResult::Failed("1 of 3 failed: boom".into());
+        partial.source = HistorySource::Watch;
+        let first = st.add_history(&partial).unwrap();
+        let second = st
+            .add_history(&publish_of(
+                &profile.id,
+                5,
+                vec![hfile(
+                    "www/css/site.css",
+                    FileAction::Upload,
+                    FileOutcome::Done,
+                )],
+            ))
+            .unwrap();
+
+        assert_eq!(st.history_files(first).unwrap(), files);
+        let stored = &st.list_history(&profile.id, "").unwrap()[1];
+        assert_eq!(
+            HistoryRecord {
+                files: files.clone(),
+                ..stored.clone()
+            },
+            HistoryRecord {
+                id: first,
+                ..partial.clone()
+            }
+        );
+
+        let ids = |search: &str| -> Vec<i64> {
+            st.list_history(&profile.id, search)
+                .unwrap()
+                .iter()
+                .map(|h| h.id)
+                .collect()
+        };
+        assert_eq!(ids("BLOG/"), [first], "by path, any case");
+        assert_eq!(ids("site.css"), [second]);
+        assert_eq!(ids("partial"), [first], "by result");
+        assert_eq!(ids("100%"), [first], "% is matched as itself");
+        assert_eq!(ids("%"), [first]);
+        assert_eq!(ids("  "), [second, first]);
+        assert!(ids("nowhere").is_empty());
+
+        st.update_history_purge(first, &PurgeResult::Zone).unwrap();
+        st.update_history_purge(9999, &PurgeResult::Zone).unwrap();
+        let after = st.list_history(&profile.id, "partial").unwrap();
+        assert_eq!(after[0].purge, PurgeResult::Zone);
+    }
+
+    #[test]
+    fn cdn_links_round_trip_and_go_with_their_account() {
+        let st = Store::open_in_memory().unwrap();
+        let (a, b) = (SiteId::new(), SiteId::new());
+        let (one, two) = (AccountId::new(), AccountId::new());
+        assert_eq!(st.cdn_link(&a).unwrap(), None);
+        st.put_cdn_link(&a, &link(&one)).unwrap();
+        st.put_cdn_link(&b, &link(&two)).unwrap();
+        assert_eq!(st.cdn_link(&a).unwrap(), Some(link(&one)));
+        let mut replaced = link(&two);
+        replaced.zones.clear();
+        st.put_cdn_link(&a, &replaced).unwrap();
+        assert_eq!(st.cdn_link(&a).unwrap(), Some(replaced));
+
+        st.remove_cdn_links_for(&two).unwrap();
+        assert_eq!(st.cdn_link(&a).unwrap(), None);
+        assert_eq!(st.cdn_link(&b).unwrap(), None);
+        st.put_cdn_link(&b, &link(&one)).unwrap();
+        st.remove_cdn_links_for(&two).unwrap();
+        assert_eq!(st.cdn_link(&b).unwrap(), Some(link(&one)));
+
+        st.conn
+            .execute("UPDATE cdn_links SET zones = 'not json'", [])
+            .unwrap();
+        assert_eq!(st.cdn_link(&b).unwrap(), None, "unreadable reads as none");
+    }
+
+    #[test]
+    fn remove_site_takes_everything_of_the_site_along() {
+        let st = Store::open_in_memory().unwrap();
+        let gone = site("Gone");
+        let kept = site("Kept");
+        st.add_site(&gone).unwrap();
+        st.add_site(&kept).unwrap();
+        let mut ids = Vec::new();
+        for s in [&gone, &kept] {
+            let profile = profile_of(&s.id, "P");
+            st.add_profile(&profile).unwrap();
+            let files = vec![hfile("www/a.txt", FileAction::Upload, FileOutcome::Done)];
+            ids.push((
+                profile.id.clone(),
+                st.add_history(&publish_of(&profile.id, 0, files)).unwrap(),
+            ));
+            st.put_cdn_link(&s.id, &link(&AccountId::new())).unwrap();
+            st.add_favorite(&Favorite {
+                id: 0,
+                kind: PlaceKind::Remote,
+                name: "www".into(),
+                local: None,
+                site: Some(s.id.clone()),
+                remote: Some(RemotePath::parse("www").unwrap()),
+            })
+            .unwrap();
+            st.put_settings(&site_extras_key(&s.id), &1_u32).unwrap();
+            st.put_settings(&site_conflicts_key(&s.id, true), &2_u32)
+                .unwrap();
+            st.put_settings(&site_conflicts_key(&s.id, false), &3_u32)
+                .unwrap();
+        }
+
+        st.remove_site(&gone.id).unwrap();
+        assert_eq!(names(&st), ["Kept"]);
+        let (gone_profile, gone_history) = &ids[0];
+        let (kept_profile, kept_history) = &ids[1];
+        let profiles = st.list_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, *kept_profile);
+        assert!(st.list_history(gone_profile, "").unwrap().is_empty());
+        assert!(st.history_files(*gone_history).unwrap().is_empty());
+        assert_eq!(st.history_files(*kept_history).unwrap().len(), 1);
+        assert_eq!(st.cdn_link(&gone.id).unwrap(), None);
+        assert!(st.cdn_link(&kept.id).unwrap().is_some());
+        let favorites = st.favorites().unwrap();
+        assert_eq!(favorites.len(), 1);
+        assert_eq!(favorites[0].site, Some(kept.id.clone()));
+        for key in [
+            site_extras_key(&gone.id),
+            site_conflicts_key(&gone.id, true),
+            site_conflicts_key(&gone.id, false),
+        ] {
+            assert_eq!(st.settings::<u32>(&key), 0, "{key}");
+        }
+        assert_eq!(st.settings::<u32>(&site_extras_key(&kept.id)), 1);
+        assert_eq!(st.settings::<u32>(&site_conflicts_key(&kept.id, false)), 3);
+    }
+
+    #[test]
+    fn the_hash_cache_keeps_digests_by_size_and_time() {
+        let st = Store::open_in_memory().unwrap();
+        let path = std::path::Path::new(r"D:\site\a.txt");
+        let (sha, md5) = ([1u8; 32], [2u8; 16]);
+        assert_eq!(st.hash_get(path, 10, 5).unwrap(), None);
+        st.hash_put(path, 10, 5, &sha, &md5).unwrap();
+        assert_eq!(st.hash_get(path, 10, 5).unwrap(), Some((sha, md5)));
+        assert_eq!(st.hash_get(path, 11, 5).unwrap(), None, "another size");
+        assert_eq!(st.hash_get(path, 10, 6).unwrap(), None, "another time");
+        // A new digest of the same path replaces the old one.
+        st.hash_put(path, 11, 6, &[3u8; 32], &[4u8; 16]).unwrap();
+        assert_eq!(st.hash_get(path, 10, 5).unwrap(), None);
+        assert_eq!(
+            st.hash_get(path, 11, 6).unwrap(),
+            Some(([3u8; 32], [4u8; 16]))
+        );
+        st.hash_put(std::path::Path::new(r"D:\b.txt"), 1, 1, &sha, &md5)
+            .unwrap();
+        assert_eq!(st.hash_count().unwrap(), 2);
+        assert_eq!(
+            st.hash_get(path, u64::MAX, 6).unwrap(),
+            None,
+            "a size SQLite can't hold"
+        );
+
+        let day = chrono::Duration::days(1);
+        assert_eq!(st.hash_prune(Utc::now() - day).unwrap(), 0);
+        assert_eq!(st.hash_prune(Utc::now() + day).unwrap(), 2);
+        st.hash_put(path, 10, 5, &sha, &md5).unwrap();
+        st.hash_clear().unwrap();
+        assert_eq!(st.hash_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn favorites_add_list_in_order_and_remove() {
+        let st = Store::open_in_memory().unwrap();
+        let local = Favorite {
+            id: 0,
+            kind: PlaceKind::Local,
+            name: "Site".into(),
+            local: Some(std::path::PathBuf::from(r"D:\site")),
+            site: None,
+            remote: None,
+        };
+        let remote = Favorite {
+            id: 0,
+            kind: PlaceKind::Remote,
+            name: "Blog".into(),
+            local: None,
+            site: Some(SiteId("s-1".into())),
+            remote: Some(RemotePath::parse("www/blog").unwrap()),
+        };
+        let a = st.add_favorite(&remote).unwrap();
+        let b = st.add_favorite(&local).unwrap();
+        assert_eq!(
+            st.favorites().unwrap(),
+            [
+                Favorite {
+                    id: a,
+                    ..remote.clone()
+                },
+                Favorite { id: b, ..local }
+            ]
+        );
+        st.remove_favorite(b).unwrap();
+        st.remove_favorite(b).unwrap();
+        assert_eq!(st.favorites().unwrap(), [Favorite { id: a, ..remote }]);
+    }
 }
