@@ -59,7 +59,8 @@ pub struct DirWatcher {
 
 impl DirWatcher {
     /// Calls `on_change` with each file that changes under `dir` (with `dir` itself when the
-    /// changes overflowed).
+    /// changes overflowed), from when this returns: the thread has asked for the first changes
+    /// by then, since Windows keeps none from before that.
     pub fn start(dir: &Path, on_change: Box<dyn Fn(PathBuf) + Send>) -> io::Result<Self> {
         let name: Vec<u16> = dir
             .as_os_str()
@@ -84,12 +85,15 @@ impl DirWatcher {
         let io_event = Owned(unsafe { CreateEventW(None, true, false, None) }?);
         let stop = Arc::new(Owned(unsafe { CreateEventW(None, true, false, None) }?));
         let dir = dir.to_path_buf();
+        let (ready_tx, ready) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("dir-watcher".into())
             .spawn({
                 let stop = stop.clone();
-                move || run(folder, io_event, &stop, &dir, &*on_change)
+                move || run(folder, io_event, &stop, &dir, &*on_change, ready_tx)
             })?;
+        // Answered once the first read is under way (or could not start).
+        let _ = ready.recv();
         Ok(Self {
             stop,
             thread: Some(thread),
@@ -119,7 +123,16 @@ impl Drop for DirWatcher {
 }
 
 /// The watcher thread: reads changes until `stop` is set or the folder can't be read any more.
-fn run(folder: Owned, io_event: Owned, stop: &Owned, dir: &Path, on_change: &dyn Fn(PathBuf)) {
+/// `ready` hears once the first read has been asked for.
+fn run(
+    folder: Owned,
+    io_event: Owned,
+    stop: &Owned,
+    dir: &Path,
+    on_change: &dyn Fn(PathBuf),
+    ready: std::sync::mpsc::Sender<()>,
+) {
+    let mut ready = Some(ready);
     let mut buffer = vec![0u32; BUFFER_WORDS];
     let byte_len = (buffer.len() * 4) as u32;
     loop {
@@ -141,6 +154,9 @@ fn run(folder: Owned, io_event: Owned, stop: &Owned, dir: &Path, on_change: &dyn
                 None,
             )
         };
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(());
+        }
         if started.is_err() {
             return;
         }

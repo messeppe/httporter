@@ -676,4 +676,36 @@ mod tests {
             assert!(!format!("{err:?}{err}").contains("pw-in-reason"));
         }
     }
+
+    #[test]
+    fn a_key_says_its_kind_and_id() {
+        let site = CredentialKey::site(&SiteId("s-1".into()));
+        assert_eq!((site.kind(), site.id()), (CredentialKind::Site, "s-1"));
+        let account = CredentialKey::account(&AccountId("a-1".into()));
+        assert_eq!(
+            (account.kind(), account.id()),
+            (CredentialKind::Account, "a-1")
+        );
+        let other = CredentialKey("HTTPorter/legacy".into());
+        assert_eq!(
+            (other.kind(), other.id()),
+            (CredentialKind::Other, "HTTPorter/legacy")
+        );
+    }
+
+    #[test]
+    fn memory_keys_lists_only_httporters_sorted() {
+        let store = MemoryStore::default();
+        assert!(store.keys().unwrap().is_empty());
+        let site = CredentialKey::site(&SiteId("b".into()));
+        let account = CredentialKey::account(&AccountId("a".into()));
+        store.set(&site, "pw").unwrap();
+        store.set(&account, "key").unwrap();
+        store
+            .set(&CredentialKey("Other/site/x".into()), "no")
+            .unwrap();
+        assert_eq!(store.keys().unwrap(), [account.clone(), site]);
+        store.delete(&account).unwrap();
+        assert_eq!(store.keys().unwrap().len(), 1);
+    }
 }
