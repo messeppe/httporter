@@ -1050,6 +1050,30 @@ async fn sha256_meta_set_on_create() {
     }
 }
 
+#[tokio::test]
+async fn cache_control_is_set_on_create_only() {
+    let server = start().await;
+    let fake = Fake::new(16 * MIB).serve(&server).await;
+    let options = UploadOptions {
+        cache_control: Some("public, max-age=3600".into()),
+        ..opts()
+    };
+
+    upload(&provider(&server), &options).await.unwrap();
+
+    fake.check();
+    let log = fake.log();
+    assert!(matches!(log[0].call, Call::Create));
+    assert_eq!(log[0].headers["cache-control"], "public, max-age=3600");
+    for seen in &log[1..] {
+        assert!(
+            !seen.headers.contains_key("cache-control"),
+            "{:?} carries Cache-Control too",
+            seen.call
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Ruling Q25: the size of a part
 // ---------------------------------------------------------------------------------------------
