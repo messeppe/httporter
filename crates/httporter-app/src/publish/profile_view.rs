@@ -1118,3 +1118,126 @@ fn make_imported(p: &Arc<Publisher>, site: &SiteRecord, imported: ImportedPublis
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration as Span, TimeZone};
+    use httporter_core::HistorySource;
+
+    use super::*;
+
+    fn record(
+        result: PublishResult,
+        uploaded: u64,
+        failed: u64,
+        purge: PurgeResult,
+    ) -> HistoryRecord {
+        let started = Local
+            .with_ymd_and_hms(2026, 11, 10, 15, 12, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        HistoryRecord {
+            id: 42,
+            profile: ProfileId::new(),
+            started_at: started,
+            finished_at: started + Span::seconds(147),
+            result,
+            uploaded,
+            deleted: 3,
+            skipped: 0,
+            failed,
+            bytes: 6_725_584,
+            purge,
+            verified: true,
+            remote_files: 0,
+            remote_folders: 0,
+            regions: 1,
+            files: Vec::new(),
+            source: HistorySource::App,
+        }
+    }
+
+    fn now() -> DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 11, 10, 15, 30, 0).unwrap()
+    }
+
+    #[test]
+    fn a_history_row_says_when_what_and_how_long() {
+        let h = record(PublishResult::Ok, 1_234, 0, PurgeResult::Urls(36));
+        let row = history_row(&h, false, now());
+        assert_eq!(row.id, 42);
+        assert_eq!(row.when, "Today 15:12");
+        assert_eq!(row.result, "Published");
+        assert!(!row.failed);
+        assert_eq!(row.uploaded, "1,234");
+        assert_eq!(row.deleted, "3");
+        assert_eq!(row.size, "6.4 MB");
+        assert_eq!(row.time, "2 m 27 s");
+        assert_eq!(row.purge, "36 URLs");
+
+        let next_day = Local.with_ymd_and_hms(2026, 11, 11, 9, 0, 0).unwrap();
+        assert_eq!(history_row(&h, false, next_day).when, "Yesterday 15:12");
+        let later = Local.with_ymd_and_hms(2026, 11, 20, 9, 0, 0).unwrap();
+        assert_eq!(history_row(&h, false, later).when, "10 Nov 2026");
+    }
+
+    #[test]
+    fn a_history_row_says_how_the_publish_went() {
+        let row = |h: HistoryRecord, first: bool| history_row(&h, first, now());
+        let first = row(record(PublishResult::Ok, 5, 0, PurgeResult::Zone), true);
+        assert_eq!(first.result, "First publish");
+        assert_eq!(first.purge, "Whole zone");
+        let nothing = HistoryRecord {
+            deleted: 0,
+            ..record(PublishResult::Ok, 0, 0, PurgeResult::Off)
+        };
+        let nothing = row(nothing, false);
+        assert_eq!(nothing.result, "Nothing changed");
+        assert_eq!(nothing.purge, "Off");
+        let partial = row(
+            record(PublishResult::Partial, 5, 2, PurgeResult::Urls(1)),
+            false,
+        );
+        assert_eq!(partial.result, "Published \u{b7} 2 failed");
+        assert!(partial.failed);
+        assert_eq!(partial.purge, "1 URL");
+        let failed = row(
+            record(
+                PublishResult::Failed,
+                0,
+                1_500,
+                PurgeResult::Unavailable("no key".into()),
+            ),
+            false,
+        );
+        assert_eq!(failed.result, "Not published \u{b7} 1,500 failed");
+        assert_eq!(failed.purge, "Skipped");
+        let purge_failed = row(
+            record(
+                PublishResult::Ok,
+                5,
+                0,
+                PurgeResult::Failed("HTTP 500".into()),
+            ),
+            true,
+        );
+        assert_eq!(purge_failed.result, "Published \u{b7} CDN purge failed");
+        assert!(purge_failed.failed, "a failed purge marks the row");
+        assert_eq!(purge_failed.purge, "Failed");
+        let cancelled = row(
+            record(PublishResult::Cancelled, 1, 0, PurgeResult::Off),
+            false,
+        );
+        assert_eq!(cancelled.result, "Cancelled by you");
+        assert!(!cancelled.failed);
+    }
+
+    #[test]
+    fn a_publish_takes_seconds_minutes_or_hours() {
+        assert_eq!(copy::history_duration(0), "0 s");
+        assert_eq!(copy::history_duration(7), "7 s");
+        assert_eq!(copy::history_duration(147), "2 m 27 s");
+        assert_eq!(copy::history_duration(3_900), "1 h 5 m");
+        assert_eq!(copy::history_duration(-5), "0 s", "a clock that went back");
+    }
+}

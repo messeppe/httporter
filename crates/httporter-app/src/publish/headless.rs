@@ -149,6 +149,27 @@ impl HeadlessCtx {
         }
     }
 
+    /// For the tests: the CLI's context over `session`, `engine` and `journal` (no window, so
+    /// nothing waits for a person), without the default database or the Credential Manager.
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        session: Arc<Session>,
+        engine: Engine,
+        journal: Arc<dyn Journal>,
+    ) -> HeadlessCtx {
+        let hashes = Arc::new(HashCache::with_store(session.hash_store()));
+        Self {
+            session,
+            engine,
+            journal,
+            hashes,
+            publisher: None,
+            cancelled: watch::channel(false).0,
+            notes: Mutex::default(),
+            last_plan: Mutex::default(),
+        }
+    }
+
     /// Runs without the window: nothing waits behind a banner for a person.
     fn standalone(&self) -> bool {
         self.publisher.is_none()

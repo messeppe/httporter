@@ -717,3 +717,232 @@ fn md_line(fence: &mut bool, line: &str, out: &mut Out) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The spans of `lines`, coloured in order as one text in `lang`. Every line's spans give the
+    /// line back (tabs as four spaces).
+    fn colour(lang: Lang, lines: &[&str]) -> Vec<Vec<Span>> {
+        let mut h = Highlighter::new(lang);
+        lines
+            .iter()
+            .map(|line| {
+                let spans = h.line(line);
+                let text: String = spans.iter().map(|(t, _)| t.as_str()).collect();
+                if line.chars().count() <= MAX_LINE_CHARS {
+                    assert_eq!(text, line.replace('\t', "    "), "{line:?} lost text");
+                }
+                spans
+            })
+            .collect()
+    }
+
+    /// The style of the first span that holds `token`.
+    fn style(spans: &[Span], token: &str) -> i32 {
+        spans
+            .iter()
+            .find(|(text, _)| text.contains(token))
+            .unwrap_or_else(|| panic!("no span holds {token:?}: {spans:?}"))
+            .1
+    }
+
+    #[test]
+    fn the_language_comes_from_the_extension() {
+        for (name, lang) in [
+            ("index.HTML", Lang::Markup),
+            ("logo.svg", Lang::Markup),
+            ("feed.xml", Lang::Markup),
+            ("site.scss", Lang::Css),
+            ("app.tsx", Lang::Js),
+            ("main.mjs", Lang::Js),
+            ("site.webmanifest", Lang::Json),
+            ("data.json", Lang::Json),
+            ("README.md", Lang::Markdown),
+            ("notes.txt", Lang::Plain),
+            ("Makefile", Lang::Plain),
+        ] {
+            assert_eq!(lang_for(name), lang, "{name}");
+        }
+    }
+
+    #[test]
+    fn js_keywords_strings_numbers_and_comments() {
+        let lines = colour(
+            Lang::Js,
+            &[
+                "const n = 42; // why",
+                "let s = 'it\\'s', e = 1e-6;",
+                "x.y(\"a\")",
+            ],
+        );
+        assert_eq!(style(&lines[0], "const"), KEYWORD);
+        assert_eq!(style(&lines[0], "n "), PLAIN);
+        assert_eq!(style(&lines[0], "="), PUNCT);
+        assert_eq!(style(&lines[0], "42"), NUMBER);
+        assert_eq!(style(&lines[0], "// why"), COMMENT);
+        assert_eq!(style(&lines[1], "'it\\'s'"), STRING);
+        assert_eq!(style(&lines[1], "1e-6"), NUMBER);
+        assert_eq!(style(&lines[2], "\"a\""), STRING);
+    }
+
+    #[test]
+    fn js_comments_and_templates_go_on_to_the_next_line() {
+        let lines = colour(
+            Lang::Js,
+            &["/* one", "two */ let a = `x", "y` + 1", "return"],
+        );
+        assert_eq!(lines[0], [("/* one".to_owned(), COMMENT)]);
+        assert_eq!(style(&lines[1], "two */"), COMMENT);
+        assert_eq!(style(&lines[1], "let"), KEYWORD);
+        assert_eq!(style(&lines[1], "`x"), STRING);
+        assert_eq!(style(&lines[2], "y`"), STRING);
+        assert_eq!(style(&lines[2], "1"), NUMBER);
+        assert_eq!(style(&lines[3], "return"), KEYWORD);
+    }
+
+    #[test]
+    fn json_keys_are_attributes_and_only_its_literals_are_keywords() {
+        let lines = colour(
+            Lang::Json,
+            &[r#"{"key" : "value", "n": 3, "ok": true, "if": null}"#],
+        );
+        let spans = &lines[0];
+        assert_eq!(style(spans, "\"key\""), ATTR);
+        assert_eq!(style(spans, "\"value\""), STRING);
+        assert_eq!(style(spans, "3"), NUMBER);
+        assert_eq!(style(spans, "true"), KEYWORD);
+        assert_eq!(style(spans, "null"), KEYWORD);
+        let lines = colour(Lang::Json, &["[const]"]);
+        assert_eq!(style(&lines[0], "const"), PLAIN, "not a JSON keyword");
+    }
+
+    #[test]
+    fn css_selectors_properties_and_values() {
+        let lines = colour(
+            Lang::Css,
+            &[
+                ".btn:hover, a { color: #FFF !important; margin: -2px 1.5em; }",
+                "@media screen /* wide",
+                "still */ {",
+                "  p { content: \"x\" }",
+                "}",
+            ],
+        );
+        let rule = &lines[0];
+        assert_eq!(style(rule, ".btn"), TAG);
+        assert_eq!(style(rule, ":hover"), TAG);
+        assert_eq!(style(rule, "color"), ATTR);
+        assert_eq!(style(rule, "#FFF"), NUMBER);
+        assert_eq!(style(rule, "!important"), KEYWORD);
+        assert_eq!(style(rule, "-2px"), NUMBER);
+        assert_eq!(style(rule, "1.5em"), NUMBER);
+        assert_eq!(style(&lines[1], "@media"), KEYWORD);
+        assert_eq!(style(&lines[1], "/* wide"), COMMENT);
+        assert_eq!(style(&lines[2], "still */"), COMMENT);
+        // Inside the at-rule's block, `p` is at depth 1.
+        assert_eq!(style(&lines[3], "content"), ATTR);
+        assert_eq!(style(&lines[3], "\"x\""), STRING);
+    }
+
+    #[test]
+    fn markup_tags_attributes_comments_and_embedded_code() {
+        let lines = colour(
+            Lang::Markup,
+            &[
+                "<!DOCTYPE html><a href=\"/x\" data-n='1'>Hi</a> <!-- one",
+                "two --><img alt=\"a",
+                "b\"/> <script>let a = 1;</script><STYLE>p { color: red }</STYLE>",
+                "<![CDATA[ x ]]> 1 < 2",
+            ],
+        );
+        let first = &lines[0];
+        assert_eq!(style(first, "<!DOCTYPE html>"), TAG);
+        assert_eq!(style(first, "<a"), TAG);
+        assert_eq!(style(first, "href"), ATTR);
+        assert_eq!(style(first, "\"/x\""), STRING);
+        assert_eq!(style(first, "'1'"), STRING);
+        assert_eq!(style(first, "Hi"), PLAIN);
+        assert_eq!(style(first, "</a"), TAG);
+        assert_eq!(style(first, "<!-- one"), COMMENT);
+        assert_eq!(style(&lines[1], "two -->"), COMMENT);
+        assert_eq!(style(&lines[1], "\"a"), STRING);
+        let third = &lines[2];
+        assert_eq!(style(third, "b\""), STRING);
+        assert_eq!(style(third, "/>"), TAG);
+        assert_eq!(style(third, "let"), KEYWORD);
+        assert_eq!(style(third, "1"), NUMBER);
+        assert_eq!(style(third, "</script"), TAG);
+        assert_eq!(style(third, "color"), ATTR);
+        assert_eq!(style(third, "</STYLE"), TAG);
+        assert_eq!(style(&lines[3], "<![CDATA[ x ]]>"), COMMENT);
+        // A `<` that opens no tag is text.
+        assert_eq!(style(&lines[3], "< 2"), PLAIN);
+    }
+
+    #[test]
+    fn markdown_headings_quotes_lists_code_and_links() {
+        let lines = colour(
+            Lang::Markdown,
+            &[
+                "# Title",
+                "> quoted",
+                "- item with `code` and [a link](https://example.com).",
+                "12. twelfth",
+                "```rust",
+                "# not a heading",
+                "```",
+                "after",
+            ],
+        );
+        assert_eq!(lines[0], [("# Title".to_owned(), KEYWORD)]);
+        assert_eq!(lines[1], [("> quoted".to_owned(), COMMENT)]);
+        assert_eq!(style(&lines[2], "- "), PUNCT);
+        assert_eq!(style(&lines[2], "`code`"), STRING);
+        assert_eq!(style(&lines[2], "[a link]"), ATTR);
+        assert_eq!(style(&lines[2], "(https://example.com)"), STRING);
+        assert_eq!(style(&lines[3], "12. "), PUNCT);
+        for fenced in &lines[4..7] {
+            assert_eq!(fenced.len(), 1);
+            assert_eq!(fenced[0].1, STRING);
+        }
+        assert_eq!(lines[7], [("after".to_owned(), PLAIN)]);
+    }
+
+    #[test]
+    fn long_lines_are_cut_and_tabs_widened() {
+        let mut h = Highlighter::new(Lang::Plain);
+        let long = "é".repeat(MAX_LINE_CHARS + 500);
+        let spans = h.line(&long);
+        let text: String = spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(text.chars().count(), MAX_LINE_CHARS + 1);
+        assert!(text.ends_with('…'));
+        assert_eq!(h.line("\tx"), [("    x".to_owned(), PLAIN)]);
+        // A line of many tokens has at most so many spans, and keeps its text.
+        let busy = "a,".repeat(400);
+        let spans = colour(Lang::Js, &[busy.as_str()]).remove(0);
+        assert!(spans.len() <= MAX_SPANS);
+    }
+
+    #[test]
+    fn text_beyond_ascii_never_splits_a_character() {
+        for lang in [
+            Lang::Markup,
+            Lang::Css,
+            Lang::Js,
+            Lang::Json,
+            Lang::Markdown,
+        ] {
+            colour(
+                lang,
+                &[
+                    "é = '€\\é'; // ü",
+                    "<p title=\"日本\">é€</p> ¿<é",
+                    ".é { content: \"ß\"; x: é#é; } `é",
+                    "[é](ü) `ñ` # ö",
+                ],
+            );
+        }
+    }
+}

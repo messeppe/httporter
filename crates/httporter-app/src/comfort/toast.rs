@@ -145,3 +145,112 @@ fn with_rows<R>(ui: &AppWindow, f: impl FnOnce(&VecModel<ToastData>) -> R) -> R 
     ui.set_toasts(ModelRc::from(rows.clone()));
     f(&rows)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use i_slint_backend_testing as testing;
+    use slint::ComponentHandle;
+
+    use super::*;
+
+    /// The main window, shown, with its toasts' callbacks wired as `comfort::install` wires them.
+    fn window() -> AppWindow {
+        thread_local! {
+            static STARTED: Cell<bool> = const { Cell::new(false) };
+        }
+        if !STARTED.with(|started| started.replace(true)) {
+            testing::init_no_event_loop();
+        }
+        let ui = AppWindow::new().unwrap();
+        ui.on_toast_dismissed({
+            let weak = ui.as_weak();
+            move |id| {
+                if let Some(ui) = weak.upgrade() {
+                    dismiss(&ui, id);
+                }
+            }
+        });
+        ui.on_toast_action({
+            let weak = ui.as_weak();
+            move |id| {
+                if let Some(ui) = weak.upgrade() {
+                    act(&ui, id);
+                }
+            }
+        });
+        ui.show().unwrap();
+        ui
+    }
+
+    fn texts(ui: &AppWindow) -> Vec<String> {
+        ui.get_toasts().iter().map(|t| t.text.to_string()).collect()
+    }
+
+    /// Lets `ms` of mocked time go by, a tenth of a second at a time (the toasts' tick).
+    fn wait(ms: u64) {
+        for _ in 0..ms / 100 {
+            testing::mock_elapsed_time(Duration::from_millis(100));
+        }
+    }
+
+    fn noting(label: &str, ran: &Rc<Cell<u32>>) -> Option<ToastAction> {
+        let ran = ran.clone();
+        Some(ToastAction {
+            label: label.to_owned(),
+            run: Box::new(move || ran.set(ran.get() + 1)),
+        })
+    }
+
+    #[test]
+    fn at_most_three_show_and_a_fourth_lets_the_oldest_go() {
+        let ui = window();
+        let ran = Rc::new(Cell::new(0));
+        let first = show_id(&ui, ToastKind::Info, "one", noting("Undo", &ran));
+        show(&ui, ToastKind::Done, "two", None);
+        show(&ui, ToastKind::Warning, "three", None);
+        assert_eq!(texts(&ui), ["one", "two", "three"]);
+        show(&ui, ToastKind::Info, "four", None);
+        assert_eq!(texts(&ui), ["two", "three", "four"]);
+        // The one that went took its action with it.
+        act(&ui, first);
+        assert_eq!(ran.get(), 0);
+        let kinds: Vec<i32> = ui.get_toasts().iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, [1, 2, 0]);
+        assert_eq!(MAX_SHOWN, 3);
+    }
+
+    #[test]
+    fn its_button_runs_the_action_once_and_takes_the_toast_down() {
+        let ui = window();
+        let ran = Rc::new(Cell::new(0));
+        let id = show_id(&ui, ToastKind::Info, "Tab closed", noting("Undo", &ran));
+        assert_eq!(ui.get_toasts().row_data(0).unwrap().action, "Undo");
+        ui.invoke_toast_action(id);
+        assert_eq!(ran.get(), 1);
+        assert!(texts(&ui).is_empty());
+        act(&ui, id);
+        assert_eq!(ran.get(), 1, "once only");
+    }
+
+    #[test]
+    fn a_toast_goes_after_4_s_and_one_with_an_action_after_8_s() {
+        let ui = window();
+        let ran = Rc::new(Cell::new(0));
+        show(&ui, ToastKind::Info, "plain", None);
+        show(&ui, ToastKind::Info, "with undo", noting("Undo", &ran));
+        // Each toast's time starts once it is shown.
+        wait(100);
+        wait(3_800);
+        assert_eq!(texts(&ui), ["plain", "with undo"]);
+        wait(300);
+        assert_eq!(texts(&ui), ["with undo"]);
+        wait(3_600);
+        assert_eq!(texts(&ui), ["with undo"]);
+        wait(400);
+        assert!(texts(&ui).is_empty());
+        // Going by itself is not pressing its button.
+        assert_eq!(ran.get(), 0);
+    }
+}

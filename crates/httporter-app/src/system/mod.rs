@@ -40,6 +40,13 @@ thread_local! {
     static SETTINGS: RefCell<Option<slint::Weak<SettingsWindow>>> = const { RefCell::new(None) };
 }
 
+/// For the tests: Settings › Security's Reset HTTPorter… brought up to date for `m` (on or off,
+/// and why), as the tab does; whether a reset may start, and the busy note it shows otherwise.
+#[cfg(test)]
+pub(crate) fn reset_shown(window: &SettingsWindow, m: &Manager) -> (bool, &'static str) {
+    (security::show_reset_for_tests(window, m), copy::RESET_BUSY)
+}
+
 /// The Settings window, while it lives.
 fn settings_window() -> Option<SettingsWindow> {
     SETTINGS.with(|slot| slot.borrow().as_ref().and_then(slint::Weak::upgrade))

@@ -821,3 +821,53 @@ fn last(crumbs: &ModelRc<SharedString>) -> Option<String> {
         .flatten()
         .map(|s| s.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_start_beats_a_word_start_beats_inside_beats_letters_in_order() {
+        let title = "Upload Files";
+        assert_eq!(score("", title), Some(1));
+        assert_eq!(score("up", title), Some(4000));
+        assert_eq!(score("UPLOAD f", title), Some(4000), "any case");
+        assert_eq!(score("file", title), Some(3000));
+        assert_eq!(score("load", title), Some(2000));
+        // Letters in order: at word starts and close together is better.
+        let initials = score("uf", title).unwrap();
+        let scattered = score("pd", title).unwrap();
+        assert_eq!(initials, 1000 + 2 * 50 - 6);
+        assert_eq!(scattered, 1000 - 4);
+        assert!(initials > scattered);
+        assert!(initials < 2000);
+        assert_eq!(
+            score("u f", title),
+            Some(initials),
+            "spaces in the query are skipped"
+        );
+        assert_eq!(score("fu", title), None, "out of order");
+        assert_eq!(score("xyz", title), None);
+    }
+
+    #[test]
+    fn scores_rank_the_palette_rows() {
+        let titles = ["Settings", "Duplicate Site", "Upload Files", "Go Up"];
+        let mut ranked: Vec<(u32, &str)> = titles
+            .iter()
+            .filter_map(|t| score("up", t).map(|s| (s, *t)))
+            .collect();
+        ranked.sort_by_key(|&(s, _)| Reverse(s));
+        let order: Vec<&str> = ranked.iter().map(|&(_, t)| t).collect();
+        assert_eq!(order, ["Upload Files", "Go Up", "Duplicate Site"]);
+    }
+
+    #[test]
+    fn words_start_after_anything_that_is_not_a_letter_or_digit() {
+        assert_eq!(word_starts("upload-files 2x"), [0, 7, 13]);
+        assert_eq!(word_starts("  café/été"), [2, 8]);
+        assert_eq!(score("ete", "café/été"), None, "é is not e");
+        assert_eq!(score("été", "Café/Été"), Some(3000));
+        assert_eq!(score("CAF", "café"), Some(4000));
+    }
+}

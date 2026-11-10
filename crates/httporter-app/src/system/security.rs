@@ -193,6 +193,12 @@ pub(super) fn watch(window: &SettingsWindow) {
     });
 }
 
+/// [`show_reset`], for the tests.
+#[cfg(test)]
+pub(super) fn show_reset_for_tests(window: &SettingsWindow, m: &Manager) -> bool {
+    show_reset(window, m)
+}
+
 /// Reset HTTPorter… on or off, and why.
 fn show_reset(window: &SettingsWindow, m: &Manager) -> bool {
     let allowed = reset_allowed(m);

@@ -11,15 +11,17 @@
 //! arrives; a newer selection drops the parts still on their way for an older one.
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use httporter_core::{
-    ChecksumKind, Entry, META_SHA256, ProviderKind, SiteRecord, ViewMode, content_type_for,
+    ChecksumKind, Entry, META_SHA256, ProviderKind, RemotePath, SiteRecord, ViewMode,
+    content_type_for,
 };
+use httporter_transfer::FileHashes;
 use slint::{ComponentHandle, Model, Rgba8Pixel, SharedPixelBuffer};
 
 use super::{Manager, Side, copy, links, thumbs};
@@ -558,47 +560,66 @@ async fn matches_local(
         return copy::NO_LOCAL_COPY.to_owned();
     };
     let shows = m.session.remote_shows().map(|(_, dir)| dir);
-    let relative: Vec<String> = match shows.filter(|dir| entry.path.is_within(dir)) {
-        Some(dir) => entry
-            .path
+    let local = local_twin(local_dir, shows.as_ref(), &entry.path);
+    let (publisher, size) = (m.publisher.clone(), entry.size);
+    blocking(move || {
+        local_match(&local, size, sha256.as_deref(), md5.as_deref(), |path| {
+            publisher.local_hashes(path)
+        })
+    })
+    .await
+}
+
+/// Where the local copy of the site's file at `path` would be: under `local_dir`, at its path
+/// relative to the folder the cloud pane shows (`shows`), or by its name alone outside it.
+fn local_twin(local_dir: PathBuf, shows: Option<&RemotePath>, path: &RemotePath) -> PathBuf {
+    let relative: Vec<String> = match shows.filter(|dir| path.is_within(dir)) {
+        Some(dir) => path
             .segments()
             .skip(dir.segments().count())
             .map(str::to_owned)
             .collect(),
-        None => vec![entry.name().to_owned()],
+        None => path.name().map(str::to_owned).into_iter().collect(),
     };
-    let local: PathBuf = relative
+    relative
         .iter()
-        .fold(local_dir, |path, part| path.join(part));
-    let (publisher, size) = (m.publisher.clone(), entry.size);
-    blocking(move || {
-        let Ok(meta) = std::fs::metadata(&local) else {
-            return copy::NO_LOCAL_COPY.to_owned();
-        };
-        if !meta.is_file() {
-            return copy::NO_LOCAL_COPY.to_owned();
-        }
-        if meta.len() != size {
-            return copy::MATCHES_NO.to_owned();
-        }
-        if sha256.is_none() && md5.is_none() {
-            return copy::MATCHES_UNKNOWN.to_owned();
-        }
-        let Ok(hashes) = publisher.local_hashes(&local) else {
-            return copy::MATCHES_UNREADABLE.to_owned();
-        };
-        let same = match (&sha256, &md5) {
-            (Some(sha256), _) => hex(&hashes.sha256).eq_ignore_ascii_case(sha256),
-            (None, Some(md5)) => hex(&hashes.md5).eq_ignore_ascii_case(md5),
-            (None, None) => false,
-        };
-        if same {
-            copy::MATCHES_YES.to_owned()
-        } else {
-            copy::MATCHES_NO.to_owned()
-        }
-    })
-    .await
+        .fold(local_dir, |local, part| local.join(part))
+}
+
+/// "Matches local" for a site's file of `size` bytes, whose digests are `sha256` or `md5`, and
+/// the file at `local`: by size, then by digest (`hashes` reads the local file's). Blocks.
+fn local_match(
+    local: &Path,
+    size: u64,
+    sha256: Option<&str>,
+    md5: Option<&str>,
+    hashes: impl FnOnce(&Path) -> std::io::Result<FileHashes>,
+) -> String {
+    let Ok(meta) = std::fs::metadata(local) else {
+        return copy::NO_LOCAL_COPY.to_owned();
+    };
+    if !meta.is_file() {
+        return copy::NO_LOCAL_COPY.to_owned();
+    }
+    if meta.len() != size {
+        return copy::MATCHES_NO.to_owned();
+    }
+    if sha256.is_none() && md5.is_none() {
+        return copy::MATCHES_UNKNOWN.to_owned();
+    }
+    let Ok(hashes) = hashes(local) else {
+        return copy::MATCHES_UNREADABLE.to_owned();
+    };
+    let same = match (sha256, md5) {
+        (Some(sha256), _) => hex(&hashes.sha256).eq_ignore_ascii_case(sha256),
+        (None, Some(md5)) => hex(&hashes.md5).eq_ignore_ascii_case(md5),
+        (None, None) => false,
+    };
+    if same {
+        copy::MATCHES_YES.to_owned()
+    } else {
+        copy::MATCHES_NO.to_owned()
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -834,4 +855,108 @@ fn restore_view(ui: &AppWindow, m: &Manager) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::SystemTime;
+
+    use super::*;
+
+    fn hashes(sha256: [u8; 32], md5: [u8; 16]) -> FileHashes {
+        FileHashes {
+            sha256,
+            md5,
+            size: 5,
+            modified: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn regions_are_named_by_city_in_any_case_without_the_main_one_twice() {
+        assert_eq!(copy::regions("de", &[]), "Frankfurt");
+        assert_eq!(copy::regions("DE", &[]), "Frankfurt");
+        let replicas = ["NY".to_owned(), "de".to_owned(), "sg".to_owned()];
+        assert_eq!(
+            copy::regions("De", &replicas),
+            "Frankfurt → New York, Singapore"
+        );
+        // A code the app doesn't know is shown as it is, in capitals.
+        assert_eq!(copy::regions("xx", &["zz".to_owned()]), "XX → ZZ");
+    }
+
+    #[test]
+    fn the_local_copy_is_found_relative_to_the_folder_shown() {
+        let root = PathBuf::from(r"D:\site");
+        let path = RemotePath::parse("blog/2026/post.html").unwrap();
+        let shown = RemotePath::parse("blog").unwrap();
+        assert_eq!(
+            local_twin(root.clone(), Some(&shown), &path),
+            root.join("2026").join("post.html")
+        );
+        assert_eq!(
+            local_twin(root.clone(), Some(&RemotePath::root()), &path),
+            root.join("blog").join("2026").join("post.html")
+        );
+        // Outside the folder shown (a search result): by its name.
+        let elsewhere = RemotePath::parse("media").unwrap();
+        assert_eq!(
+            local_twin(root.clone(), Some(&elsewhere), &path),
+            root.join("post.html")
+        );
+        assert_eq!(
+            local_twin(root.clone(), None, &path),
+            root.join("post.html")
+        );
+    }
+
+    #[test]
+    fn matches_local_compares_size_then_the_digest_in_any_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let sha = [0xab; 32];
+        let md5 = [0x0c; 16];
+        let same_sha = "AB".repeat(32);
+        let same_md5 = "0C".repeat(16);
+        let read = |_: &Path| Ok(hashes(sha, md5));
+        assert_eq!(
+            local_match(&file, 5, Some(&same_sha), None, read),
+            copy::MATCHES_YES
+        );
+        assert_eq!(
+            local_match(&file, 5, Some(&same_sha.to_lowercase()), None, read),
+            copy::MATCHES_YES
+        );
+        assert_eq!(
+            local_match(&file, 5, None, Some(&same_md5), read),
+            copy::MATCHES_YES
+        );
+        // SHA-256 wins over MD5 when both are known.
+        assert_eq!(
+            local_match(&file, 5, Some(&"00".repeat(32)), Some(&same_md5), read),
+            copy::MATCHES_NO
+        );
+        assert_eq!(
+            local_match(&file, 4, Some(&same_sha), None, read),
+            copy::MATCHES_NO
+        );
+        assert_eq!(
+            local_match(&file, 5, None, None, read),
+            copy::MATCHES_UNKNOWN
+        );
+        let unreadable = |_: &Path| Err(std::io::Error::other("locked"));
+        assert_eq!(
+            local_match(&file, 5, Some(&same_sha), None, unreadable),
+            copy::MATCHES_UNREADABLE
+        );
+        assert_eq!(
+            local_match(&dir.path().join("gone.txt"), 5, Some(&same_sha), None, read),
+            copy::NO_LOCAL_COPY
+        );
+        assert_eq!(
+            local_match(dir.path(), 0, None, None, read),
+            copy::NO_LOCAL_COPY
+        );
+    }
 }

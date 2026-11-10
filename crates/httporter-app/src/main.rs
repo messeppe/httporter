@@ -47,6 +47,8 @@ mod window;
 #[cfg(test)]
 mod add_site_tests;
 #[cfg(test)]
+mod headless_tests;
+#[cfg(test)]
 mod keyboard_tests;
 #[cfg(test)]
 mod lint_tests;

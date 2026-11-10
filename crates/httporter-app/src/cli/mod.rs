@@ -106,3 +106,38 @@ pub fn run(args: Vec<OsString>) -> i32 {
     rt.shutdown_timeout(Duration::from_secs(1));
     code
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_str(args: &[&str]) -> i32 {
+        run(args.iter().map(OsString::from).collect())
+    }
+
+    /// A mistake in the arguments is exit 2 before anything opens (no database, no Credential
+    /// Manager); `--version` and `--help` are 0.
+    #[test]
+    fn usage_mistakes_exit_2_and_help_and_version_exit_0() {
+        assert_eq!(run_str(&["--version"]), exit::OK);
+        assert_eq!(run_str(&["--help"]), exit::OK);
+        assert_eq!(run_str(&["help", "publish"]), exit::OK);
+        assert_eq!(run_str(&["upload", "--help"]), exit::OK);
+        assert_eq!(run_str(&[]), exit::CONFIG);
+        assert_eq!(run_str(&["frobnicate"]), exit::CONFIG);
+        assert_eq!(run_str(&["publish"]), exit::CONFIG);
+        assert_eq!(run_str(&["publish", "--profile"]), exit::CONFIG);
+        assert_eq!(
+            run_str(&["publish", "--profile", "x", "--purge", "most"]),
+            exit::CONFIG
+        );
+        assert_eq!(run_str(&["ls"]), exit::CONFIG);
+        assert_eq!(run_str(&["upload", "a.txt"]), exit::CONFIG);
+        assert_eq!(run_str(&["sites", "extra"]), exit::CONFIG);
+    }
+
+    #[test]
+    fn the_cancel_event_is_named_by_the_process() {
+        assert_eq!(cancel_event_name(1234), r"Local\HTTPorter.Cli.Cancel.1234");
+    }
+}
