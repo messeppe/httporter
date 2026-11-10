@@ -199,6 +199,8 @@ fn the_app_can_hide_and_show_the_sidebar() {
 
     w.set_sidebar_visible(false);
     slint::platform::update_timers_and_animations();
+    // It slides out first (I7), then goes.
+    testing::mock_elapsed_time(std::time::Duration::from_millis(400));
     assert!(!w.get_sidebar_visible());
     assert_eq!(add_site_buttons(&w), 0, "the sidebar is gone");
 
@@ -206,6 +208,8 @@ fn the_app_can_hide_and_show_the_sidebar() {
     tab(&w, 1);
     tap(w.window(), Key::Return);
     assert!(w.get_sidebar_visible());
+    // It slides in (I7).
+    testing::mock_elapsed_time(std::time::Duration::from_millis(400));
     assert_eq!(add_site_buttons(&w), 1);
 }
 

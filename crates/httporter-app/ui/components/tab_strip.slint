@@ -22,6 +22,8 @@ component StripButton inherits Rectangle {
     border-radius: root.size / 2;
     background: area.pressed ? Theme.sep-strong : (area.has-hover ? Theme.hover : transparent);
     accessible-role: button;
+
+    animate background { duration: Theme.motion-hover; easing: ease-out; }
     accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
 
@@ -46,6 +48,8 @@ component Tab inherits Rectangle {
 
     border-radius: 6px;
     background: root.current ? Theme.control : (area.has-hover ? Theme.hover : transparent);
+    // The hover wash fades (I7); the current tab's face comes at once, as the click asked.
+    animate background { duration: root.current ? 0ms : Theme.motion-hover; easing: ease-out; }
     border-width: root.current ? 1phx : 0px;
     border-color: Theme.control-border;
     drop-shadow-blur: root.current ? 2px : 0px;

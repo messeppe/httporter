@@ -57,8 +57,11 @@ export component ToolButton inherits Rectangle {
     width: 32px;
     height: 28px;
     border-radius: self.height / 2;
-    background: root.active ? Theme.sel-quiet : (area.has-hover && root.enabled ? Theme.hover : transparent);
+    // Hover and press fade in and out (I7, `Theme.motion-hover`).
+    background: root.active || root.held ? Theme.sel-quiet : (area.has-hover && root.enabled ? Theme.hover : transparent);
     opacity: root.enabled ? 1 : 0.4;
+
+    animate background { duration: Theme.motion-hover; easing: ease-out; }
     forward-focus: key-focus;
     accessible-role: button;
     accessible-label: root.label;
@@ -142,7 +145,11 @@ export component CapsuleButton inherits Rectangle {
 
     height: Theme.control-height;
     border-radius: self.height / 2;
-    background: root.quiet ? transparent : (root.primary ? Theme.accent : Theme.control);
+    // Pressed, the face darkens (the quiet button gets the hover wash); both fade (I7).
+    property <bool> down: area.pressed && root.enabled;
+    background: root.quiet ? (root.down ? Theme.hover : transparent) : (root.primary ? (root.down ? Theme.accent.darker(0.15) : Theme.accent) : (root.down ? (Theme.dark ? Theme.control.brighter(0.2) : Theme.control.darker(0.06)) : Theme.control));
+
+    animate background { duration: Theme.motion-hover; easing: ease-out; }
     // A plain button is outlined in `field-border` (3:1 against the surface in both themes): the
     // white face of `control` has no other edge on a white sheet. The primary one is a fill.
     border-width: root.quiet ? 0px : (root.primary ? 0.5px : (root.hairline ? 1phx : 1px));

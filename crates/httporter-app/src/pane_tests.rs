@@ -1711,6 +1711,9 @@ fn escape_cancels_drag() {
     assert_eq!(chips(&w, "2 items"), 1);
     assert_eq!(chips(&w, "Release to upload to remote-00005.txt"), 1);
     tap(w.window(), Key::Escape);
+    // The ghost slides back to where the drag began (I7), then goes.
+    assert_eq!(chips(&w, "2 items"), 1, "the ghost slides back");
+    pass(400);
     assert_eq!(chips(&w, "2 items"), 0, "the ghost is gone");
     assert_eq!(
         chips(&w, "Release to upload to remote-00005.txt"),

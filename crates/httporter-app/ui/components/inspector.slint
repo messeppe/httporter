@@ -343,6 +343,8 @@ export component Inspector inherits Rectangle {
 
                 if root.has-preview: PixelImage {
                     source: root.image;
+                    // Made when the preview has loaded: it fades in then (I7).
+                    fade-on-create: true;
                     accessible-role: AccessibleRole.image;
                     accessible-label: @tr("Preview of {}", root.data.name);
                 }
