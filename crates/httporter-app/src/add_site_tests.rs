@@ -5,7 +5,7 @@
 //! behind) and how it presents itself to assistive technology.
 
 use crate::add_site::{FieldError, show_field_error};
-use crate::keyboard_tests::{center, click, site, tab, tap};
+use crate::keyboard_tests::{center, click, let_motion_finish, site, tab, tap};
 use crate::pane_tests::row_starting;
 use crate::{AppWindow, ProviderTile};
 use i_slint_backend_testing as testing;
@@ -149,6 +149,8 @@ impl Bed {
     fn open(&self) {
         self.w.set_add_site_open(true);
         slint::platform::update_timers_and_animations();
+        // The sheet comes in (I7) before it is clicked at.
+        let_motion_finish();
         // The sheet is built on the next pass over the window's items; looking for it does that.
         assert!(self.is_open());
     }
@@ -160,6 +162,8 @@ impl Bed {
 
     fn tap(&self, key: impl Into<SharedString>) {
         tap(self.w.window(), key);
+        // Escape and Cancel close the sheet after its exit (I7).
+        let_motion_finish();
     }
 
     fn type_text(&self, text: &str) {
@@ -634,6 +638,7 @@ fn the_buttons_can_be_pressed_by_assistive_technology() {
         .invoke_accessible_default_action();
     b.button("Add Site").invoke_accessible_default_action();
     b.button("Cancel").invoke_accessible_default_action();
+    let_motion_finish();
     assert_eq!(b.told(), vec!["test ||0|", "save ||0|", "cancel"]);
 }
 
@@ -1548,7 +1553,7 @@ impl Bed {
 
     fn press(&self, role: AccessibleRole, label: &str) {
         self.control(role, label).invoke_accessible_default_action();
-        slint::platform::update_timers_and_animations();
+        let_motion_finish();
     }
 
     fn has(&self, role: AccessibleRole, label: &str) -> bool {

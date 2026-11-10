@@ -17,7 +17,7 @@ use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::*;
-use crate::keyboard_tests::{site, tap};
+use crate::keyboard_tests::{let_motion_finish, site, tap};
 use crate::viewmodel::{FileKindData, RowData, to_slint_rows};
 use crate::{AppWindow, ProviderTile};
 
@@ -532,7 +532,7 @@ fn told(log: &Log) -> Vec<String> {
 
 fn key(w: &AppWindow, key: impl Into<slint::SharedString>) {
     tap(w.window(), key);
-    slint::platform::update_timers_and_animations();
+    let_motion_finish();
 }
 
 fn backtab(w: &AppWindow) {
@@ -547,7 +547,7 @@ fn press(w: &AppWindow, role: AccessibleRole, label: &str) {
     find(w, role, label)
         .unwrap_or_else(|| panic!("no {role:?} {label:?}"))
         .invoke_accessible_default_action();
-    slint::platform::update_timers_and_animations();
+    let_motion_finish();
 }
 
 fn open_delete(w: &AppWindow) {

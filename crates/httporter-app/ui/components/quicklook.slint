@@ -193,10 +193,15 @@ export component QuickLook inherits Rectangle {
         root.image-room(root.room-width, root.room-height);
     }
 
-    Modal {
+    // Quick Look grows out of the file and shrinks back into it (0.92 → 1, a little bounce).
+    modal := Modal {
         at-first-stop: close-button.has-focus;
         at-last-stop: with-button.has-focus;
-        cancel => { root.close(); }
+        enter-offset: 0px;
+        enter-scale: 0.92;
+        pop: true;
+        cancel => { self.leave(0); }
+        left => { root.close(); }
         focus-first => { close-button.focus(); }
         focus-last => { with-button.focus(); }
 
@@ -209,7 +214,7 @@ export component QuickLook inherits Rectangle {
                 }
                 if (event.text == Key.Space) {
                     if (!event.repeat) {
-                        root.close();
+                        modal.leave(0);
                     }
                     return accept;
                 }
@@ -259,7 +264,7 @@ export component QuickLook inherits Rectangle {
                         close-button := ToolButton {
                             icon: Icons.x;
                             label: @tr("Close Quick Look");
-                            clicked => { root.close(); }
+                            clicked => { modal.leave(0); }
                         }
                     }
                     VerticalLayout {
@@ -467,11 +472,18 @@ export component EditConflictSheet inherits Rectangle {
 
     init => { copy-button.focus(); }
 
-    Modal {
+    modal := Modal {
         at-first-stop: copy-button.has-focus;
         at-last-stop: discard-button.has-focus;
-        cancel => { root.cancelled(); }
-        confirm => { root.choice(1); }
+        cancel => { self.leave(-1); }
+        confirm => { self.leave(1); }
+        left(how) => {
+            if (how < 0) {
+                root.cancelled();
+            } else {
+                root.choice(how);
+            }
+        }
         focus-first => { copy-button.focus(); }
         focus-last => { discard-button.focus(); }
 
@@ -488,16 +500,16 @@ export component EditConflictSheet inherits Rectangle {
                 copy-button := CapsuleButton {
                     text: @tr("Save as Copy");
                     primary: true;
-                    clicked => { root.choice(1); }
+                    clicked => { modal.leave(1); }
                 }
                 CapsuleButton {
                     text: @tr("Overwrite");
                     destructive: true;
-                    clicked => { root.choice(0); }
+                    clicked => { modal.leave(0); }
                 }
                 discard-button := CapsuleButton {
                     text: @tr("Discard My Edit");
-                    clicked => { root.choice(2); }
+                    clicked => { modal.leave(2); }
                 }
             }
         }

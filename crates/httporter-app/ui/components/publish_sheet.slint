@@ -465,10 +465,11 @@ export component PublishSheet inherits Rectangle {
         cancel-button.focus();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: root.busy ? cancel-button.has-focus : change-button.has-focus;
         at-last-stop: root.data.can-publish ? publish-button.has-focus : cancel-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         confirm => {
             if (root.data.can-publish) {
                 root.confirmed();
@@ -767,7 +768,7 @@ export component PublishSheet inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
                 cancel-button := CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 publish-button := CapsuleButton {
                     text: root.data.button-label;
@@ -795,10 +796,11 @@ export component ReviewDeletionsSheet inherits Rectangle {
 
     init => { name-field.focus(); }
 
-    Modal {
+    modal := Modal {
         at-first-stop: name-field.has-focus;
         at-last-stop: root.matches ? delete-button.has-focus : cancel-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         // Return deletes nothing: the delete button has to be pressed.
         confirm => { }
         focus-first => { name-field.focus(); }
@@ -849,7 +851,7 @@ export component ReviewDeletionsSheet inherits Rectangle {
 
                 cancel-button := CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 delete-button := CapsuleButton {
                     text: @tr("Delete {} Files and Publish", Counts.grouped(root.data.deletes));
@@ -893,10 +895,11 @@ export component CdnKeySheet inherits Rectangle {
         key-field.focus();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: key-field.has-focus;
         at-last-stop: root.can-save ? save-button.has-focus : cancel-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         confirm => { root.submit(); }
         focus-first => { key-field.focus(); }
         focus-last => {
@@ -962,7 +965,7 @@ export component CdnKeySheet inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
                 cancel-button := CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 save-button := CapsuleButton {
                     text: @tr("Save");
