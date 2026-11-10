@@ -2,6 +2,8 @@
 
 // Layout helpers.
 
+import { Theme } from "../theme.slint";
+
 // Centres its children vertically. Use it for fixed-height items inside a HorizontalLayout,
 // which would otherwise sit at the top edge.
 export component VCenter inherits VerticalLayout {
@@ -13,6 +15,39 @@ export component VCenter inherits VerticalLayout {
 // each of its pixels with the next.
 export component PixelImage inherits Rectangle {
     in property <image> source;
+    // I7: the picture fades in (its opacity only: where it is drawn stays exact) when it arrives,
+    // that is when the source goes from none to one, and also on creation with one when
+    // `fade-on-create` (for a place that creates the picture once it has loaded).
+    in property <bool> fade-on-create: false;
+
+    property <bool> had: false;
+    property <bool> fading: false;
+    property <float> shown: 1;
+
+    animate shown {
+        duration: root.fading ? Theme.motion-control : 0ms;
+        easing: ease-out;
+    }
+
+    function fade-in() {
+        root.fading = false;
+        root.shown = 0;
+        root.fading = true;
+        root.shown = 1;
+    }
+
+    init => {
+        root.had = root.source.width > 0;
+        if (root.had && root.fade-on-create) {
+            root.fade-in();
+        }
+    }
+    changed source => {
+        if (root.source.width > 0 && !root.had) {
+            root.fade-in();
+        }
+        root.had = root.source.width > 0;
+    }
 
     property <physical-length> left: root.absolute-position.x + (root.width - picture.width) / 2;
     property <physical-length> top: root.absolute-position.y + (root.height - picture.height) / 2;
@@ -24,6 +59,7 @@ export component PixelImage inherits Rectangle {
         height: root.source.height * 1phx;
         source: root.source;
         image-fit: fill;
+        opacity: root.shown;
         accessible-role: none;
     }
 }

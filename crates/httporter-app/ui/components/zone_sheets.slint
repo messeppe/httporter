@@ -92,14 +92,15 @@ export component CreateZoneSheet inherits Rectangle {
         }
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: name-field.has-focus;
         at-last-stop: create-button.has-focus;
         cancel => {
             if (!root.busy) {
-                root.cancelled();
+                self.leave(0);
             }
         }
+        left => { root.cancelled(); }
         confirm => { root.submit(); }
         focus-first => { name-field.focus(); }
         focus-last => { create-button.focus(); }
@@ -245,7 +246,7 @@ export component CreateZoneSheet inherits Rectangle {
                 CapsuleButton {
                     text: @tr("Cancel");
                     enabled: !root.busy;
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 create-button := CapsuleButton {
                     text: root.busy ? @tr("Creating…") : @tr("Create Zone");
@@ -280,14 +281,15 @@ export component CreateBucketSheet inherits Rectangle {
         }
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: name-field.has-focus;
         at-last-stop: create-button.has-focus;
         cancel => {
             if (!root.busy) {
-                root.cancelled();
+                self.leave(0);
             }
         }
+        left => { root.cancelled(); }
         confirm => { root.submit(); }
         focus-first => { name-field.focus(); }
         focus-last => { create-button.focus(); }
@@ -341,7 +343,7 @@ export component CreateBucketSheet inherits Rectangle {
                 CapsuleButton {
                     text: @tr("Cancel");
                     enabled: !root.busy;
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 create-button := CapsuleButton {
                     text: root.busy ? @tr("Creating…") : @tr("Create Bucket");

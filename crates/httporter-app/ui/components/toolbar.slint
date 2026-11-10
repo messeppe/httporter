@@ -26,6 +26,8 @@ export component Toolbar inherits Rectangle {
     in property <string> subtitle;
     in property <string> connection-text;
     in property <bool> connection-ok;
+    // The connection is being made: the pill's dot pulses (I7).
+    in property <bool> connection-busy: false;
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
     // A site is open: Publish may be pressed (on a profile's page it always may).
@@ -191,6 +193,7 @@ export component Toolbar inherits Rectangle {
         visible: false;
         text: root.connection-text;
         ok: root.connection-ok;
+        connecting: root.connection-busy;
     }
 
     // The row ends where the caption buttons begin, and draws nothing past that.
@@ -275,6 +278,7 @@ export component Toolbar inherits Rectangle {
                 ConnectionPill {
                     text: root.connection-text;
                     ok: root.connection-ok;
+                    connecting: root.connection-busy;
                 }
             }
 

@@ -30,6 +30,12 @@ component Toast inherits Rectangle {
     property <bool> gone: false;
     property <bool> button-focused: false;
     property <bool> appeared: false;
+    // Esc was pressed: it fades out, then goes.
+    property <bool> leaving: false;
+    property <bool> running: !root.gone && !root.leaving && !hover.has-hover && !root.focused;
+    // Motion (I7): it rises 12 px and fades in; it fades out over the last moment of its time (so
+    // it still goes after 4 s or 8 s), or after Esc. The pointer or the focus on it brings it back.
+    property <bool> fading: root.leaving || (root.running && root.shown + Theme.motion-exit >= root.stays);
 
     function close() {
         if (!root.gone) {
@@ -38,15 +44,12 @@ component Toast inherits Rectangle {
         }
     }
 
-    background: Theme.sheet;
-    border-radius: Theme.radius-md;
-    border-width: 1phx;
-    border-color: Theme.sep-strong;
-    drop-shadow-blur: 12px;
-    drop-shadow-offset-y: 4px;
-    drop-shadow-color: Theme.shadow-sheet;
-    opacity: root.appeared ? 1 : 0;
-    animate opacity { duration: Theme.motion ? 180ms : 0ms; }
+    // The size is the row's (the card inside moves as the toast comes in).
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    preferred-height: row.preferred-height;
+    opacity: root.fading ? 0 : 1;
+    animate opacity { duration: Theme.motion-exit; easing: ease-in; }
     forward-focus: keys;
     accessible-role: groupbox;
     accessible-label: root.data.text;
@@ -55,7 +58,7 @@ component Toast inherits Rectangle {
 
     Timer {
         interval: 100ms;
-        running: !root.gone && !hover.has-hover && !root.focused;
+        running: root.running;
         triggered => {
             root.shown += 100ms;
             if (root.shown >= root.stays) {
@@ -64,66 +67,104 @@ component Toast inherits Rectangle {
         }
     }
 
-    // Over the whole toast and around its button, so that the pointer on the button still holds it.
-    hover := TouchArea {
-        keys := FocusScope {
-            focus-on-click: false;
-            key-pressed(event) => {
-                if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift) {
-                    root.close();
-                    return accept;
+    // Esc: the fade, then gone.
+    Timer {
+        interval: Theme.motion-exit;
+        running: root.leaving && !root.gone;
+        triggered => { root.close(); }
+    }
+
+    card := Rectangle {
+        y: root.appeared ? 0px : 12px;
+        background: Theme.sheet;
+        border-radius: Theme.radius-md;
+        border-width: 1phx;
+        border-color: Theme.sep-strong;
+        drop-shadow-blur: 12px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: Theme.shadow-sheet;
+        opacity: root.appeared ? 1 : 0;
+
+        animate y { duration: Theme.motion-panel; easing: spring(0); }
+        animate opacity { duration: Theme.motion-panel; easing: ease-out; }
+
+        // Over the whole toast and around its button, so that the pointer on the button still
+        // holds it.
+        hover := TouchArea {
+            keys := FocusScope {
+                focus-on-click: false;
+                key-pressed(event) => {
+                    if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift) {
+                        root.leaving = true;
+                        return accept;
+                    }
+                    return reject;
                 }
-                return reject;
-            }
 
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 8px;
-                padding-top: 8px;
-                padding-bottom: 8px;
-                spacing: 10px;
+                row := HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 8px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    spacing: 10px;
 
-                if root.data.kind != 0: VerticalLayout {
-                    alignment: center;
+                    if root.data.kind != 0: VerticalLayout {
+                        alignment: center;
 
-                    Image {
-                        source: root.data.kind == 1 ? Icons.check : Icons.warn;
-                        colorize: root.data.kind == 1 ? Theme.green : Theme.orange;
-                        width: 14px;
-                        height: 14px;
+                        Image {
+                            source: root.data.kind == 1 ? Icons.check : Icons.warn;
+                            colorize: root.data.kind == 1 ? Theme.green : Theme.orange;
+                            width: 14px;
+                            height: 14px;
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        min-width: 120px;
+                        text: root.data.text;
+                        color: Theme.label;
+                        font-size: Theme.font-body;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        // The toast itself says it.
                         accessible-role: none;
                     }
-                }
-                Text {
-                    horizontal-stretch: 1;
-                    min-width: 120px;
-                    text: root.data.text;
-                    color: Theme.label;
-                    font-size: Theme.font-body;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    // The toast itself says it.
-                    accessible-role: none;
-                }
-                if root.data.action != "": CapsuleButton {
-                    text: root.data.action;
-                    changed has-focus => { root.button-focused = self.has-focus; }
-                    clicked => { root.action(); }
+                    if root.data.action != "": CapsuleButton {
+                        text: root.data.action;
+                        changed has-focus => { root.button-focused = self.has-focus; }
+                        clicked => { root.action(); }
+                    }
                 }
             }
         }
-    }
 
-    // The keyboard focus on the toast itself (its button draws its own).
-    Rectangle {
-        x: -3px;
-        y: -3px;
-        width: parent.width + 6px;
-        height: parent.height + 6px;
-        border-radius: parent.border-radius + 3px;
-        border-width: 2px;
-        border-color: Theme.focus-ring;
-        visible: keys.has-focus;
+        // The time left to press the button (Undo): a thin bar along the bottom that shrinks
+        // with it, and stands still while the toast does. It moves a tick (0.1 s) at a time,
+        // eased over the tick so that it glides.
+        if root.data.action != "": Rectangle {
+            x: Theme.radius-md;
+            y: parent.height - 3px;
+            width: (parent.width - 2 * Theme.radius-md) * max(0, 1 - root.shown / root.stays);
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.accent;
+            opacity: 0.6;
+
+            animate width { duration: Theme.motion-hover; easing: linear; }
+        }
+
+        // The keyboard focus on the toast itself (its button draws its own).
+        Rectangle {
+            x: -3px;
+            y: -3px;
+            width: parent.width + 6px;
+            height: parent.height + 6px;
+            border-radius: parent.border-radius + 3px;
+            border-width: 2px;
+            border-color: Theme.focus-ring;
+            visible: keys.has-focus;
+        }
     }
 }
 

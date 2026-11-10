@@ -56,10 +56,11 @@ export component RenameSheet inherits Rectangle {
         name-field.select-all();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: name-field.has-focus;
         at-last-stop: rename-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         confirm => { root.submit(); }
         focus-first => { name-field.focus(); }
         focus-last => { rename-button.focus(); }
@@ -105,7 +106,7 @@ export component RenameSheet inherits Rectangle {
 
                 CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 rename-button := CapsuleButton {
                     text: root.data.busy ? @tr("Renaming…") : @tr("Rename");
@@ -136,10 +137,11 @@ export component MoveSheet inherits Rectangle {
         folder-field.select-all();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: folder-field.has-focus;
         at-last-stop: move-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         confirm => { root.submit(); }
         focus-first => { folder-field.focus(); }
         focus-last => { move-button.focus(); }
@@ -186,7 +188,7 @@ export component MoveSheet inherits Rectangle {
 
                 CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 move-button := CapsuleButton {
                     text: root.data.busy ? @tr("Checking…") : @tr("Move");
@@ -208,11 +210,18 @@ export component MoveWarningSheet inherits Rectangle {
 
     init => { cancel-button.focus(); }
 
-    Modal {
+    modal := Modal {
         at-first-stop: go-button.has-focus;
         at-last-stop: cancel-button.has-focus;
-        cancel => { root.cancelled(); }
-        confirm => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left(how) => {
+            if (how == 1) {
+                root.confirm();
+            } else {
+                root.cancelled();
+            }
+        }
+        confirm => { self.leave(0); }
         focus-first => { go-button.focus(); }
         focus-last => { cancel-button.focus(); }
 
@@ -229,13 +238,13 @@ export component MoveWarningSheet inherits Rectangle {
                 go-button := CapsuleButton {
                     horizontal-stretch: 1;
                     text: root.data.button;
-                    clicked => { root.confirm(); }
+                    clicked => { modal.leave(1); }
                 }
                 cancel-button := CapsuleButton {
                     horizontal-stretch: 1;
                     text: @tr("Cancel");
                     primary: true;
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
             }
         }
@@ -254,10 +263,11 @@ export component PresignSheet inherits Rectangle {
         expiry-list.focus();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: expiry-list.has-focus;
         at-last-stop: copy-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         confirm => { root.copy(expiry-list.current); }
         focus-first => { expiry-list.focus(); }
         focus-last => { copy-button.focus(); }
@@ -301,7 +311,7 @@ export component PresignSheet inherits Rectangle {
 
                 CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 copy-button := CapsuleButton {
                     text: @tr("Copy Link");

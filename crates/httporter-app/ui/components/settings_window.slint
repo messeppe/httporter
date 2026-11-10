@@ -33,9 +33,12 @@ component TabButton inherits Rectangle {
     width: max(82px, name.preferred-width + 12px);
     height: 50px + Theme.grow-small;
     border-radius: 8px;
-    background: root.selected ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
+    // The selected tab's fill is the window's highlight, which slides from tab to tab (I7).
+    background: !root.selected && area.has-hover ? Theme.hover : transparent;
     forward-focus: key-focus;
     accessible-role: tab;
+
+    animate background { duration: Theme.motion-hover; easing: ease-out; }
     accessible-label: root.text;
     accessible-item-selected: root.selected;
     accessible-action-default => { root.clicked(); }
@@ -200,6 +203,7 @@ component Switch inherits Rectangle {
     height: 22px;
     border-radius: self.height / 2;
     background: root.checked ? Theme.accent : Theme.chip;
+    animate background { duration: Theme.motion-control; easing: ease-in-out; }
     // The off switch keeps a thin outline so that it can be seen on the white group.
     border-width: root.checked ? 0px : 1phx;
     border-color: Theme.control-border;
@@ -221,7 +225,8 @@ component Switch inherits Rectangle {
         drop-shadow-offset-y: 1px;
         drop-shadow-color: #0000004d;
 
-        animate x { duration: Theme.motion ? 120ms : 0ms; }
+        // The knob springs across (I7).
+        animate x { duration: Theme.motion-control; easing: spring(0.15); }
     }
 
     // Keyboard focus ring, 3 px outside.
@@ -653,6 +658,8 @@ export component SettingsWindow inherits Window {
     // ---- I4 (T8): General (0), Sites (1) and Advanced (5) ----
     // General.
     in-out property <int> appearance: 0;
+    // 0 follows Windows, 1 on, 2 off (I7).
+    in-out property <int> animations: 0;
     in-out property <int> start-view: 0;
     in-out property <bool> restore-tabs: true;
     in-out property <bool> ask-big-preview: true;
@@ -718,6 +725,34 @@ export component SettingsWindow inherits Window {
     callback reset-requested();
     callback reset-confirmed();
 
+    // The tab highlight (see `tab-highlight`): where the selected tab is, how far off it the
+    // highlight starts, and the spring's share of that (`tab-progress` runs to 1 or to 0, by turns).
+    property <length> tab-x;
+    property <length> tab-y;
+    property <length> tab-w;
+    property <length> tab-h;
+    property <length> tab-slide;
+    property <length> tab-slide-w;
+    property <bool> tab-phase: false;
+    property <float> tab-progress: root.tab-phase ? 1 : 0;
+
+    animate tab-progress { duration: Theme.motion-control; easing: spring(0.15); }
+
+    // The selected tab is at (x, y), w by h. With `slide`, the highlight goes there from where it
+    // is drawn now; otherwise it just follows (a resize, the first layout; once the spring is
+    // done, `tab-slide` counts for nothing).
+    function place-highlight(x: length, y: length, w: length, h: length, slide: bool) {
+        if (slide) {
+            root.tab-slide = tab-highlight.x - x;
+            root.tab-slide-w = tab-highlight.width - w;
+            root.tab-phase = !root.tab-phase;
+        }
+        root.tab-x = x;
+        root.tab-y = y;
+        root.tab-w = w;
+        root.tab-h = h;
+    }
+
     changed current-tab => {
         if (root.current-tab == 4) {
             root.publish-shown();
@@ -776,6 +811,21 @@ export component SettingsWindow inherits Window {
                     accessible-role: tab-list;
                     accessible-label: @tr("Settings sections");
 
+                    // The selected tab's fill (I7): it slides to the tab chosen, with a little spring.
+                    // It sits at the selected tab (`tab-x` and the rest, which the tab keeps up to
+                    // date as the window is resized), off by `tab-slide` (and `tab-slide-w`) times a
+                    // share that runs from 1 to 0 each time the tab changes.
+                    tab-highlight := Rectangle {
+                        property <float> share: root.tab-phase ? 1 - root.tab-progress : root.tab-progress;
+
+                        x: root.tab-x + root.tab-slide * self.share;
+                        y: root.tab-y;
+                        width: root.tab-w + root.tab-slide-w * self.share;
+                        height: root.tab-h;
+                        border-radius: 8px;
+                        background: Theme.sel-quiet;
+                    }
+
                     HorizontalLayout {
                         padding-left: 12px;
                         padding-right: 12px;
@@ -789,6 +839,26 @@ export component SettingsWindow inherits Window {
                             icon: root.tab-icons[index];
                             selected: index == root.current-tab;
                             clicked => { root.current-tab = index; }
+                            init => {
+                                if (self.selected) {
+                                    root.place-highlight(self.x, self.y, self.width, self.height, false);
+                                }
+                            }
+                            changed selected => {
+                                if (self.selected) {
+                                    root.place-highlight(self.x, self.y, self.width, self.height, true);
+                                }
+                            }
+                            changed x => {
+                                if (self.selected) {
+                                    root.place-highlight(self.x, self.y, self.width, self.height, false);
+                                }
+                            }
+                            changed width => {
+                                if (self.selected) {
+                                    root.place-highlight(self.x, self.y, self.width, self.height, false);
+                                }
+                            }
                         }
                     }
                 }
@@ -854,6 +924,7 @@ export component SettingsWindow inherits Window {
             accessible-role: tab-panel;
             accessible-label: root.tab-names[0];
             appearance <=> root.appearance;
+            animations <=> root.animations;
             start-view <=> root.start-view;
             restore-tabs <=> root.restore-tabs;
             ask-big-preview <=> root.ask-big-preview;

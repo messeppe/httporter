@@ -1704,6 +1704,7 @@ fn start_opening_site(ui: &AppWindow, shown: &Mutex<Shown>, notice: Option<Strin
     ui.set_remote_status(copy::CONNECTING.into());
     ui.set_connection_text(copy::CONNECTING.into());
     ui.set_connection_ok(true);
+    ui.set_connection_busy(true);
     ui.set_remote_loading(true);
     ui.set_remote_can_go_back(false);
     ui.set_remote_can_go_forward(false);
@@ -2051,6 +2052,8 @@ fn apply_remote(ui: &AppWindow, view: &RemoteView, change: Change) {
     ui.set_remote_selected(focus);
     ui.set_connection_text(view.connection.as_str().into());
     ui.set_connection_ok(view.connection_ok);
+    // Still connecting: neither the site's details nor an error are in (the pill's dot pulses).
+    ui.set_connection_busy(view.connection == copy::CONNECTING);
     ui.set_endpoint_text(view.endpoint.as_str().into());
     ui.set_remote_chip(view.chip.as_str().into());
     ui.set_status_right(view.status_right.as_str().into());

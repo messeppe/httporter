@@ -47,18 +47,68 @@ export component Chip inherits Rectangle {
 // plain grey text. On a selected row (`lit`) the words turn white over a light wash (mockup
 // `.row.sel .chip`). Nothing shows for `none`. The row gives the words (`text`), which it also reads
 // out.
+//
+// I7: when the row's status changes in place (a publish turns "Changed" and "New" into "Same"), the
+// colours fade to the new ones over `Theme.motion-control`. `key` names the row (its file name):
+// a list that hands the chip to another row as it scrolls changes the key too, and that snaps.
 export component StatusChip inherits Rectangle {
     in property <CompareStatus> status;
     in property <string> text;
     in property <bool> lit: false;
+    in property <string> key;
 
     property <bool> plain: root.status == CompareStatus.same;
     property <color> tint: root.status == CompareStatus.changed ? Theme.orange : root.status == CompareStatus.new ? Theme.green : root.status == CompareStatus.remote-only ? Theme.purple : Theme.label2;
     property <color> wash: root.status == CompareStatus.changed ? Theme.orange-soft : root.status == CompareStatus.new ? Theme.green-soft : Theme.purple-soft;
+    // The colours wanted now, and those drawn (which follow them, fading or not; see `paint`).
+    property <color> want-bg: root.plain ? transparent : (root.lit ? #ffffff38 : root.wash);
+    property <color> want-ink: root.lit ? Theme.sel-text : root.tint;
+    property <color> bg: root.want-bg;
+    property <color> ink: root.want-ink;
+    // What was painted last: the row, the status and the two colours aimed at.
+    property <string> painted-key;
+    property <CompareStatus> painted-status;
+    property <color> aimed-bg: root.want-bg;
+    property <color> aimed-ink: root.want-ink;
+    property <bool> fading: false;
+
+    animate bg, ink {
+        duration: root.fading ? Theme.motion-control : 0ms;
+        easing: ease-in-out;
+    }
+
+    // Fades only when the same row's status changed; a new row, the selection or the theme snap.
+    // Several handlers may call it for one change: only the first one aims anew.
+    function paint() {
+        root.fading = root.key == root.painted-key && root.status != root.painted-status;
+        root.painted-key = root.key;
+        root.painted-status = root.status;
+        if (root.want-bg != root.aimed-bg) {
+            root.aimed-bg = root.want-bg;
+            root.bg = root.want-bg;
+        }
+        if (root.want-ink != root.aimed-ink) {
+            root.aimed-ink = root.want-ink;
+            root.ink = root.want-ink;
+        }
+    }
+
+    init => {
+        root.painted-key = root.key;
+        root.painted-status = root.status;
+        root.aimed-bg = root.want-bg;
+        root.aimed-ink = root.want-ink;
+        // From here on only `paint` sets them.
+        root.bg = root.want-bg;
+        root.ink = root.want-ink;
+    }
+    changed want-bg => { root.paint(); }
+    changed want-ink => { root.paint(); }
+    changed key => { root.paint(); }
 
     height: Theme.chip-height;
     visible: root.status != CompareStatus.none;
-    background: root.plain ? transparent : (root.lit ? #ffffff38 : root.wash);
+    background: root.bg;
     border-radius: self.height / 2;
     accessible-role: none;
 
@@ -68,7 +118,7 @@ export component StatusChip inherits Rectangle {
 
         Text {
             text: root.text;
-            color: root.lit ? Theme.sel-text : root.tint;
+            color: root.ink;
             font-size: Theme.font-small;
             font-weight: root.plain ? Theme.weight-medium : Theme.weight-semibold;
             vertical-alignment: center;
@@ -78,14 +128,69 @@ export component StatusChip inherits Rectangle {
     }
 }
 
-// Connection state in the toolbar (mockup `.conn`): green with a lock when connected, orange with a warning otherwise.
-export component ConnectionPill inherits Chip {
+// Connection state in the toolbar (mockup `.conn`): green with a lock when connected, orange with a
+// warning otherwise. While `connecting` a dot stands in for the lock and pulses (I7); its timer
+// runs only then.
+export component ConnectionPill inherits Rectangle {
+    in property <string> text;
     in property <bool> ok: true;
+    in property <bool> connecting: false;
+
+    property <color> fg: root.ok ? Theme.green : Theme.orange;
+    // The dot is dim, then bright, each half of the pulse.
+    property <bool> dim: false;
 
     height: Theme.chip-height + 4px;
-    icon: root.ok ? Icons.lock : Icons.warn;
-    fg: root.ok ? Theme.green : Theme.orange;
-    bg: root.ok ? Theme.green-soft : Theme.orange-soft;
+    background: root.ok ? Theme.green-soft : Theme.orange-soft;
+    border-radius: self.height / 2;
+
+    Timer {
+        interval: 600ms;
+        running: root.connecting && Theme.motion;
+        triggered => { root.dim = !root.dim; }
+    }
+    changed connecting => { root.dim = false; }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+        alignment: center;
+
+        if !root.connecting: VCenter {
+            Image {
+                source: root.ok ? Icons.lock : Icons.warn;
+                colorize: root.fg;
+                width: 14px;
+                height: 14px;
+            }
+        }
+        if root.connecting: VCenter {
+            HorizontalLayout {
+                width: 14px;
+                alignment: center;
+
+                VCenter {
+                    Rectangle {
+                        width: 7px;
+                        height: 7px;
+                        border-radius: self.height / 2;
+                        background: root.fg;
+                        opacity: root.dim ? 0.3 : 1;
+
+                        animate opacity { duration: Theme.motion-panel * 2; easing: ease-in-out; }
+                    }
+                }
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.fg;
+            font-size: Theme.font-small;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+        }
+    }
 }
 
 // 7 px status dot (mockup `.dot`).

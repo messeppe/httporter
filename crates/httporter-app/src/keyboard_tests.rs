@@ -55,6 +55,15 @@ fn testbed() -> Testbed {
     t
 }
 
+/// Lets the sheets' and alerts' motion (I7) play out on the mocked clock: an entrance, or an exit
+/// and the close it ends in (a sheet that closes itself tells the window after its exit, 200 ms).
+/// A few steps, since a timer started by one step fires on a later one.
+pub(crate) fn let_motion_finish() {
+    for _ in 0..3 {
+        testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    }
+}
+
 /// Press and release one key in the window.
 pub(crate) fn tap(window: &slint::Window, key: impl Into<SharedString>) {
     let text: SharedString = key.into();
@@ -134,6 +143,7 @@ fn add_site_works_from_the_keyboard() {
     // Add Site opens a modal sheet; closing it puts the focus back on the button.
     assert!(w.get_add_site_open());
     tap(w.window(), Key::Escape);
+    let_motion_finish();
     assert!(!w.get_add_site_open());
     slint::platform::update_timers_and_animations();
     tap(w.window(), Key::Space);
@@ -199,6 +209,8 @@ fn the_app_can_hide_and_show_the_sidebar() {
 
     w.set_sidebar_visible(false);
     slint::platform::update_timers_and_animations();
+    // It slides out first (I7), then goes.
+    testing::mock_elapsed_time(std::time::Duration::from_millis(400));
     assert!(!w.get_sidebar_visible());
     assert_eq!(add_site_buttons(&w), 0, "the sidebar is gone");
 
@@ -206,6 +218,8 @@ fn the_app_can_hide_and_show_the_sidebar() {
     tab(&w, 1);
     tap(w.window(), Key::Return);
     assert!(w.get_sidebar_visible());
+    // It slides in (I7).
+    testing::mock_elapsed_time(std::time::Duration::from_millis(400));
     assert_eq!(add_site_buttons(&w), 1);
 }
 
@@ -1135,6 +1149,7 @@ fn the_quick_look_switch_flips_with_space_and_keeps_the_arrows_for_files() {
     assert_eq!(switch.accessible_checked(), Some(false));
 
     tap(w.window(), Key::Escape);
+    let_motion_finish();
     assert_eq!(said(&log), ["close"]);
 }
 

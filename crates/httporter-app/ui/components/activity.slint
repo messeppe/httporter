@@ -9,7 +9,7 @@ import { Theme } from "../theme.slint";
 import { ActivityFilterData, ActivityRow } from "../types.slint";
 import { CapsuleButton } from "buttons.slint";
 import { Field, RegionPicker } from "form_controls.slint";
-import { Modal, Segmented } from "sheets.slint";
+import { Modal, OutsideNudge, Segmented } from "sheets.slint";
 import { VCenter } from "layout.slint";
 
 // One event of the list.
@@ -106,16 +106,25 @@ export component ActivitySheet inherits Rectangle {
         search-field.focus();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: kind-control.has-focus;
         at-last-stop: done-button.has-focus;
-        cancel => { root.cancelled(); }
-        confirm => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
+        confirm => { self.leave(0); }
         focus-first => { kind-control.focus(); }
         focus-last => { done-button.focus(); }
 
-        Rectangle {
-            x: (parent.width - self.width) / 2;
+        // A click beside the card nudges it.
+        nudger := OutsideNudge {
+            hole-x: (parent.width - card.width) / 2;
+            hole-y: card.y;
+            hole-width: card.width;
+            hole-height: card.height;
+        }
+
+        card := Rectangle {
+            x: (parent.width - self.width) / 2 + nudger.offset;
             y: (parent.height - self.height) / 2;
             width: min(760px, parent.width - 32px);
             height: min(540px, parent.height - 32px);
@@ -210,7 +219,7 @@ export component ActivitySheet inherits Rectangle {
                     done-button := CapsuleButton {
                         text: @tr("Done");
                         primary: true;
-                        clicked => { root.cancelled(); }
+                        clicked => { modal.leave(0); }
                     }
                 }
             }

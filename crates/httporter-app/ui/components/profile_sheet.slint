@@ -121,10 +121,11 @@ export component ProfileSheet inherits Rectangle {
         name-field.focus();
     }
 
-    Modal {
+    modal := Modal {
         at-first-stop: name-field.has-focus;
         at-last-stop: save-button.has-focus;
-        cancel => { root.cancelled(); }
+        cancel => { self.leave(0); }
+        left => { root.cancelled(); }
         confirm => { root.submit(); }
         focus-first => { name-field.focus(); }
         focus-last => { save-button.focus(); }
@@ -394,7 +395,7 @@ export component ProfileSheet inherits Rectangle {
                 }
                 CapsuleButton {
                     text: @tr("Cancel");
-                    clicked => { root.cancelled(); }
+                    clicked => { modal.leave(0); }
                 }
                 save-button := CapsuleButton {
                     text: root.editing ? @tr("Save") : @tr("Create Profile");
@@ -406,11 +407,17 @@ export component ProfileSheet inherits Rectangle {
     }
 
     // Delete Profile asks first; Cancel is the default.
-    if root.confirming: Modal {
+    if root.confirming: confirm-modal := Modal {
         at-first-stop: delete-button.has-focus;
         at-last-stop: keep-button.has-focus;
-        cancel => { root.confirming = false; }
-        confirm => { root.confirming = false; }
+        cancel => { self.leave(0); }
+        confirm => { self.leave(0); }
+        left(how) => {
+            root.confirming = false;
+            if (how == 1) {
+                root.delete-profile(root.draft.id);
+            }
+        }
         focus-first => { delete-button.focus(); }
         focus-last => { keep-button.focus(); }
         init => { keep-button.focus(); }
@@ -429,16 +436,13 @@ export component ProfileSheet inherits Rectangle {
                     horizontal-stretch: 1;
                     text: @tr("Delete");
                     destructive: true;
-                    clicked => {
-                        root.confirming = false;
-                        root.delete-profile(root.draft.id);
-                    }
+                    clicked => { confirm-modal.leave(1); }
                 }
                 keep-button := CapsuleButton {
                     horizontal-stretch: 1;
                     text: @tr("Cancel");
                     primary: true;
-                    clicked => { root.confirming = false; }
+                    clicked => { confirm-modal.leave(0); }
                 }
             }
         }

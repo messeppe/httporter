@@ -623,6 +623,7 @@ fn ui_state_round_trips_with_the_new_fields() {
         last_update_check: 1_793_000_000,
         renderer: 1,
         gpu_failed: true,
+        animations: 1,
     };
     let text = serde_json::to_string(&state).unwrap();
     assert_eq!(serde_json::from_str::<UiState>(&text).unwrap(), state);

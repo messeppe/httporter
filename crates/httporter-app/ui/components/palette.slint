@@ -74,7 +74,8 @@ component PaletteRow inherits Rectangle {
 
     if !root.item.header: Rectangle {
         border-radius: 8px;
-        background: root.current ? Theme.sel-quiet : (area.has-hover && root.item.enabled ? Theme.hover : transparent);
+        // The chosen row's highlight is the palette's own, which slides from row to row.
+        background: !root.current && area.has-hover && root.item.enabled ? Theme.hover : transparent;
         accessible-role: list-item;
         accessible-label: root.item.title;
         accessible-description: root.item.subtitle;
@@ -139,6 +140,11 @@ export component CommandPalette inherits Rectangle {
     // The row Return runs: the first entry when the rows change.
     property <int> current: 1;
     property <length> list-max: 380px;
+    // Where the chosen row is in the list, for the highlight that slides to it. It snaps there the
+    // first time (no slide as the palette opens).
+    property <length> sel-y: 0px;
+    property <length> sel-height: 0px;
+    property <bool> sel-placed: false;
 
     function first-entry() -> int {
         return root.items.length > 1 && root.items[0].header ? 1 : 0;
@@ -181,14 +187,19 @@ export component CommandPalette inherits Rectangle {
         scroller.content-y = 0px;
     }
 
-    Modal {
-        background: Theme.dark ? #00000059 : #0000001a;
-        cancel => { root.close(); }
+    // The palette drops in 8 px and fades in; Escape or a click beside it fades it out. Running a
+    // command closes it at once (the command is what the user is waiting for).
+    modal := Modal {
+        scrim: Theme.dark ? #00000059 : #0000001a;
+        enter-offset: -8px;
+        enter-scale: 1;
+        cancel => { self.leave(0); }
         confirm => { root.run-current(); }
+        left => { root.close(); }
 
         // A click beside the panel closes it.
         TouchArea {
-            clicked => { root.close(); }
+            clicked => { modal.leave(0); }
         }
 
         panel := Rectangle {
@@ -274,7 +285,7 @@ export component CommandPalette inherits Rectangle {
                                         return accept;
                                     }
                                     if (event.text == Key.Escape) {
-                                        root.close();
+                                        modal.leave(0);
                                         return accept;
                                     }
                                     // The field is the palette's only stop.
@@ -303,6 +314,22 @@ export component CommandPalette inherits Rectangle {
                     accessible-role: list;
                     accessible-label: @tr("Commands");
 
+                    // The chosen row's highlight, under the rows.
+                    Rectangle {
+                        x: 6px;
+                        y: root.sel-y;
+                        width: rows.width - 12px;
+                        height: root.sel-height;
+                        border-radius: 8px;
+                        background: Theme.sel-quiet;
+                        visible: root.current >= 0 && root.current < root.items.length && !root.items[root.current].header;
+
+                        animate y, height {
+                            duration: root.sel-placed ? Theme.motion-control : 1ms;
+                            easing: ease-out;
+                        }
+                    }
+
                     rows := VerticalLayout {
                         padding: 6px;
                         alignment: start;
@@ -317,11 +344,21 @@ export component CommandPalette inherits Rectangle {
                                 }
                             }
 
-                            // Created when the row becomes the current one: brings it into view.
+                            // Created when the row becomes the current one: brings it into view
+                            // and moves the highlight to it.
                             if i == root.current: Rectangle {
                                 width: 0px;
                                 height: 0px;
-                                init => { root.reveal(parent.y, parent.height); }
+                                property <length> at: parent.y;
+                                property <length> high: parent.height;
+                                changed at => { root.sel-y = self.at; }
+                                changed high => { root.sel-height = self.high; }
+                                init => {
+                                    root.sel-y = self.at;
+                                    root.sel-height = self.high;
+                                    root.sel-placed = true;
+                                    root.reveal(parent.y, parent.height);
+                                }
                             }
                         }
 
