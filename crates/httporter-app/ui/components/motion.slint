@@ -5,20 +5,95 @@
 
 import { Theme } from "../theme.slint";
 
-// An indeterminate spinner, like macOS's: spokes around a centre, the bright one going round.
-// T1 placeholder: track C draws it.
-export component Spinner inherits Rectangle {
+// An indeterminate spinner, like macOS's: eight spokes round a centre, the bright one stepping
+// round once a second and the ones behind it fading. Its timer runs only while the spinner
+// exists and `spinning` is true, so a window with no spinner wakes for nothing. It keeps turning
+// with animations off (it is a progress indication, as on macOS), one step at a time as ever.
+export component Spinner {
     in property <color> color: Theme.label2;
+    in property <bool> spinning: true;
+    // The spoke that is brightest, 0 at the top, going clockwise.
+    property <int> lead: 0;
+
     width: 16px;
     height: 16px;
     accessible-role: progress-indicator;
+
+    Timer {
+        interval: 125ms;
+        running: root.spinning;
+        triggered => { root.lead = Math.mod(root.lead + 1, 8); }
+    }
+
+    for k in 8: spoke := Path {
+        property <angle> theta: k * 45deg;
+        // Steps behind the bright spoke: 0 for it, 7 for the one just ahead of it.
+        property <int> age: Math.mod(root.lead - k + 8, 8);
+        property <float> half: root.width / 2px;
+
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: root.color.with-alpha(1 - self.age * 0.1);
+        stroke-width: Math.max(1.25px, root.width * 0.12);
+        stroke-line-cap: round;
+        accessible-role: none;
+
+        MoveTo {
+            x: spoke.half + spoke.half * 0.45 * Math.sin(spoke.theta);
+            y: spoke.half - spoke.half * 0.45 * Math.cos(spoke.theta);
+        }
+        LineTo {
+            x: spoke.half + spoke.half * 0.85 * Math.sin(spoke.theta);
+            y: spoke.half - spoke.half * 0.85 * Math.cos(spoke.theta);
+        }
+    }
 }
 
-// A disclosure chevron that turns from pointing right (closed) to pointing down (open).
-// T1 placeholder: track C draws it.
-export component Chevron inherits Rectangle {
+// A disclosure chevron that turns from pointing right (closed) to pointing down (open), over
+// `Theme.motion-control`. The same shape as `Icons.chev-r`, drawn as a path turned by `turn`.
+export component Chevron {
     in property <bool> open;
     in property <color> color: Theme.label3;
+    property <angle> turn: root.open ? 90deg : 0deg;
+    property <float> c: root.width / 2px;
+    // The arms' reach from the centre, as the icon's (6 and 3 of 24).
+    property <float> r: root.width / 1px * 0.25;
+    property <float> s: root.width / 1px * 0.125;
+
+    animate turn {
+        duration: Theme.motion-control;
+        easing: ease-in-out;
+    }
+
     width: 10px;
     height: 10px;
+    accessible-role: none;
+
+    Path {
+        width: root.width;
+        height: root.height;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: root.color;
+        stroke-width: Math.max(1px, root.width * 0.12);
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        accessible-role: none;
+
+        // The points (-s, -r), (s, 0) and (-s, r) round the centre, turned by `turn`.
+        MoveTo {
+            x: root.c - root.s * Math.cos(root.turn) + root.r * Math.sin(root.turn);
+            y: root.c - root.s * Math.sin(root.turn) - root.r * Math.cos(root.turn);
+        }
+        LineTo {
+            x: root.c + root.s * Math.cos(root.turn);
+            y: root.c + root.s * Math.sin(root.turn);
+        }
+        LineTo {
+            x: root.c - root.s * Math.cos(root.turn) - root.r * Math.sin(root.turn);
+            y: root.c - root.s * Math.sin(root.turn) + root.r * Math.cos(root.turn);
+        }
+    }
 }

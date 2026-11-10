@@ -429,6 +429,12 @@ fn window_with(view: &DrawerView) -> (AppWindow, Rc<RefCell<Vec<String>>>) {
     (w, log)
 }
 
+/// Lets the drawer's slide (I7, `Theme.motion-panel`) finish: until then its clip hides what
+/// comes in, and a query does not find it.
+fn settle() {
+    testing::mock_elapsed_time(std::time::Duration::from_millis(400));
+}
+
 fn find(w: &AppWindow, role: AccessibleRole, label: &str) -> Option<ElementHandle> {
     ElementHandle::find_by_accessible_label(w, label).find(|e| e.accessible_role() == Some(role))
 }
@@ -437,7 +443,7 @@ fn press(w: &AppWindow, role: AccessibleRole, label: &str) {
     find(w, role, label)
         .unwrap_or_else(|| panic!("no {role:?} {label:?}"))
         .invoke_accessible_default_action();
-    slint::platform::update_timers_and_animations();
+    settle();
 }
 
 /// The running mockup with a row on each tab.
@@ -516,13 +522,13 @@ fn drawer_expands_and_tabs_switch() {
 fn row_cancel_and_retry_callbacks_carry_ids() {
     let (w, log) = window_with(&busy_view());
     w.set_transfers_open(true);
-    slint::platform::update_timers_and_animations();
+    settle();
     press(&w, AccessibleRole::Button, "Cancel a.txt");
     w.set_transfers_tab(1);
-    slint::platform::update_timers_and_animations();
+    settle();
     press(&w, AccessibleRole::Button, "Cancel b.txt");
     w.set_transfers_tab(2);
-    slint::platform::update_timers_and_animations();
+    settle();
     press(&w, AccessibleRole::Button, "Retry");
     press(&w, AccessibleRole::Button, "Retry All");
     assert_eq!(
@@ -531,7 +537,7 @@ fn row_cancel_and_retry_callbacks_carry_ids() {
     );
     // Retry All is only on the Failed tab, and only with something failed.
     w.set_transfers_tab(3);
-    slint::platform::update_timers_and_animations();
+    settle();
     assert!(find(&w, AccessibleRole::Button, "Retry All").is_none());
     assert!(find(&w, AccessibleRole::Button, "Cancel d.txt").is_none());
 }
@@ -541,7 +547,7 @@ fn an_idle_drawer_has_its_empty_lines_and_nothing_to_pause() {
     let (w, _) = window_with(&drawer_view(&EngineSnapshot::default(), now()));
     assert_eq!(w.get_transfers_collapsed_text(), "No transfers running");
     w.set_transfers_open(true);
-    slint::platform::update_timers_and_animations();
+    settle();
     let pause = find(&w, AccessibleRole::Button, "Pause").unwrap();
     assert_eq!(pause.accessible_enabled(), Some(false));
     for (tab, empty) in [
@@ -551,7 +557,7 @@ fn an_idle_drawer_has_its_empty_lines_and_nothing_to_pause() {
         (3, "Nothing has finished yet."),
     ] {
         w.set_transfers_tab(tab);
-        slint::platform::update_timers_and_animations();
+        settle();
         assert_eq!(
             ElementHandle::find_by_accessible_label(&w, empty).count(),
             1,

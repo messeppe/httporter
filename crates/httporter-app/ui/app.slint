@@ -108,6 +108,8 @@ export component AppWindow inherits Window {
     in-out property <int> selected-site: -1;
     in property <string> connection-text;
     in property <bool> connection-ok;
+    // The connection to the site is being made (the pill's dot pulses, I7).
+    in property <bool> connection-busy: false;
     in property <string> endpoint-text;
     // The left of the status bar: the item count of the pane last used or focused (the same rule
     // as Back and Forward, see `local-pane-active`), unless a message has been put there since
@@ -503,6 +505,11 @@ export component AppWindow inherits Window {
     // The sidebar is shown. The toolbar button flips it; the app may set it too (to restore what
     // the user chose last time).
     in-out property <bool> sidebar-visible: true;
+    // I7: how far the sidebar is from its place (0 shown, `-sidebar-travel` hidden), sliding.
+    property <length> sidebar-travel: 236px;
+    property <length> sidebar-offset: root.sidebar-visible ? 0px : -root.sidebar-travel;
+
+    animate sidebar-offset { duration: Theme.motion-panel; easing: spring(0); }
 
     // ---- Manage+ (I4). Every hook is here (T1); the tasks fill in the components and the app ----
 
@@ -762,12 +769,53 @@ export component AppWindow inherits Window {
     property <bool> can-go-back: root.local-pane-active ? root.local-can-go-back : root.remote-can-go-back;
     property <bool> can-go-forward: root.local-pane-active ? root.local-can-go-forward : root.remote-can-go-forward;
 
+    // I7: the ghost (the "3 items" pill) is drawn at `ghost-x`, `ghost-y`. It follows the pointer
+    // at once; a drag that comes to nothing (Esc, let go where nothing takes it, taken away) sends
+    // it back to where the drag began (`ghost-back`, `Theme.motion-panel`), as macOS does, and it
+    // goes when it gets there.
+    property <length> drag-start-x;
+    property <length> drag-start-y;
+    property <length> ghost-x;
+    property <length> ghost-y;
+    property <bool> ghost-back: false;
+    property <int> ghost-count;
+
+    animate ghost-x, ghost-y {
+        duration: root.ghost-back ? Theme.motion-panel : 0ms;
+        easing: spring(0);
+    }
+
+    function ghost-to(x: length, y: length) {
+        root.ghost-back = false;
+        root.ghost-x = x;
+        root.ghost-y = y;
+    }
+
+    // The drag that was on came to nothing: its ghost slides back.
+    function ghost-return() {
+        root.ghost-count = root.drag-count;
+        root.ghost-back = true;
+        root.ghost-x = root.drag-start-x;
+        root.ghost-y = root.drag-start-y;
+    }
+
+    Timer {
+        interval: Theme.motion-panel;
+        running: root.ghost-back;
+        triggered => { root.ghost-back = false; }
+    }
+
     // A pane reports its drag (see `drag-from`). The first move of a drag starts it.
     function pane-drag-moved(pane: int, point: Point) {
         if (!root.drag-aborted) {
+            if (root.drag-from < 0) {
+                root.drag-start-x = point.x;
+                root.drag-start-y = point.y;
+            }
             root.drag-from = pane;
             root.drag-x = point.x;
             root.drag-y = point.y;
+            root.ghost-to(point.x, point.y);
         }
     }
 
@@ -780,12 +828,11 @@ export component AppWindow inherits Window {
                 root.drag-to-remote(root.drag-row-remote);
             } else if (pane == 1 && root.drag-over-local) {
                 root.drag-to-local(root.drag-row-local);
-            } else if (pane == 1 && root.can-write && remote-pane.contains(point.x, point.y)) {
+            } else if (pane == 1 && root.can-write && remote-pane.contains(point.x, point.y) && remote-pane.folder-at(point.y) >= 0 && !root.remote-rows[remote-pane.folder-at(point.y)].selected) {
                 // Onto a folder of the cloud pane itself, not one being dragged: a move (T9).
-                let row = remote-pane.folder-at(point.y);
-                if (row >= 0 && !root.remote-rows[row].selected) {
-                    root.drag-within-remote(row);
-                }
+                root.drag-within-remote(remote-pane.folder-at(point.y));
+            } else {
+                root.ghost-return();
             }
         }
         root.drag-from = -1;
@@ -793,6 +840,9 @@ export component AppWindow inherits Window {
     }
 
     function pane-drag-cancelled() {
+        if (root.drag-from >= 0 && !root.drag-aborted) {
+            root.ghost-return();
+        }
         root.drag-from = -1;
         root.drag-aborted = false;
     }
@@ -823,6 +873,7 @@ export component AppWindow inherits Window {
             }
             // Esc during a drag between the panes gives it up.
             if (event.text == Key.Escape && root.drag-from >= 0) {
+                root.ghost-return();
                 root.drag-from = -1;
                 root.drag-aborted = true;
                 return accept;
@@ -984,6 +1035,7 @@ export component AppWindow inherits Window {
                 subtitle: root.on-profile ? @tr("Publish profile") : (root.sites.length == 0 ? @tr("No site connected") : root.endpoint-text);
                 connection-text: root.connection-text;
                 connection-ok: root.connection-ok;
+                connection-busy: root.connection-busy;
                 can-go-back: root.can-go-back;
                 can-go-forward: root.can-go-forward;
                 can-upload: root.can-upload;
@@ -1047,15 +1099,19 @@ export component AppWindow inherits Window {
                 cancelled => { root.search-cancel(); }
             }
 
-            HorizontalLayout {
+            // The sidebar and the main area. I7: showing and hiding the sidebar slides it in from
+            // the left and back out (`Theme.motion-panel`, a spring with no bounce). The main area
+            // takes its new width at once and the sidebar, always 220 px wide, moves into its place
+            // or out under the main area's cards (it stays first, for the Tab order; a `z` would
+            // reorder it), so nothing is laid out again while it moves. It goes once out of sight.
+            Rectangle {
                 vertical-stretch: 1;
-                // The main area already pads itself by 8 px, so only the sidebar needs the left margin.
-                padding-left: root.sidebar-visible ? 8px : 0px;
-                padding-top: 8px;
-                padding-bottom: 8px;
 
-                if root.sidebar-visible: Sidebar {
+                if root.sidebar-visible || root.sidebar-offset > -root.sidebar-travel: Sidebar {
+                    x: 8px + root.sidebar-offset;
+                    y: 8px;
                     width: 220px;
+                    height: parent.height - 16px;
                     sites: root.sites;
                     selected-site: root.selected-site;
                     sheet-open: root.add-site-open;
@@ -1088,334 +1144,346 @@ export component AppWindow inherits Window {
                     edit-stop(index) => { root.edit-stop(index); }
                 }
 
-                // Main area: the two file panes, or the Welcome screen while there is no site.
-                main-area := Rectangle {
-                    horizontal-stretch: 1;
+                HorizontalLayout {
+                    // The main area already pads itself by 8 px, so only the sidebar needs the left margin.
+                    padding-left: root.sidebar-visible ? 8px : 0px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
 
-                    // The panes and the transfer drawer. Folded away (and out of the Tab order) behind
-                    // the Welcome screen.
-                    panes-host := Rectangle {
-                        visible: root.sites.length > 0;
-
-                        VerticalLayout {
-                            padding: 8px;
-                            spacing: 8px;
-
-                            if root.resume-banner-text != "": Banner {
-                                text: root.resume-banner-text;
-                                icon: Icons.clock;
-                                fg: Theme.accent-text;
-                                bg: Theme.accent-soft;
-                                CapsuleButton {
-                                    text: @tr("Resume");
-                                    primary: true;
-                                    clicked => { root.resume-banner-resume(); }
-                                }
-                                CapsuleButton {
-                                    text: @tr("Discard");
-                                    clicked => { root.resume-banner-discard(); }
-                                }
-                            }
-                            if root.offline-banner-text != "": Banner {
-                                text: root.offline-banner-text;
-                                icon: Icons.warn;
-                                fg: Theme.orange;
-                                bg: Theme.orange-soft;
-                            }
-                            if root.auth-banner-text != "": Banner {
-                                text: root.auth-banner-text;
-                                icon: Icons.lock;
-                                fg: Theme.red;
-                                bg: Theme.red-soft;
-                                // Opens the site the banner names in Edit Site (off until `sites-v2-ready`, Ruling Q10).
-                                CapsuleButton {
-                                    text: @tr("Edit Site…");
-                                    enabled: root.sites-v2-ready;
-                                    accessible-description: root.sites-v2-ready ? "" : @tr("Arrives later in this build.");
-                                    clicked => { root.auth-banner-edit-site(); }
-                                }
-                            }
-                            // The PC's clock is off for the site it names (review I4): once it is
-                            // set, Resume carries on with the same site.
-                            if root.clock-banner-text != "": Banner {
-                                text: root.clock-banner-text;
-                                icon: Icons.clock;
-                                fg: Theme.orange;
-                                bg: Theme.orange-soft;
-                                CapsuleButton {
-                                    text: @tr("Resume");
-                                    clicked => { root.clock-banner-resume(); }
-                                }
-                            }
-                            if root.disk-banner-text != "": Banner {
-                                text: root.disk-banner-text;
-                                icon: Icons.warn;
-                                fg: Theme.orange;
-                                bg: Theme.orange-soft;
-                                CapsuleButton {
-                                    text: @tr("Resume");
-                                    clicked => { root.disk-banner-resume(); }
-                                }
-                            }
-                            if root.read-only-banner-text != "": Banner {
-                                text: root.read-only-banner-text;
-                                icon: Icons.lock;
-                                fg: Theme.label2;
-                                bg: Theme.chip;
-                            }
-                            if root.error-text != "": ErrorBanner {
-                                text: root.error-text;
-                                offer-edit: root.remote-offer-edit && root.sites-v2-ready && root.has-selection;
-                                edit => { root.site-edit(root.selected-site); }
-                                remove => { root.site-remove(root.selected-site); }
-                            }
-
-                            // Side by side when each pane can have the mockup's 420 px, stacked otherwise
-                            // (mockup `.panes`: a wrapping row). The panes are placed by hand rather than in a
-                            // layout so that they keep their state when the window crosses that width.
-                            panes := Rectangle {
-                                property <bool> side-by-side: self.width >= 2 * 420px + 8px;
-
-                                vertical-stretch: 1;
-
-                                // In the inspector view only the pane `single-side` names is shown,
-                                // beside the inspector; the other is hidden and takes no room.
-                                local-pane := Pane {
-                                    x: 0px;
-                                    y: 0px;
-                                    visible: !root.on-profile && (root.view-mode == 0 || root.single-side == 0);
-                                    comparing: root.comparing;
-                                    compare: root.compare;
-                                    width: root.view-mode == 1 ? (root.single-side == 0 ? panes.width - 308px : 0px) : (panes.side-by-side ? (panes.width - 8px) / 2 : panes.width);
-                                    height: root.view-mode == 1 ? (root.single-side == 0 ? panes.height : 0px) : (panes.side-by-side ? panes.height : (panes.height - 8px) / 2);
-                                    grid: root.view-mode == 1 && root.grid;
-                                    // Both panes share the columns' widths (T5).
-                                    col-status-width <=> root.col-status-width;
-                                    col-size-width <=> root.col-size-width;
-                                    col-modified-width <=> root.col-modified-width;
-                                    columns-resized => { root.columns-resized(); }
-                                    can-write: root.can-write;
-                                    can-purge: root.can-purge;
-                                    quick-look => { root.quick-look(0); }
-                                    add-favorite(row) => { root.add-favorite(0, row); }
-                                    title: @tr("This PC");
-                                    changed has-focus => {
-                                        if (self.has-focus) {
-                                            root.local-pane-active = true;
-                                        }
-                                    }
-                                    icon: Icons.pc;
-                                    crumbs: root.local-crumbs;
-                                    rows: root.local-rows;
-                                    loading: root.local-loading;
-                                    drop-hover: root.drag-over-local;
-                                    drop-row: root.drag-row-local;
-                                    can-upload: root.can-upload;
-                                    can-download: root.can-download;
-                                    can-new-folder: root.can-new-folder;
-                                    can-delete: root.can-delete;
-                                    selected <=> root.local-selected;
-                                    sort-column <=> root.local-sort-column;
-                                    sort-ascending <=> root.local-sort-ascending;
-                                    open(index) => { root.open-local(index); }
-                                    up => { root.local-up(); }
-                                    crumb-clicked(index) => { root.local-crumb-clicked(index); }
-                                    sort(column) => { root.sort-local(column); }
-                                    row-pointer(row, ctrl, shift) => { root.row-pointer(0, row, ctrl, shift); }
-                                    band-select(from, to, additive) => { root.band-select(0, from, to, additive); }
-                                    select-all => { root.select-all(0); }
-                                    upload => { root.upload(); }
-                                    download => { root.download(); }
-                                    download-to => { root.download-to(); }
-                                    new-folder => { root.new-folder(); }
-                                    delete => { root.delete(); }
-                                    // The pane's own Refresh (button or menu) lists this pane, whichever was last used.
-                                    refresh => {
-                                        root.local-pane-active = true;
-                                        root.refresh();
-                                    }
-                                    key-inside => { root.local-pane-active = true; }
-                                    show-in-explorer(row) => { root.show-in-explorer(row); }
-                                    drag-moved(point) => { root.pane-drag-moved(0, point); }
-                                    drag-ended(point) => { root.pane-drag-ended(0, point); }
-                                    drag-cancelled => { root.pane-drag-cancelled(); }
-                                }
-                                remote-pane := Pane {
-                                    visible: !root.on-profile && (root.view-mode == 0 || root.single-side == 1);
-                                    comparing: root.comparing;
-                                    compare: root.compare;
-                                    x: root.view-mode == 1 ? 0px : (panes.side-by-side ? (panes.width + 8px) / 2 : 0px);
-                                    y: root.view-mode == 1 ? 0px : (panes.side-by-side ? 0px : (panes.height + 8px) / 2);
-                                    width: root.view-mode == 1 ? (root.single-side == 1 ? panes.width - 308px : 0px) : (panes.side-by-side ? (panes.width - 8px) / 2 : panes.width);
-                                    height: root.view-mode == 1 ? (root.single-side == 1 ? panes.height : 0px) : (panes.side-by-side ? panes.height : (panes.height - 8px) / 2);
-                                    grid: root.view-mode == 1 && root.grid;
-                                    // Both panes share the columns' widths (T5).
-                                    col-status-width <=> root.col-status-width;
-                                    col-size-width <=> root.col-size-width;
-                                    col-modified-width <=> root.col-modified-width;
-                                    columns-resized => { root.columns-resized(); }
-                                    can-write: root.can-write;
-                                    presign-available: root.presign-available;
-                                    can-purge: root.can-purge;
-                                    quick-look => { root.quick-look(1); }
-                                    rename-start => { root.rename-start(); }
-                                    move-start => { root.move-start(); }
-                                    copy-link => { root.copy-link(1); }
-                                    copy-path => { root.copy-path(1); }
-                                    copy-presigned => { root.copy-presigned(); }
-                                    add-favorite(row) => { root.add-favorite(1, row); }
-                                    purge => { root.purge(); }
-                                    title: root.has-selection ? root.sites[root.selected-site].name : @tr("No site selected");
-                                    changed has-focus => {
-                                        if (self.has-focus) {
-                                            root.local-pane-active = false;
-                                        }
-                                    }
-                                    icon: Icons.cloud;
-                                    crumbs: root.remote-crumbs;
-                                    rows: root.remote-rows;
-                                    header-chip: root.remote-chip;
-                                    loading: root.remote-loading;
-                                    can-refresh: root.has-selection;
-                                    drop-hover: (root.drop-hover-remote && root.has-selection) || root.drag-over-remote;
-                                    drop-row: root.drag-over-remote ? root.drag-row-remote : (root.drop-hover-remote ? root.drop-hover-row : -1);
-                                    cloud: true;
-                                    can-upload: root.can-upload;
-                                    can-download: root.can-download;
-                                    can-new-folder: root.can-new-folder;
-                                    can-delete: root.can-delete;
-                                    selected <=> root.remote-selected;
-                                    sort-column <=> root.remote-sort-column;
-                                    sort-ascending <=> root.remote-sort-ascending;
-                                    open(index) => { root.open-remote(index); }
-                                    up => { root.remote-up(); }
-                                    crumb-clicked(index) => { root.remote-crumb-clicked(index); }
-                                    sort(column) => { root.sort-remote(column); }
-                                    row-pointer(row, ctrl, shift) => { root.row-pointer(1, row, ctrl, shift); }
-                                    band-select(from, to, additive) => { root.band-select(1, from, to, additive); }
-                                    select-all => { root.select-all(1); }
-                                    upload => { root.upload(); }
-                                    download => { root.download(); }
-                                    download-to => { root.download-to(); }
-                                    new-folder => { root.new-folder(); }
-                                    delete => { root.delete(); }
-                                    refresh => {
-                                        root.local-pane-active = false;
-                                        root.refresh();
-                                    }
-                                    key-inside => { root.local-pane-active = false; }
-                                    show-in-explorer(row) => { root.show-in-explorer(row); }
-                                    paste => { root.paste(); }
-                                    drag-moved(point) => { root.pane-drag-moved(1, point); }
-                                    drag-ended(point) => { root.pane-drag-ended(1, point); }
-                                    drag-cancelled => { root.pane-drag-cancelled(); }
-                                }
-
-                                // F6 lands on this scope (I5, T3), and Tab goes on into the inspector's
-                                // buttons; it is not a Tab stop itself.
-                                if root.view-mode == 1 && !root.on-profile: inspector-keys := FocusScope {
-                                    property <int> asked: root.inspector-focus-asked;
-                                    changed asked => { self.focus(); }
-                                    x: panes.width - 300px;
-                                    y: 0px;
-                                    width: 300px;
-                                    height: panes.height;
-                                    focus-on-click: false;
-                                    focus-on-tab-navigation: false;
-                                    accessible-role: groupbox;
-                                    accessible-label: @tr("Inspector");
-
-                                    Inspector {
-                                        width: parent.width;
-                                        height: parent.height;
-                                        data: root.inspector;
-                                        image: root.inspector-image;
-                                        quick-look => { root.inspector-quick-look(); }
-                                        download => { root.inspector-download(); }
-                                        delete => { root.inspector-delete(); }
-                                        copy(which) => { root.inspector-copy(which); }
-                                        purge => { root.inspector-purge(); }
-                                    }
-                                    Rectangle {
-                                        border-radius: Theme.radius-md;
-                                        border-width: 2px;
-                                        border-color: Theme.focus-ring;
-                                        visible: inspector-keys.has-focus;
-                                    }
-                                }
-
-                                // A publish profile's page, in place of the two panes (which keep their state).
-                                if root.on-profile: ProfilePage {
-                                    x: 0px;
-                                    y: 0px;
-                                    width: panes.width;
-                                    height: panes.height;
-                                    profile: root.profile;
-                                    history-rows: root.history-rows;
-                                    history-detail: root.history-detail;
-                                    search <=> root.history-search;
-                                    search-changed(text) => { root.history-search-changed(text); }
-                                    history-selected(id) => { root.history-selected(id); }
-                                    retry(id) => { root.history-retry(id); }
-                                    show-all(id) => { root.history-show-all(id); }
-                                    retry-purge(id) => { root.history-retry-purge(id); }
-                                    change-folder => { root.profile-change-folder(); }
-                                    edit-profile => { root.edit-profile(); }
-                                    publish => { root.profile-publish(); }
-                                    schedule-text: root.schedule-text;
-                                    schedule-last: root.schedule-last;
-                                    schedule-missing: root.schedule-missing;
-                                    open-schedule => {
-                                        root.schedule-sheet-open = true;
-                                        root.open-schedule();
-                                    }
-                                    schedule-recreate => { root.schedule-recreate(); }
-                                    watch-note: root.watch-note;
-                                    watch-can-review: root.watch-can-review;
-                                    watch-review => { root.watch-review(); }
-                                }
-                            }
-
-                            TransferDrawer {
-                                open <=> root.transfers-open;
-                                tab <=> root.transfers-tab;
-                                running: root.transfers-running;
-                                paused: root.transfers-paused;
-                                collapsed-text: root.transfers-collapsed-text;
-                                title: root.transfers-title;
-                                line: root.transfers-line;
-                                files-per-s: root.transfers-files-per-s;
-                                mb-per-s: root.transfers-mb-per-s;
-                                eta: root.transfers-eta;
-                                percent: root.transfers-percent;
-                                tab-titles: root.transfers-tab-titles;
-                                active-rows: root.transfers-active;
-                                queued-rows: root.transfers-queued;
-                                failed-rows: root.transfers-failed;
-                                done-rows: root.transfers-done;
-                                toggle => { root.transfers-toggle(); }
-                                pause => { root.transfers-pause(); }
-                                resume => { root.transfers-resume(); }
-                                cancel-all => { root.transfers-cancel-all(); }
-                                cancel(id) => { root.transfer-cancel(id); }
-                                retry(id) => { root.transfer-retry(id); }
-                                retry-failed => { root.transfers-retry-failed(); }
-                                move-to-top(id) => { root.transfer-move-to-top(id); }
-                                pause-row(id) => { root.transfer-pause(id); }
-                                resume-row(id) => { root.transfer-resume(id); }
-                                retry-selected(ids) => { root.transfers-retry-selected(ids); }
-                            }
-                        }
+                    // The sidebar's room (the sidebar itself is above).
+                    if root.sidebar-visible: Rectangle {
+                        width: 220px;
                     }
 
-                    if root.sites.length == 0: WelcomeView {
-                        v2-ready: root.sites-v2-ready;
-                        add-first => {
-                            root.add-site-open = true;
-                            root.add-site();
-                            root.welcome-add();
+                    // Main area: the two file panes, or the Welcome screen while there is no site.
+                    main-area := Rectangle {
+                        horizontal-stretch: 1;
+
+                        // The panes and the transfer drawer. Folded away (and out of the Tab order) behind
+                        // the Welcome screen.
+                        panes-host := Rectangle {
+                            visible: root.sites.length > 0;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 8px;
+
+                                if root.resume-banner-text != "": Banner {
+                                    text: root.resume-banner-text;
+                                    icon: Icons.clock;
+                                    fg: Theme.accent-text;
+                                    bg: Theme.accent-soft;
+                                    CapsuleButton {
+                                        text: @tr("Resume");
+                                        primary: true;
+                                        clicked => { root.resume-banner-resume(); }
+                                    }
+                                    CapsuleButton {
+                                        text: @tr("Discard");
+                                        clicked => { root.resume-banner-discard(); }
+                                    }
+                                }
+                                if root.offline-banner-text != "": Banner {
+                                    text: root.offline-banner-text;
+                                    icon: Icons.warn;
+                                    fg: Theme.orange;
+                                    bg: Theme.orange-soft;
+                                }
+                                if root.auth-banner-text != "": Banner {
+                                    text: root.auth-banner-text;
+                                    icon: Icons.lock;
+                                    fg: Theme.red;
+                                    bg: Theme.red-soft;
+                                    // Opens the site the banner names in Edit Site (off until `sites-v2-ready`, Ruling Q10).
+                                    CapsuleButton {
+                                        text: @tr("Edit Site…");
+                                        enabled: root.sites-v2-ready;
+                                        accessible-description: root.sites-v2-ready ? "" : @tr("Arrives later in this build.");
+                                        clicked => { root.auth-banner-edit-site(); }
+                                    }
+                                }
+                                // The PC's clock is off for the site it names (review I4): once it is
+                                // set, Resume carries on with the same site.
+                                if root.clock-banner-text != "": Banner {
+                                    text: root.clock-banner-text;
+                                    icon: Icons.clock;
+                                    fg: Theme.orange;
+                                    bg: Theme.orange-soft;
+                                    CapsuleButton {
+                                        text: @tr("Resume");
+                                        clicked => { root.clock-banner-resume(); }
+                                    }
+                                }
+                                if root.disk-banner-text != "": Banner {
+                                    text: root.disk-banner-text;
+                                    icon: Icons.warn;
+                                    fg: Theme.orange;
+                                    bg: Theme.orange-soft;
+                                    CapsuleButton {
+                                        text: @tr("Resume");
+                                        clicked => { root.disk-banner-resume(); }
+                                    }
+                                }
+                                if root.read-only-banner-text != "": Banner {
+                                    text: root.read-only-banner-text;
+                                    icon: Icons.lock;
+                                    fg: Theme.label2;
+                                    bg: Theme.chip;
+                                }
+                                if root.error-text != "": ErrorBanner {
+                                    text: root.error-text;
+                                    offer-edit: root.remote-offer-edit && root.sites-v2-ready && root.has-selection;
+                                    edit => { root.site-edit(root.selected-site); }
+                                    remove => { root.site-remove(root.selected-site); }
+                                }
+
+                                // Side by side when each pane can have the mockup's 420 px, stacked otherwise
+                                // (mockup `.panes`: a wrapping row). The panes are placed by hand rather than in a
+                                // layout so that they keep their state when the window crosses that width.
+                                panes := Rectangle {
+                                    property <bool> side-by-side: self.width >= 2 * 420px + 8px;
+
+                                    vertical-stretch: 1;
+
+                                    // In the inspector view only the pane `single-side` names is shown,
+                                    // beside the inspector; the other is hidden and takes no room.
+                                    local-pane := Pane {
+                                        x: 0px;
+                                        y: 0px;
+                                        visible: !root.on-profile && (root.view-mode == 0 || root.single-side == 0);
+                                        comparing: root.comparing;
+                                        compare: root.compare;
+                                        width: root.view-mode == 1 ? (root.single-side == 0 ? panes.width - 308px : 0px) : (panes.side-by-side ? (panes.width - 8px) / 2 : panes.width);
+                                        height: root.view-mode == 1 ? (root.single-side == 0 ? panes.height : 0px) : (panes.side-by-side ? panes.height : (panes.height - 8px) / 2);
+                                        grid: root.view-mode == 1 && root.grid;
+                                        // Both panes share the columns' widths (T5).
+                                        col-status-width <=> root.col-status-width;
+                                        col-size-width <=> root.col-size-width;
+                                        col-modified-width <=> root.col-modified-width;
+                                        columns-resized => { root.columns-resized(); }
+                                        can-write: root.can-write;
+                                        can-purge: root.can-purge;
+                                        quick-look => { root.quick-look(0); }
+                                        add-favorite(row) => { root.add-favorite(0, row); }
+                                        title: @tr("This PC");
+                                        changed has-focus => {
+                                            if (self.has-focus) {
+                                                root.local-pane-active = true;
+                                            }
+                                        }
+                                        icon: Icons.pc;
+                                        crumbs: root.local-crumbs;
+                                        rows: root.local-rows;
+                                        loading: root.local-loading;
+                                        drop-hover: root.drag-over-local;
+                                        drop-row: root.drag-row-local;
+                                        can-upload: root.can-upload;
+                                        can-download: root.can-download;
+                                        can-new-folder: root.can-new-folder;
+                                        can-delete: root.can-delete;
+                                        selected <=> root.local-selected;
+                                        sort-column <=> root.local-sort-column;
+                                        sort-ascending <=> root.local-sort-ascending;
+                                        open(index) => { root.open-local(index); }
+                                        up => { root.local-up(); }
+                                        crumb-clicked(index) => { root.local-crumb-clicked(index); }
+                                        sort(column) => { root.sort-local(column); }
+                                        row-pointer(row, ctrl, shift) => { root.row-pointer(0, row, ctrl, shift); }
+                                        band-select(from, to, additive) => { root.band-select(0, from, to, additive); }
+                                        select-all => { root.select-all(0); }
+                                        upload => { root.upload(); }
+                                        download => { root.download(); }
+                                        download-to => { root.download-to(); }
+                                        new-folder => { root.new-folder(); }
+                                        delete => { root.delete(); }
+                                        // The pane's own Refresh (button or menu) lists this pane, whichever was last used.
+                                        refresh => {
+                                            root.local-pane-active = true;
+                                            root.refresh();
+                                        }
+                                        key-inside => { root.local-pane-active = true; }
+                                        show-in-explorer(row) => { root.show-in-explorer(row); }
+                                        drag-moved(point) => { root.pane-drag-moved(0, point); }
+                                        drag-ended(point) => { root.pane-drag-ended(0, point); }
+                                        drag-cancelled => { root.pane-drag-cancelled(); }
+                                    }
+                                    remote-pane := Pane {
+                                        visible: !root.on-profile && (root.view-mode == 0 || root.single-side == 1);
+                                        comparing: root.comparing;
+                                        compare: root.compare;
+                                        x: root.view-mode == 1 ? 0px : (panes.side-by-side ? (panes.width + 8px) / 2 : 0px);
+                                        y: root.view-mode == 1 ? 0px : (panes.side-by-side ? 0px : (panes.height + 8px) / 2);
+                                        width: root.view-mode == 1 ? (root.single-side == 1 ? panes.width - 308px : 0px) : (panes.side-by-side ? (panes.width - 8px) / 2 : panes.width);
+                                        height: root.view-mode == 1 ? (root.single-side == 1 ? panes.height : 0px) : (panes.side-by-side ? panes.height : (panes.height - 8px) / 2);
+                                        grid: root.view-mode == 1 && root.grid;
+                                        // Both panes share the columns' widths (T5).
+                                        col-status-width <=> root.col-status-width;
+                                        col-size-width <=> root.col-size-width;
+                                        col-modified-width <=> root.col-modified-width;
+                                        columns-resized => { root.columns-resized(); }
+                                        can-write: root.can-write;
+                                        presign-available: root.presign-available;
+                                        can-purge: root.can-purge;
+                                        quick-look => { root.quick-look(1); }
+                                        rename-start => { root.rename-start(); }
+                                        move-start => { root.move-start(); }
+                                        copy-link => { root.copy-link(1); }
+                                        copy-path => { root.copy-path(1); }
+                                        copy-presigned => { root.copy-presigned(); }
+                                        add-favorite(row) => { root.add-favorite(1, row); }
+                                        purge => { root.purge(); }
+                                        title: root.has-selection ? root.sites[root.selected-site].name : @tr("No site selected");
+                                        changed has-focus => {
+                                            if (self.has-focus) {
+                                                root.local-pane-active = false;
+                                            }
+                                        }
+                                        icon: Icons.cloud;
+                                        crumbs: root.remote-crumbs;
+                                        rows: root.remote-rows;
+                                        header-chip: root.remote-chip;
+                                        loading: root.remote-loading;
+                                        can-refresh: root.has-selection;
+                                        drop-hover: (root.drop-hover-remote && root.has-selection) || root.drag-over-remote;
+                                        drop-row: root.drag-over-remote ? root.drag-row-remote : (root.drop-hover-remote ? root.drop-hover-row : -1);
+                                        cloud: true;
+                                        can-upload: root.can-upload;
+                                        can-download: root.can-download;
+                                        can-new-folder: root.can-new-folder;
+                                        can-delete: root.can-delete;
+                                        selected <=> root.remote-selected;
+                                        sort-column <=> root.remote-sort-column;
+                                        sort-ascending <=> root.remote-sort-ascending;
+                                        open(index) => { root.open-remote(index); }
+                                        up => { root.remote-up(); }
+                                        crumb-clicked(index) => { root.remote-crumb-clicked(index); }
+                                        sort(column) => { root.sort-remote(column); }
+                                        row-pointer(row, ctrl, shift) => { root.row-pointer(1, row, ctrl, shift); }
+                                        band-select(from, to, additive) => { root.band-select(1, from, to, additive); }
+                                        select-all => { root.select-all(1); }
+                                        upload => { root.upload(); }
+                                        download => { root.download(); }
+                                        download-to => { root.download-to(); }
+                                        new-folder => { root.new-folder(); }
+                                        delete => { root.delete(); }
+                                        refresh => {
+                                            root.local-pane-active = false;
+                                            root.refresh();
+                                        }
+                                        key-inside => { root.local-pane-active = false; }
+                                        show-in-explorer(row) => { root.show-in-explorer(row); }
+                                        paste => { root.paste(); }
+                                        drag-moved(point) => { root.pane-drag-moved(1, point); }
+                                        drag-ended(point) => { root.pane-drag-ended(1, point); }
+                                        drag-cancelled => { root.pane-drag-cancelled(); }
+                                    }
+
+                                    // F6 lands on this scope (I5, T3), and Tab goes on into the inspector's
+                                    // buttons; it is not a Tab stop itself.
+                                    if root.view-mode == 1 && !root.on-profile: inspector-keys := FocusScope {
+                                        property <int> asked: root.inspector-focus-asked;
+                                        changed asked => { self.focus(); }
+                                        x: panes.width - 300px;
+                                        y: 0px;
+                                        width: 300px;
+                                        height: panes.height;
+                                        focus-on-click: false;
+                                        focus-on-tab-navigation: false;
+                                        accessible-role: groupbox;
+                                        accessible-label: @tr("Inspector");
+
+                                        Inspector {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            data: root.inspector;
+                                            image: root.inspector-image;
+                                            quick-look => { root.inspector-quick-look(); }
+                                            download => { root.inspector-download(); }
+                                            delete => { root.inspector-delete(); }
+                                            copy(which) => { root.inspector-copy(which); }
+                                            purge => { root.inspector-purge(); }
+                                        }
+                                        Rectangle {
+                                            border-radius: Theme.radius-md;
+                                            border-width: 2px;
+                                            border-color: Theme.focus-ring;
+                                            visible: inspector-keys.has-focus;
+                                        }
+                                    }
+
+                                    // A publish profile's page, in place of the two panes (which keep their state).
+                                    if root.on-profile: ProfilePage {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: panes.width;
+                                        height: panes.height;
+                                        profile: root.profile;
+                                        history-rows: root.history-rows;
+                                        history-detail: root.history-detail;
+                                        search <=> root.history-search;
+                                        search-changed(text) => { root.history-search-changed(text); }
+                                        history-selected(id) => { root.history-selected(id); }
+                                        retry(id) => { root.history-retry(id); }
+                                        show-all(id) => { root.history-show-all(id); }
+                                        retry-purge(id) => { root.history-retry-purge(id); }
+                                        change-folder => { root.profile-change-folder(); }
+                                        edit-profile => { root.edit-profile(); }
+                                        publish => { root.profile-publish(); }
+                                        schedule-text: root.schedule-text;
+                                        schedule-last: root.schedule-last;
+                                        schedule-missing: root.schedule-missing;
+                                        open-schedule => {
+                                            root.schedule-sheet-open = true;
+                                            root.open-schedule();
+                                        }
+                                        schedule-recreate => { root.schedule-recreate(); }
+                                        watch-note: root.watch-note;
+                                        watch-can-review: root.watch-can-review;
+                                        watch-review => { root.watch-review(); }
+                                    }
+                                }
+
+                                TransferDrawer {
+                                    open <=> root.transfers-open;
+                                    tab <=> root.transfers-tab;
+                                    running: root.transfers-running;
+                                    paused: root.transfers-paused;
+                                    collapsed-text: root.transfers-collapsed-text;
+                                    title: root.transfers-title;
+                                    line: root.transfers-line;
+                                    files-per-s: root.transfers-files-per-s;
+                                    mb-per-s: root.transfers-mb-per-s;
+                                    eta: root.transfers-eta;
+                                    percent: root.transfers-percent;
+                                    tab-titles: root.transfers-tab-titles;
+                                    active-rows: root.transfers-active;
+                                    queued-rows: root.transfers-queued;
+                                    failed-rows: root.transfers-failed;
+                                    done-rows: root.transfers-done;
+                                    toggle => { root.transfers-toggle(); }
+                                    pause => { root.transfers-pause(); }
+                                    resume => { root.transfers-resume(); }
+                                    cancel-all => { root.transfers-cancel-all(); }
+                                    cancel(id) => { root.transfer-cancel(id); }
+                                    retry(id) => { root.transfer-retry(id); }
+                                    retry-failed => { root.transfers-retry-failed(); }
+                                    move-to-top(id) => { root.transfer-move-to-top(id); }
+                                    pause-row(id) => { root.transfer-pause(id); }
+                                    resume-row(id) => { root.transfer-resume(id); }
+                                    retry-selected(ids) => { root.transfers-retry-selected(ids); }
+                                }
+                            }
                         }
-                        import-profiles => { root.welcome-import(); }
+
+                        if root.sites.length == 0: WelcomeView {
+                            v2-ready: root.sites-v2-ready;
+                            add-first => {
+                                root.add-site-open = true;
+                                root.add-site();
+                                root.welcome-add();
+                            }
+                            import-profiles => { root.welcome-import(); }
+                        }
                     }
                 }
             }
@@ -1430,9 +1498,9 @@ export component AppWindow inherits Window {
 
     // The dragged selection following the pointer: "3 items" in an accent pill. Takes no pointer
     // events of its own.
-    if root.drag-from >= 0: Rectangle {
-        x: root.drag-x + 14px;
-        y: root.drag-y + 14px;
+    if root.drag-from >= 0 || root.ghost-back: Rectangle {
+        x: root.ghost-x + 14px;
+        y: root.ghost-y + 14px;
         width: ghost-text.preferred-width + 20px;
         height: 24px;
         background: Theme.accent;
@@ -1443,7 +1511,7 @@ export component AppWindow inherits Window {
             x: 10px;
             width: self.preferred-width;
             height: parent.height;
-            text: @tr("{n} item" | "{n} items" % root.drag-count);
+            text: @tr("{n} item" | "{n} items" % (root.drag-from >= 0 ? root.drag-count : root.ghost-count));
             color: Theme.on-accent;
             font-size: Theme.font-small;
             font-weight: Theme.weight-semibold;

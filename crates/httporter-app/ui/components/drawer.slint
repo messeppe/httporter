@@ -57,11 +57,13 @@ component QuietButton inherits Rectangle {
 
     height: Theme.control-height;
     border-radius: self.height / 2;
-    background: area.has-hover ? Theme.hover : transparent;
+    background: area.pressed ? Theme.sel-quiet : (area.has-hover ? Theme.hover : transparent);
     forward-focus: key-focus;
     accessible-role: button;
     accessible-label: root.text;
     accessible-action-default => { root.clicked(); }
+
+    animate background { duration: Theme.motion-hover; easing: ease-out; }
 
     HorizontalLayout {
         padding-left: 12px;
@@ -227,6 +229,28 @@ component TransferItem inherits Rectangle {
     callback row-clicked(bool, bool);
 
     property <int> percent: Math.round(root.item.percent);
+    // I7: the bar eases to each new value (`Theme.motion-panel`) while it shows the same job. The
+    // list hands a row to another job as jobs finish (it is kept up to date row by row), and the
+    // bar snaps then. `bar` is what it shows, 0 to 100.
+    property <float> bar: 0;
+    property <int> bar-job: -1;
+    property <bool> bar-eases: false;
+    // The job is all sent but still in the Active list: a check takes the bar's place.
+    property <bool> finished: root.tab == 0 && root.item.percent >= 100;
+
+    animate bar {
+        duration: root.bar-eases ? Theme.motion-panel : 0ms;
+        easing: ease-out;
+    }
+
+    function place-bar() {
+        root.bar-eases = root.item.id == root.bar-job;
+        root.bar-job = root.item.id;
+        root.bar = Math.min(Math.max(root.item.percent, 0), 100);
+    }
+
+    init => { root.place-bar(); }
+    changed item => { root.place-bar(); }
 
     height: Theme.row-height + 2px;
     background: root.chosen ? Theme.accent-soft : transparent;
@@ -315,14 +339,30 @@ component TransferItem inherits Rectangle {
                         border-radius: 3px;
                         background: Theme.chip;
                         clip: true;
+                        // Cross-fades to the check once the job is all sent (I7).
+                        opacity: root.finished ? 0 : 1;
+
+                        animate opacity { duration: Theme.motion-control; easing: ease-in-out; }
 
                         Rectangle {
                             x: 0;
-                            width: parent.width * Math.min(Math.max(root.item.percent, 0), 100) / 100;
+                            width: parent.width * root.bar / 100;
                             border-radius: 3px;
                             background: Theme.accent;
                         }
                     }
+                }
+                if root.tab == 0: Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 14px;
+                    height: 14px;
+                    source: Icons.check;
+                    colorize: Theme.green;
+                    opacity: root.finished ? 1 : 0;
+                    accessible-role: none;
+
+                    animate opacity { duration: Theme.motion-control; easing: ease-in-out; }
                 }
                 if root.tab == 1 || root.tab == 2: Text {
                     width: parent.width;
@@ -453,14 +493,22 @@ export component TransferDrawer inherits Rectangle {
     border-width: 1phx;
     border-color: Theme.sep-strong;
     clip: true;
-    height: root.open ? root.head-height + root.list-height + 1px : 48px + Theme.grow;
+    // I7: opening and closing slide (`Theme.motion-panel`, a spring with no bounce). The content
+    // keeps its own height, at the top of the card, and the card's clip reveals it: nothing in it is
+    // laid out again while the card moves. The panes above follow the card's height.
+    property <length> collapsed-height: 48px + Theme.grow;
+    property <length> open-height: root.head-height + root.list-height + 1px;
+    height: root.open ? root.open-height : root.collapsed-height;
     accessible-role: groupbox;
+
+    animate height { duration: Theme.motion-panel; easing: spring(0); }
     accessible-label: @tr("Transfers");
 
     // Collapsed: the state in words, and Show Transfers.
     if !root.open: HorizontalLayout {
+        y: 0;
         width: parent.width;
-        height: parent.height;
+        height: root.collapsed-height;
         padding-left: 12px;
         padding-right: 8px;
         spacing: 10px;
@@ -501,8 +549,9 @@ export component TransferDrawer inherits Rectangle {
 
     // Expanded: the header, then the list.
     if root.open: VerticalLayout {
+        y: 0;
         width: parent.width;
-        height: parent.height;
+        height: root.open-height;
 
         VerticalLayout {
             height: root.head-height;

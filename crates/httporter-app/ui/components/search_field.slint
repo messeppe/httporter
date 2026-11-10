@@ -161,6 +161,7 @@ export component SearchField inherits Rectangle {
         visible: root.text != "";
         border-radius: self.height / 2;
         background: clear-area.pressed ? Theme.sel-quiet : (clear-area.has-hover ? Theme.hover : transparent);
+        animate background { duration: Theme.motion-hover; easing: ease-out; }
         accessible-role: button;
         accessible-label: @tr("Clear search");
         accessible-action-default => { root.clear-text(); }
