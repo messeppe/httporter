@@ -442,7 +442,7 @@ impl Look {
 
     fn put(self, theme: Theme<'_>) {
         theme.set_text_scale(self.text_scale);
-        theme.set_motion(self.motion);
+        theme.set_system_motion(self.motion);
     }
 
     /// Tells the software renderer how to smooth text. Returns whether that changed anything;

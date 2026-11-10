@@ -76,9 +76,11 @@ pub fn install(ui: &AppWindow, m: &Arc<Manager>) {
     if !STORED_EXTRAS_READY {
         return;
     }
-    let appearance = m.session.ui_state().appearance;
+    let state = m.session.ui_state();
     ui.global::<Theme>()
-        .set_appearance(i32::from(appearance.min(2)));
+        .set_appearance(i32::from(state.appearance.min(2)));
+    ui.global::<Theme>()
+        .set_animations(i32::from(state.animations.min(2)));
 }
 
 /// Wires the General, Sites and Advanced tabs of a new Settings window (`transfers.rs` calls it
@@ -92,6 +94,8 @@ pub fn wire(window: &SettingsWindow) {
     if let Some(ui) = m.link.ui().upgrade() {
         let appearance = ui.global::<Theme>().get_appearance();
         window.global::<Theme>().set_appearance(appearance);
+        let animations = ui.global::<Theme>().get_animations();
+        window.global::<Theme>().set_animations(animations);
     }
     let manager = Arc::downgrade(&m);
 
@@ -224,6 +228,7 @@ fn show_tab(window: &SettingsWindow, m: &Arc<Manager>, tab: i32) {
 fn show_general(window: &SettingsWindow, m: &Arc<Manager>) {
     let state = m.session.ui_state();
     window.set_appearance(i32::from(state.appearance.min(2)));
+    window.set_animations(i32::from(state.animations.min(2)));
     window.set_start_view(match state.view {
         ViewMode::TwoPanes => 0,
         ViewMode::Inspector => 1,
@@ -241,8 +246,10 @@ fn show_general(window: &SettingsWindow, m: &Arc<Manager>) {
 /// windows at once, the rest at the next start, preview or close (the tray).
 fn general_edited(window: &SettingsWindow, m: &Arc<Manager>) {
     let appearance = u8::try_from(window.get_appearance().clamp(0, 2)).unwrap_or(0);
+    let animations = u8::try_from(window.get_animations().clamp(0, 2)).unwrap_or(0);
     let state = UiState {
         appearance,
+        animations,
         view: if window.get_start_view() == 1 {
             ViewMode::Inspector
         } else {
@@ -255,10 +262,12 @@ fn general_edited(window: &SettingsWindow, m: &Arc<Manager>) {
         ..m.session.ui_state()
     };
     m.session.save_ui_state(&state);
-    let appearance = i32::from(appearance);
+    let (appearance, animations) = (i32::from(appearance), i32::from(animations));
     window.global::<Theme>().set_appearance(appearance);
+    window.global::<Theme>().set_animations(animations);
     if let Some(ui) = m.link.ui().upgrade() {
         ui.global::<Theme>().set_appearance(appearance);
+        ui.global::<Theme>().set_animations(animations);
     }
 }
 

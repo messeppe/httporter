@@ -17,7 +17,11 @@ export global Theme {
     // and again when Windows' settings change (src/settings_view.rs). Every `animate` is
     // `duration: Theme.motion ? Nms : 0ms`, so that turning animations off in Windows stops them.
     in property <float> text-scale: 1.0;
-    in property <bool> motion: true;
+    // Windows' "Animation effects" (`system-motion`) and Settings › General › Animations
+    // (`animations`: 0 follows Windows, 1 on, 2 off, I7) make `motion`.
+    in property <bool> system-motion: true;
+    in-out property <int> animations: 0;
+    out property <bool> motion: animations == 1 || (animations == 0 && system-motion);
 
     // Motion (I7, docs/superpowers/plans/2026-11-10-httporter-i7-motion.md): one set of timings,
     // as Apple's and Fluent's are. With "Animation effects" off in Windows they are 1 ms, which

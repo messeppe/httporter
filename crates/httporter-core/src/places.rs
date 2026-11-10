@@ -100,6 +100,8 @@ pub struct UiState {
     /// also set while a start with the GPU renderer has drawn nothing yet, so that a start that
     /// crashes or hangs there is taken as one that failed. Choosing a renderer clears it.
     pub gpu_failed: bool,
+    /// Settings › General › Animations (I7): 0 follows Windows' "Animation effects", 1 on, 2 off.
+    pub animations: u8,
 }
 
 impl Default for UiState {
@@ -120,6 +122,7 @@ impl Default for UiState {
             last_update_check: 0,
             renderer: 0,
             gpu_failed: false,
+            animations: 0,
         }
     }
 }

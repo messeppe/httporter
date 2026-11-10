@@ -218,6 +218,8 @@ export component TabColumn inherits VerticalLayout {
 export component GeneralTab inherits Rectangle {
     // 0 system, 1 light, 2 dark.
     in-out property <int> appearance;
+    // 0 follows Windows' "Animation effects", 1 on, 2 off (I7).
+    in-out property <int> animations;
     // 0 two panes, 1 single pane.
     in-out property <int> start-view;
     in-out property <bool> restore-tabs;
@@ -253,6 +255,17 @@ export component GeneralTab inherits Rectangle {
                             options: [@tr("System"), @tr("Light"), @tr("Dark")];
                             label: @tr("Appearance");
                             current <=> root.appearance;
+                            selected => { root.edited(); }
+                        }
+                    }
+                    GroupRow {
+                        title: @tr("Animations");
+                        help: @tr("System follows Animation effects in Windows' settings.");
+
+                        Segmented {
+                            options: [@tr("System"), @tr("On"), @tr("Off")];
+                            label: @tr("Animations");
+                            current <=> root.animations;
                             selected => { root.edited(); }
                         }
                     }

@@ -147,7 +147,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let gpu = gpu.and_then(|gpu| gpu.check(&ui));
     // Windows' text size and "Animation effects" (read again when they change, T5).
     ui.global::<Theme>().set_text_scale(win::text_scale());
-    ui.global::<Theme>().set_motion(win::animations_enabled());
+    ui.global::<Theme>()
+        .set_system_motion(win::animations_enabled());
     let transfers = binding::install_app(
         &ui,
         rt.handle().clone(),

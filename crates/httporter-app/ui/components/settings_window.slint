@@ -658,6 +658,8 @@ export component SettingsWindow inherits Window {
     // ---- I4 (T8): General (0), Sites (1) and Advanced (5) ----
     // General.
     in-out property <int> appearance: 0;
+    // 0 follows Windows, 1 on, 2 off (I7).
+    in-out property <int> animations: 0;
     in-out property <int> start-view: 0;
     in-out property <bool> restore-tabs: true;
     in-out property <bool> ask-big-preview: true;
@@ -922,6 +924,7 @@ export component SettingsWindow inherits Window {
             accessible-role: tab-panel;
             accessible-label: root.tab-names[0];
             appearance <=> root.appearance;
+            animations <=> root.animations;
             start-view <=> root.start-view;
             restore-tabs <=> root.restore-tabs;
             ask-big-preview <=> root.ask-big-preview;
