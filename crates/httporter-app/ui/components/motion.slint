@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+// Motion pieces shared by the window (I7). The software renderer can't rotate, so these draw
+// their turning shapes as paths whose points come from the angle.
+
+import { Theme } from "../theme.slint";
+
+// An indeterminate spinner, like macOS's: spokes around a centre, the bright one going round.
+// T1 placeholder: track C draws it.
+export component Spinner inherits Rectangle {
+    in property <color> color: Theme.label2;
+    width: 16px;
+    height: 16px;
+    accessible-role: progress-indicator;
+}
+
+// A disclosure chevron that turns from pointing right (closed) to pointing down (open).
+// T1 placeholder: track C draws it.
+export component Chevron inherits Rectangle {
+    in property <bool> open;
+    in property <color> color: Theme.label3;
+    width: 10px;
+    height: 10px;
+}
