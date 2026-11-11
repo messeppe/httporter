@@ -626,7 +626,11 @@ fn every_breadcrumb_but_the_last_is_a_button_that_reports_its_index() {
     // The current folder is plain text.
     assert!(crumb_button(&w, "uploads").is_none());
 
-    click(w.window(), center(&crumb_button(&w, "exampleshop").unwrap()), 1);
+    click(
+        w.window(),
+        center(&crumb_button(&w, "exampleshop").unwrap()),
+        1,
+    );
     click(w.window(), center(&crumb_button(&w, "D:").unwrap()), 1);
     click(w.window(), center(&crumb_button(&w, "sites").unwrap()), 1);
     assert_eq!(*clicked.borrow(), [2, 0, 1]);

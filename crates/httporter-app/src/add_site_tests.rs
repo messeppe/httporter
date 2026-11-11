@@ -1103,7 +1103,11 @@ fn the_window_behind_stays_inert_when_the_sheet_itself_holds_the_focus() {
         center(&row_starting(&b.w, "media-archive")),
         1,
     );
-    click(b.w.window(), center(&row_starting(&b.w, "example-shop.com")), 2);
+    click(
+        b.w.window(),
+        center(&row_starting(&b.w, "example-shop.com")),
+        2,
+    );
     assert_eq!(b.told(), Vec::<String>::new());
     assert_eq!(b.w.get_selected_site(), -1);
 }
@@ -1796,7 +1800,11 @@ fn account_key_zone_list_checkboxes() {
         &b.w,
         &ZoneList {
             zones: vec![
-                zone("exampleshop", "sg", &["exampleshop.b-cdn.net", "example-shop.com"]),
+                zone(
+                    "exampleshop",
+                    "sg",
+                    &["exampleshop.b-cdn.net", "example-shop.com"],
+                ),
                 zone("archive", "de", &[]),
             ],
             unusable: vec![UnusableZone {

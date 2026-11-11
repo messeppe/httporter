@@ -1167,7 +1167,8 @@ fn the_engines_words_become_sentences_and_notifications_name_the_run() {
         note(Direction::Upload, 10, 2),
         (
             "Upload finished with problems".to_owned(),
-            "Uploaded 10 files to example-shop.com. 2 files failed. Open HTTPorter to retry.".to_owned()
+            "Uploaded 10 files to example-shop.com. 2 files failed. Open HTTPorter to retry."
+                .to_owned()
         )
     );
 }

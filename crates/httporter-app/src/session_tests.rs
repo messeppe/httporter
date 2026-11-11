@@ -1035,7 +1035,12 @@ async fn account_key_adds_ticked_zones_and_forgets_key_by_default() {
             added[0].region.as_str(),
             added[0].host.as_str()
         ),
-        ("exampleshop", "exampleshop", "sg", "sg.storage.bunnycdn.com")
+        (
+            "exampleshop",
+            "exampleshop",
+            "sg",
+            "sg.storage.bunnycdn.com"
+        )
     );
     assert_eq!(saved_secret(&creds, &added[0].id).as_deref(), Some("pw-a"));
     assert_eq!(format!("{creds:?}"), "MemoryStore { entries: 1, .. }");
