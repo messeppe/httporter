@@ -45,6 +45,17 @@ The first public release.
 - A compare by checksum, a preview of every file before anything happens, a secrets check,
   and uploads before deletes before the purge.
 - History of every publish; retry of a failed one.
+- Publish on a schedule (a Windows Task Scheduler task per profile, with the next run and the
+  last result on the profile page) or automatically when the local folder changes.
+
+**Command line**
+- `httporter publish`, `ls`, `upload` and `download` from any terminal, with exit codes for
+  scripts. The app and the command line can run at the same time; one publish per profile.
+
+**Zones and buckets**
+- Create Bunny storage zones (with a linked pull zone) and S3 buckets from the app.
+- Zone and bucket settings: Bunny 404 handling and replication regions; S3 CORS and static
+  website hosting where the service supports them.
 
 **The app**
 - Light and dark appearance following Windows; Cupertino-style design; the toolbar as the
@@ -55,8 +66,11 @@ The first public release.
 - An opt-in update check that says when a new version is out, with its notes and a download
   link; it never installs anything.
 - About, with the "Made with Slint" credit.
+- Smooth, spring-based motion for sheets, Quick Look, the sidebar, switches and other
+  controls. Settings › General › Animations follows Windows' "Animation effects" or turns
+  motion on or off for HTTPorter alone.
 - Accessibility: screen-reader names for controls, visible focus, full keyboard use; follows
-  Windows text size and "Animation effects".
+  Windows text size.
 - Resizable, remembered columns.
 - The activity log, with filters and export; secrets are redacted.
 
@@ -70,6 +84,4 @@ The first public release.
 - Not code-signed yet: SmartScreen may warn on first run.
 - Chinese, Japanese, Thai, Lao, Khmer and Burmese text breaks lines by the Unicode rules,
   without dictionary word boundaries.
-- Planned for 1.x: a command-line companion, scheduled publish, a watch folder, and creating
-  zones and buckets.
 
