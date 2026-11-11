@@ -682,7 +682,7 @@ fn menu_title_scanner_reads_titles_and_flags_plain_strings() {
     assert_eq!(menu_titles(source, "second"), ["Other"]);
 }
 
-/// Task 17 and I4: the context menus carry the entries the brief lists, cloud rows: Quick Look,
+/// Task 17 and I4: the context menus carry the entries the brief lists. Cloud rows: Quick Look,
 /// Open, Download, Download to…, New Folder…, Rename…, Move To…, Delete…, Copy Public Link, Copy
 /// Path, Copy Presigned Link… (where the site has them), Add to Favorites, Purge from CDN, Refresh;
 /// This PC rows: Quick Look, Upload, New Folder…, Show in Explorer, Add to Favorites, Refresh, and

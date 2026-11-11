@@ -214,7 +214,7 @@ pub const PURGE_NEEDS_BUNNY: &str = "Purging needs a Bunny pull zone.";
 /// Why the purge became Whole zone.
 pub fn zone_is_faster(urls: usize) -> String {
     format!(
-        "{} URLs to purge, purging the whole zone is faster.",
+        "{} URLs to purge. Purging the whole zone is faster.",
         crate::format::format_count(urls as u64)
     )
 }
@@ -318,7 +318,9 @@ pub fn published(site: &str, record: &httporter_core::HistoryRecord) -> String {
         PurgeResult::Off => String::new(),
         PurgeResult::Urls(n) => format!(" CDN purged ({} URLs).", format_count(*n)),
         PurgeResult::Zone => " CDN zone purged.".to_owned(),
-        PurgeResult::Failed(_) => " CDN purge failed, Retry Purge on the profile page.".to_owned(),
+        PurgeResult::Failed(_) => {
+            " CDN purge failed. Use Retry Purge on the profile page.".to_owned()
+        }
         PurgeResult::Unavailable(why) => format!(" {why}"),
     };
     match record.result {
@@ -537,7 +539,7 @@ pub fn remote_detail(folders: u64, regions: u32) -> String {
 }
 
 /// The second card before the first publish.
-pub const REMOTE_UNKNOWN: &str = "-";
+pub const REMOTE_UNKNOWN: &str = "--";
 pub const REMOTE_UNKNOWN_DETAIL: &str = "Counted at the first publish";
 
 /// The Schedule card while no schedule is on (I6: see "schedule (I6, T3)" below).
@@ -1061,7 +1063,7 @@ pub fn watch_published(profile: &str, files: u64, purge_failed: bool) -> String 
         format!("{} changed files", format_count(files))
     };
     let purge = if purge_failed {
-        " The CDN purge failed, Retry Purge on the profile page."
+        " The CDN purge failed. Use Retry Purge on the profile page."
     } else {
         ""
     };

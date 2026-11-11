@@ -1,4 +1,4 @@
-# HTTPorter I5 "Polish & release", implementation plan (lean)
+# HTTPorter I5 "Polish & release": implementation plan (lean)
 
 > **For agentic workers:** speed mode (see below). Builders work in parallel worktrees; the controller merges.
 
@@ -125,7 +125,7 @@ pub last_update_check: i64,   // unix seconds, 0 = never
 
 ### 0.2 `httporter-platform`
 ```rust
-// creds.rs, added to the CredentialStore trait (MemoryStore real in T1; KeyringStore todo!("T4"))
+// creds.rs: added to the CredentialStore trait (MemoryStore real in T1; KeyringStore todo!("T4"))
 fn keys(&self) -> Result<Vec<CredentialKey>, CredError>;   // every target this app wrote (service "HTTPorter"), none else
 impl CredentialKey { pub fn kind(&self) -> CredentialKind; pub fn id(&self) -> &str; }
 pub enum CredentialKind { Site, Account, Other }
@@ -164,7 +164,7 @@ impl Tray {
 pub fn text_scale() -> f32;            // UISettings.TextScaleFactor (WinRT), clamped 1.0..=2.25; 1.0 on error
 pub fn animations_enabled() -> bool;   // SPI_GETCLIENTAREAANIMATION; true on error
 
-// store.rs, none new for I5 except what T5 fixes inside existing functions (ledger 118/138/144).
+// store.rs: none new for I5 except what T5 fixes inside existing functions (ledger 118/138/144).
 ```
 
 ### 0.3 `httporter-app` Slint (`app.slint` / `types.slint`, wired by T1)
@@ -172,20 +172,20 @@ pub fn animations_enabled() -> bool;   // SPI_GETCLIENTAREAANIMATION; true on er
 // types.slint
 export struct ToastData { id: int, text: string, action: string /* "" = none */, kind: int /* 0 info 1 done 2 warning */ }
 
-// theme.slint, Theme global gains (T5 uses them)
+// theme.slint: Theme global gains (T5 uses them)
 in property <float> text-scale: 1.0;    in property <bool> motion: true;
 
-// AppWindow, window chrome (T2)
+// AppWindow: window chrome (T2)
 in property <bool> window-maximized;  in property <bool> window-active: true;
 in property <bool> caption-max-hovered;  in property <bool> caption-max-pressed;
 out property <length> caption-max-x;  out property <length> caption-max-y;           // absolute, logical
 out property <length> caption-max-width;  out property <length> caption-max-height;
 callback caption-minimize();  callback caption-toggle-maximize();  callback caption-close();
 callback caption-drag();  callback caption-menu(length, length);  callback caption-layout-changed();
-// AppWindow, comfort (T3)
+// AppWindow: comfort (T3)
 in property <[ToastData]> toasts;  callback toast-action(int);  callback toast-dismissed(int);
 callback undo();  callback reopen-tab();  callback switch-pane();  callback go-up();
-// AppWindow, columns (T5)
+// AppWindow: columns (T5)
 in-out property <length> col-size-width;  in-out property <length> col-modified-width;
 in-out property <length> col-status-width;  callback columns-resized();
 ```
@@ -294,7 +294,7 @@ Every §0 name and signature above is as written, except where noted here.
 
 ## Tasks
 
-### T1, Skeleton (alone first; `CARGO_BUILD_JOBS=3`)
+### T1: Skeleton (alone first; `CARGO_BUILD_JOBS=3`)
 **Files:** `Cargo.toml` (workspace), the three crate `Cargo.toml`s, `crates/httporter-core/src/places.rs`,
 `crates/httporter-platform/src/{creds.rs,win/mod.rs}`, new `win/{titlebar,placement,tray,a11y}.rs`, `ui/app.slint`,
 `ui/types.slint`, `ui/theme.slint`, new `components/{caption_buttons,toast,security_tab}.slint`,
@@ -326,7 +326,7 @@ Every §0 name and signature above is as written, except where noted here.
 - Speed-mode done.
 - A one-page "T1 as built" note appended to §0 for any signature that had to bend.
 
-### T2, Window chrome (worktree `i5-a`)
+### T2: Window chrome (worktree `i5-a`)
 **Files:** `win/{titlebar,placement}.rs`, `components/{caption_buttons,toolbar}.slint`, the Settings-window title row
 in `components/settings_window.slint`, `src/window/`, `build.rs`, new `assets/icon/`, `tools/icon/` (a throwaway
 renderer project, excluded from the workspace), `win/pickers.rs`.
@@ -378,7 +378,7 @@ renderer project, excluded from the workspace), `win/pickers.rs`.
 
 **Ledger:** 131 (sidebar toggle `accessible-checked`; `ErrorBanner` role `alert`).
 
-### T3, Comfort (worktree `i5-b`)
+### T3: Comfort (worktree `i5-b`)
 **Files:** `win/tray.rs`, `components/toast.slint`, `src/comfort/`, `src/manage/{tabs,places,palette_view,links,edit}.rs`,
 the quit / close branch in `src/transfers.rs` (`on_close_requested` and `quit-keep-running` only).
 
@@ -387,7 +387,7 @@ the quit / close branch in `src/transfers.rs` (`on_close_requested` and `quit-ke
 - When the window is closed while transfers run:
   - the quit sheet's "Keep Running" hides the window (`ui.hide()`) and shows the tray icon (exe icon resource 1);
   - when `tray` is off, "Keep Running" keeps the window, as today.
-- Tooltip "HTTPorter, Uploading 1,204 of 13,793 · 43 files/s", updated ≤ 1 Hz from the same engine snapshot as
+- Tooltip "HTTPorter: Uploading 1,204 of 13,793 · 43 files/s", updated ≤ 1 Hz from the same engine snapshot as
   the taskbar.
 - Left-click shows the window.
 - Menu: Show HTTPorter / Pause All (Resume All) / Quit. Quit shows the window and its quit sheet.
@@ -417,7 +417,7 @@ the quit / close branch in `src/transfers.rs` (`on_close_requested` and `quit-ke
 - `go-up` = the pane's Backspace action.
 - The palette's shortcut list (`?`) gains the five new keys, and "Undo" and "Reopen Closed Tab" commands.
 
-### T4, System: Security, Reset, Updates, About (worktree `i5-c`)
+### T4: System: Security, Reset, Updates, About (worktree `i5-c`)
 **Files:** `creds.rs` (`KeyringStore::keys`), `components/security_tab.slint`, the General-tab sections in
 `components/settings_tabs.slint`, `src/system/`, `src/manage/settings_tabs.rs` (General rows only).
 
@@ -472,7 +472,7 @@ The palette gains "About HTTPorter" (opens Settings › General) and "Check for 
 
 **Tray row:** "Keep running in the tray when the window is closed during transfers."
 
-### T5, Accessibility, polish, translation, robustness (worktree `i5-d`)
+### T5: Accessibility, polish, translation, robustness (worktree `i5-d`)
 **Files:** `win/a11y.rs`, `ui/theme.slint`, `components/{sidebar,pane,chips,drawer,statusbar,layout,inspector}.slint`,
 `src/{copy,format,drawer_view,viewmodel,settings_view}.rs`, `src/publish/copy.rs` (M9 passthrough),
 `src/drop_hook.rs` (the settings-change trigger only), `crates/httporter-platform/src/store.rs` (settings functions
@@ -509,7 +509,7 @@ only), the `resume_journal` part of `src/transfers.rs`. Not `src/manage/settings
 
 **Translation pass:**
 - M9: passthrough provider and planner text gets sentence case and goes through `copy.rs` functions.
-- Q36: the `format.rs` word tables and viewmodel's "-" move into `copy.rs`.
+- Q36: the `format.rs` word tables and viewmodel's ", " move into `copy.rs`.
 - Add `translations/README.md`: how to add a language with Slint bundled translations and the `.po` workflow. No
   languages yet.
 
@@ -521,7 +521,7 @@ only), the `resume_journal` part of `src/transfers.rs`. Not `src/manage/settings
 - 118: one bad stored field falls back to that field's default, not all `TransferSettings`.
 - 138 / 144: `Store::settings` returns transient errors. The first Settings edit writes only the edited field.
 
-### T6, Release files (worktree `i5-r`; no app code, so it can run alongside T1)
+### T6: Release files (worktree `i5-r`; no app code, so it can run alongside T1)
 **Files:** `LICENSE-MIT`, `LICENSE-APACHE`, `deny.toml`, `tools/{third_party.py,package.ps1,sign.ps1,spdx_headers.py,
 check.ps1}`, `installer/httporter.iss`, `README.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`,
 `CHANGELOG.md`, `docs/architecture.md`, `.github/workflows/{ci.yml,release.yml}`, `.gitignore` (`dist/`).
@@ -596,7 +596,7 @@ after the merge (T7), so the tracks don't conflict.
 
 **`check.ps1`** (86, 101): `$ErrorActionPreference` handled; native stderr no longer marks PS 5.1 runs failed.
 
-### T7, Merge, headers, size, package, install (controller)
+### T7: Merge, headers, size, package, install (controller)
 1. **Merge into `feat/i5-polish`**, in this order: T1, then T6, T2, T3, T4, T5. Fix the compile after each merge.
 2. **Headers:** `python -I tools/spdx_headers.py`, then commit.
 3. **Checks:** release build in `D:\Temp\httporter-target\merge`; `third_party.py`; `package.ps1`.
@@ -604,7 +604,7 @@ after the merge (T7), so the tracks don't conflict.
 5. **Install** the exe the way it's installed today. The setup exe is left in `dist\` for the user to try. A launch
    smoke runs, and the ledger and memory are updated.
 
-### T10, Tests, gate, measurements (**only after the user has used the build**; also covers the skipped I3 and I4 T10)
+### T10: Tests, gate, measurements (**only after the user has used the build**; also covers the skipped I3 and I4 T10)
 - **Unit tests:**
   - `is_newer` (1.0.0 < 1.0.1 < 1.1.0; v prefix; pre-release never newer; garbage false);
   - `latest` against wiremock (200, 403, 404, malformed, timeout);

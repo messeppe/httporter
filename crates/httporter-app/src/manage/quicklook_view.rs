@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Quick Look: a file of either pane, shown over the window without leaving it, text with line
-//! numbers and syntax colours, an image, or the file's kind with a way to open it, and, for
+//! Quick Look: a file of either pane, shown over the window without leaving it (text with line
+//! numbers and syntax colours, an image, or the file's kind with a way to open it) and, for
 //! text, its changes against the copy on the other side ("Changes vs Bunny").
 //!
 //! Space (or the menu, or the inspector) opens it on the pane's row; ← → step through the

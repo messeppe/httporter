@@ -972,7 +972,7 @@ mod tests {
         assert_eq!(b.hovers.borrow().len(), 5);
         assert_eq!(b.hovers.borrow()[4], folder(1));
 
-        // The drag ends, a leave, a cancel and a drop all call `end_hover`, and the UI hears of
+        // The drag ends (a leave, a cancel and a drop all call `end_hover`) and the UI hears of
         // it once.
         b.hook.tracker.borrow_mut().cancelled();
         b.hook.end_hover();

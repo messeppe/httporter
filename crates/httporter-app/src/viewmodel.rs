@@ -479,7 +479,7 @@ mod tests {
         ];
         let rows = rows_from_remote(&entries, now());
         assert_eq!(names(&rows), ["wp-content", "index.html"]);
-        assert_eq!(rows[0].size, "\u{2014}");
+        assert_eq!(rows[0].size, "--");
         assert_eq!(rows[0].kind, FileKindData::Folder);
         assert!(rows[0].folder);
         assert_eq!(rows[1].size, "383.4 KB");
@@ -525,7 +525,7 @@ mod tests {
         ];
         let rows = rows_from_local(&entries, now());
         assert_eq!(names(&rows), ["wp-content", "og-cover.webp", "robots.txt"]);
-        assert_eq!(rows[0].size, "\u{2014}");
+        assert_eq!(rows[0].size, "--");
         assert_eq!(rows[1].size, "214.0 KB");
         assert_eq!(rows[1].kind, FileKindData::Image);
         assert_eq!(rows[2].size, "67 B");
@@ -535,9 +535,9 @@ mod tests {
     #[test]
     fn unknown_modified_time_shows_a_dash() {
         let rows = rows_from_local(&[local("a.txt", false, 1, None)], now());
-        assert_eq!(rows[0].modified, "\u{2014}");
+        assert_eq!(rows[0].modified, "--");
         let rows = rows_from_remote(&[entry("a.txt", false, 1, None)], now());
-        assert_eq!(rows[0].modified, "\u{2014}");
+        assert_eq!(rows[0].modified, "--");
     }
 
     #[test]
@@ -724,7 +724,7 @@ mod tests {
             RowData {
                 name: "wp-content".into(),
                 kind: FileKindData::Folder,
-                size: "\u{2014}".into(),
+                size: "--".into(),
                 modified: "Today 10:02".into(),
                 folder: true,
                 bytes: 0,

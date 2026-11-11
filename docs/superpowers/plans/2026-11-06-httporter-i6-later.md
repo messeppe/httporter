@@ -1,4 +1,4 @@
-# HTTPorter I6 "Later", implementation plan (lean)
+# HTTPorter I6 "Later": implementation plan (lean)
 
 > **For agentic workers:** speed mode (see below). Builders work in parallel worktrees; the controller merges.
 
@@ -134,9 +134,9 @@ pub mod exit { pub const OK: i32 = 0; pub const FAILURES: i32 = 1; pub const CON
 
 ### 0.2 `httporter-platform` (T1)
 ```rust
-// store.rs, schema v5 (T1 real): journal.owner TEXT NULL; history.source TEXT NOT NULL DEFAULT 'app';
+// store.rs: schema v5 (T1 real): journal.owner TEXT NULL; history.source TEXT NOT NULL DEFAULT 'app';
 //   profiles.extras TEXT NOT NULL DEFAULT '{}' (JSON ProfileExtras). Existing rows: owner NULL = "an old run, gone".
-// journal.rs, SqliteJournal::with_owner(owner: String); unfinished() returns only rows whose owner is NULL or not alive.
+// journal.rs: SqliteJournal::with_owner(owner: String); unfinished() returns only rows whose owner is NULL or not alive.
 pub fn process_owner() -> String;               // "<pid>:<process start FILETIME>"
 pub fn owner_alive(owner: &str) -> bool;        // OpenProcess + GetProcessTimes match
 // win/lock.rs
@@ -191,9 +191,9 @@ pub async fn run_headless(ctx: &HeadlessCtx, profile: &ProfileRecord, opts: &Hea
 pub struct HeadlessCtx { /* store, creds, factory, engine, journal: built by HeadlessCtx::open() for CLI, from Publisher for GUI */ }
 pub enum HeadlessProgress { Comparing { done: u64, total: u64 }, Uploading { done: u64, total: u64, bytes: u64 }, Deleting { done: u64, total: u64 }, Purging }
 pub enum HeadlessError { Config(String), Auth(String), Io(String) }   // → exit 2 / 3 / 1
-// publish/schedule_view.rs (T3), pub fn install(ui: &AppWindow, p: &Arc<Publisher>);
-// publish/watch.rs (T4)         , pub fn install(ui: &AppWindow, p: &Arc<Publisher>);
-// manage/zones.rs (T5)          , pub fn install(ui: &AppWindow, m: &Arc<Manager>);
+// publish/schedule_view.rs (T3): pub fn install(ui: &AppWindow, p: &Arc<Publisher>);
+// publish/watch.rs (T4): pub fn install(ui: &AppWindow, p: &Arc<Publisher>);
+// manage/zones.rs (T5): pub fn install(ui: &AppWindow, m: &Arc<Manager>);
 ```
 
 ### 0.5 Slint (T1 wires; each track fills its component)
@@ -321,7 +321,7 @@ cors-shown, cors-origins, cors-methods, website-shown, website-index, website-er
 
 ## Tasks
 
-### T1, Skeleton (alone first; `CARGO_BUILD_JOBS=3`)
+### T1: Skeleton (alone first; `CARGO_BUILD_JOBS=3`)
 **What it covers:**
 - §0 everything;
 - the store v5 migration;
@@ -336,7 +336,7 @@ cors-shown, cors-origins, cors-methods, website-shown, website-index, website-er
 
 **Done:** speed-mode done, plus a "T1 as built" note appended to §0.
 
-### T2, CLI + headless publish (worktree `i6-a`)
+### T2: CLI + headless publish (worktree `i6-a`)
 **Files:** `src/cli/`, `src/publish/headless.rs`, `crates/httporter-com/`, `platform` journal owner/lock bodies,
 `tools/package.ps1`, `installer/httporter.iss`.
 
@@ -371,7 +371,7 @@ cors-shown, cors-origins, cors-methods, website-shown, website-index, website-er
 - **Headless publish:** the same compare/plan/guard/purge code the Publish sheet uses (factor it, don't copy it). The
   GUI's Publish button keeps its sheet.
 
-### T3, Scheduled publish (worktree `i6-b`)
+### T3: Scheduled publish (worktree `i6-b`)
 **Files:** `win/scheduler.rs`, `components/schedule_sheet.slint`, the Schedule card in `profile_page.slint`,
 `src/publish/schedule_view.rs`.
 
@@ -393,7 +393,7 @@ cors-shown, cors-origins, cors-methods, website-shown, website-index, website-er
 
 **Tests use `FakeScheduler`. Never create a real task during building.**
 
-### T4, Watch folder (worktree `i6-c`)
+### T4: Watch folder (worktree `i6-c`)
 **Files:** `src/publish/watch.rs`, the options in `components/profile_sheet.slint` and its Rust, the "Watching" mark in
 `components/sidebar.slint` and its view model.
 
@@ -418,7 +418,7 @@ cors-shown, cors-origins, cors-methods, website-shown, website-index, website-er
 **While HTTPorter runs only.** Closing the window while watching asks nothing new. The tray (I5) keeps it alive only
 while transfers run, which is stated in the help text.
 
-### T5, Zone and bucket tools (worktree `i6-d`)
+### T5: Zone and bucket tools (worktree `i6-d`)
 **Files:**
 - `httporter-bunny/src/account.rs` (+ model);
 - `httporter-s3/src/{buckets.rs,presets.rs,xml.rs}`;
@@ -444,7 +444,7 @@ while transfers run, which is stated in the help text.
 
 **Tests:** wiremock only. No live API calls while building.
 
-### T7, Merge, package, install (controller)
+### T7: Merge, package, install (controller)
 1. Merge T1, T2, T3, T4, T5, with a compile check after each.
 2. `tools/spdx_headers.py` (new files).
 3. `cargo test --workspace` (unit tests only).
@@ -454,7 +454,7 @@ while transfers run, which is stated in the help text.
    and print no secrets.
 7. Update the ledger and memory, then delete the track target dirs.
 
-### T10, After the user has used the build (also the open I3–I5 items)
+### T10: After the user has used the build (also the open I3–I5 items)
 - **Unit and mock tests:** CLI argument parsing and exit codes, `run_headless` on MockProvider (guard, dry-run,
   no-delete, busy lock), journal owner filtering, the store v5 migration, Schedule → trigger XML/COM fields via
   FakeScheduler, the watch debounce, the Bunny / S3 zone APIs on wiremock.

@@ -462,7 +462,7 @@ impl BunnyConfig {
 }
 // new BunnyConfig fields: http1_only: bool, keep_alive: bool, request_timeout: Duration, proxy: ProxyMode
 // BunnyStorage implements create_folder (Refused("Bunny Storage creates a folder with its first file.") while
-// EmptyFolders::Unknown, Task 7 may change this), reachable (GET https://{host}/ without AccessKey; any HTTP status = Ok),
+// EmptyFolders::Unknown: Task 7 may change this), reachable (GET https://{host}/ without AccessKey; any HTTP status = Ok),
 // and calls opts.meter before sending each body chunk.
 ```
 
@@ -1303,7 +1303,7 @@ Rules:
 
 ---
 
-### Task 23: Integration, transfers on Bunny *(after Platform, Bunny, Engine, UI-A, UI-B)*
+### Task 23: Integration: transfers on Bunny *(after Platform, Bunny, Engine, UI-A, UI-B)*
 
 **Files:**
 - Create: `src/site_hub.rs`, `src/transfers.rs`, `src/transfers_tests.rs`.
@@ -1375,7 +1375,7 @@ Wiring:
 
 ---
 
-### Task 24: Integration, sites: S3, account key, import, Welcome, edit, duplicate, remove *(after S3, Task 23)*
+### Task 24: Integration: sites: S3, account key, import, Welcome, edit, duplicate, remove *(after S3, Task 23)*
 
 **Files:**
 - Modify: `src/session/sites.rs`, `src/binding.rs`, `src/site_hub.rs`, `src/add_site.rs`, `src/import.rs`, `src/copy.rs`, `src/main.rs`.

@@ -4,7 +4,7 @@
 
 Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = where it is built.
 
-## Main window, two panes (`Main.dc.html`, `MainDark.dc.html`)
+## Main window: two panes (`Main.dc.html`, `MainDark.dc.html`)
 
 | Feature | Milestone | Status |
 |---|---|---|
@@ -17,7 +17,7 @@ Status: ✅ done (reviewed) · 🔧 in progress · ⬜ planned. Milestone = wher
 | Refresh (F5 / Ctrl+R) on each pane | I1 | 🔧 (final fix wave) |
 | Toolbar: site title + subtitle (provider · zone) | I1 | ✅ |
 | Toolbar: green "HTTPS · {ms} ms" connection pill | I1 | ✅ |
-| Toolbar: view toggle, two panes / single pane + inspector | I4 | ⬜ |
+| Toolbar: view toggle: two panes / single pane + inspector | I4 | ⬜ |
 | Toolbar: Compare toggle | I3 | ⬜ |
 | Toolbar: Upload, Download, New folder, Delete buttons | I2 | ✅ |
 | Toolbar: Publish button | I3 | ⬜ (disabled now) |

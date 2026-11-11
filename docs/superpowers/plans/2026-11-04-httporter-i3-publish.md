@@ -1,4 +1,4 @@
-# HTTPorter I3 "Publish", implementation plan (lean)
+# HTTPorter I3 "Publish": implementation plan (lean)
 
 **Goal:** every I3 row of `docs/design/mockup-feature-checklist.md` works:
 - **Compare:** toolbar toggle, "Comparing" chip, Status column, status-bar summary.
@@ -38,7 +38,7 @@ T1 commits all of this as `todo!()` stubs; everyone codes against it.
 - **Derives:** data types derive `Debug, Clone, PartialEq, Eq` where possible.
 - **Serde:** stored enums use serde with `snake_case`.
 
-### 0.1 `httporter-core`, new `publish.rs`, `skip.rs`, `cdn.rs` (re-exported)
+### 0.1 `httporter-core`: new `publish.rs`, `skip.rs`, `cdn.rs` (re-exported)
 
 ```rust
 // publish.rs
@@ -63,7 +63,7 @@ pub struct HistoryRecord { pub id: i64 /*0 until stored*/, pub profile: ProfileI
     pub files: Vec<HistoryFile> }                                       // empty from list_history
 pub const HISTORY_KEEP: usize = 200;
 
-// skip.rs, relative '/' paths, case-insensitive. "x/" = folder x anywhere (and all below); no '/' = last segment;
+// skip.rs: relative '/' paths, case-insensitive. "x/" = folder x anywhere (and all below); no '/' = last segment;
 // inner '/' = whole relative path; '*' = run without '/'; '?' = one char.
 pub const DEFAULT_SKIP_RULES: &[&str] = &[".env", ".env.*", "*.key", "*.pem", ".git/", ".svn/", "node_modules/",
     "Thumbs.db", "desktop.ini", ".DS_Store", "*.tmp", "~$*"];         // spec 8.6.11 (12 rules)
@@ -90,7 +90,7 @@ pub async fn run_purge(p: &dyn CdnPurger, mode: PurgeMode, paths: &[RemotePath],
                        on_progress: &(dyn Fn(usize, usize) + Send + Sync)) -> PurgeResult;
 ```
 
-### 0.2 `httporter-transfer`, new `compare.rs`, `publish.rs`; `engine.rs` additions
+### 0.2 `httporter-transfer`: new `compare.rs`, `publish.rs`; `engine.rs` additions
 
 ```rust
 // compare.rs
@@ -153,7 +153,7 @@ impl Engine {
     pub fn pending_checks_for(&self, site: &SiteId) -> usize; }
 ```
 
-### 0.3 `httporter-bunny`, new `cdn.rs`
+### 0.3 `httporter-bunny`: new `cdn.rs`
 
 ```rust
 impl BunnyAccount {
@@ -166,7 +166,7 @@ impl BunnyCdn { pub fn new(account: BunnyAccount, zones: Vec<CdnZone>) -> Self }
 impl CdnPurger for BunnyCdn {}   // 429: wait Retry-After (clamped), at most 3 tries
 ```
 
-### 0.4 Storage, `httporter-platform/src/store.rs` (schema v3) and `httporter-app/src/session/profiles.rs`
+### 0.4 Storage: `httporter-platform/src/store.rs` (schema v3) and `httporter-app/src/session/profiles.rs`
 
 ```rust
 impl Store {   // all return Result<_, StoreError> (T1: so list_profiles → Result<Vec<_>>, cdn_link → Result<Option<_>>)
@@ -212,7 +212,7 @@ CREATE INDEX publish_files_history ON publish_files (history);
 CREATE TABLE cdn_links (site TEXT PRIMARY KEY, account TEXT NOT NULL, zones TEXT NOT NULL, checked_at TEXT NOT NULL);
 ```
 
-### 0.5 App, `crates/httporter-app/src/publish/`
+### 0.5 App: `crates/httporter-app/src/publish/`
 
 ```rust
 // mod.rs (T1 stub, T7 fills)
@@ -243,7 +243,7 @@ pub fn install(ui: &AppWindow, p: &Arc<Publisher>);          // calls the three 
 //   client. binding.rs: install_with also returns the Link, which install_app hands to Publisher::new.
 ```
 
-### 0.6 Slint, `ui/types.slint` additions and `app.slint` hooks (T1)
+### 0.6 Slint: `ui/types.slint` additions and `app.slint` hooks (T1)
 
 ```slint
 export enum CompareStatus { none, changed, new, remote-only, same }   // FileRow gains `status: CompareStatus`
@@ -327,11 +327,11 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
 
 | Track | Tasks | Owns |
 |---|---|---|
-|, | **T1** skeleton (blocks all, ~20 min) | every stub in §0 |
+| -- | **T1** skeleton (blocks all, ~20 min) | every stub in §0 |
 | A engine | T2 → T3 → T9 | core skip/cdn; transfer compare, publish, engine, lane, offline; s3 multipart meter |
 | B data + CDN | T4 ‖ T5 | platform `store.rs` + app `session/profiles.rs` ‖ bunny `cdn.rs`, `account.rs` |
 | C UI | T6 ‖ T7 ‖ T8 | each task's own Slint and Rust view files |
-|, | **T10** tests + gate + live smoke | after every branch is merged |
+| -- | **T10** tests + gate + live smoke | after every branch is merged |
 
 **After T1, T2, T4, T5, T6, T7 and T8 start together.**
 - T3 waits for T2, because they share files.
@@ -342,7 +342,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
 
 ---
 
-### T1, Interfaces skeleton
+### T1: Interfaces skeleton
 **Files:**
 - **Crates:** core `publish/skip/cdn.rs`; transfer `compare/publish.rs` and the `engine.rs` stubs; bunny `cdn.rs`;
   platform `store.rs` stubs.
@@ -360,7 +360,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
 
 **Done:** criteria above; existing tests still compile; report the commit hash.
 
-### T2, Compare, skip rules, plan (Track A)
+### T2: Compare, skip rules, plan (Track A)
 **Files:** core `skip.rs`, `publish.rs` (`trips`, `ProfileId::new`); transfer `compare.rs`, `publish.rs` (all but
 `run_publish` / `into_record`).
 
@@ -386,7 +386,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
     with path and size.
   - `retry_of`: Upload rows → New; Delete rows → RemoteOnly with include on.
 
-### T3, Engine batch outcomes, publish runner, purge URLs (Track A, after T2)
+### T3: Engine batch outcomes, publish runner, purge URLs (Track A, after T2)
 **Files:** transfer `engine.rs` (+ `lane.rs` if needed), `publish.rs` (`run_publish`, `into_record`); core `cdn.rs`.
 
 **Build:**
@@ -400,7 +400,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
   (`a b/ü.html` → `a%20b/%C3%BC.html`). Paths are full remote paths, because the pull zone serves the zone root.
 - **`purge_urls` forms:** `x/index.html` → `/x/index.html`, `/x/`, `/x`; the root `index.html` → `/index.html`, `/`.
 
-### T4, Store v3 + session wrappers (Track B)
+### T4: Store v3 + session wrappers (Track B)
 **Files:** platform `store.rs`; app `session/profiles.rs`.
 
 **Build:**
@@ -411,7 +411,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
   from copy.
 - **`forget_cdn_key`:** `creds.delete` → `remove_account` → `remove_cdn_links_for`.
 
-### T5, Bunny CDN client (Track B)
+### T5: Bunny CDN client (Track B)
 **Files:** bunny `cdn.rs`, `account.rs` (reuse `get`, add a `post` helper).
 
 **Build:**
@@ -421,7 +421,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
 - **Limits:** two token buckets on tokio time.
 - **Secrets:** no key in any log or error text.
 
-### T6, Compare in the main window (Track C)
+### T6: Compare in the main window (Track C)
 **Files:**
 - **Slint:** `pane.slint`, `toolbar.slint` (T6 owns every toolbar change), `statusbar.slint`, `chips.slint`,
   `icons.slint` (`i-compare`).
@@ -445,7 +445,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
   - A "Comparing" accent chip in the This PC header.
 - **Status bar:** "34 changed · 2 new · 1 only on Bunny", the progress while busy, and errors.
 
-### T7, Publish sheet, runs, CDN key, delete-alert purge, sidebar (Track C)
+### T7: Publish sheet, runs, CDN key, delete-alert purge, sidebar (Track C)
 **Files:**
 - **Slint:** `publish_sheet.slint`, `sidebar.slint`, `sheets.slint` (DeleteAlert only).
 - **Rust:**
@@ -502,7 +502,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
   - Publish section: an `i-send` row per profile, with its name and "2h ago"/"Never".
   - With no profile: "Click Publish to make a profile for the open site."
 
-### T8, Profile page, Edit Profile, history, Settings key, `.env` profile (Track C)
+### T8: Profile page, Edit Profile, history, Settings key, `.env` profile (Track C)
 **Files:**
 - **Slint:** `profile_page.slint`, `profile_sheet.slint`, `settings_window.slint` (Publish tab).
 - **Rust:** `publish/profile_view.rs`, the profile section of `publish/copy.rs`, `settings_view.rs` (Publish tab),
@@ -537,7 +537,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
     Skip it if the folder is missing.
   - Fix the `import.rs` doc line that says these are "ignored until I3".
 
-### T9, Deferred I2 minors, Q52 and later (Track A, after T3)
+### T9: Deferred I2 minors, Q52 and later (Track A, after T3)
 1. **`engine.rs`, the `JOURNAL_CHUNK` writer:** a failed chunk loses up to 512 updates. Put it back at the head and
    retry with a short backoff; still count `journal_errors`.
 2. **`lane.rs` `denied_or_auth`:** the probe lists the whole parent folder. List one page only, through a provider
@@ -561,7 +561,7 @@ T1 also creates empty shells, already placed in `app.slint`, so later tasks edit
 Source of items 7–10: the I2 final review's triage (`.superpowers/sdd/2026-11-02-httporter-i2-move-files/final-review.md`
 M4, M10, M13, M14).
 
-### T10, Tests, gate, live smoke (after every branch is merged)
+### T10: Tests, gate, live smoke (after every branch is merged)
 **Unit and mock tests:**
 - **Compare** (MockProvider + temp dir):
   - New; Changed by size; Changed by SHA-256; Same; RemoteOnly.

@@ -1,4 +1,4 @@
-# HTTPorter, design
+# HTTPorter: design
 
 Date: 2026-10-29 (revision 2)
 Status: draft for review
@@ -23,8 +23,8 @@ It runs as a normal program on the user's own computer: its own window, no serve
 
 It does two jobs:
 
-1. **Publish**, mirror a local folder to a bucket/zone fast: upload only what changed, optionally remove what was deleted locally, then clear the CDN cache. The motivating case is a WordPress site exported to static files with Simply Static.
-2. **Manage**, browse, upload, download, delete, rename/move, preview and edit remote files, two panes side by side. **[user]**
+1. **Publish**: mirror a local folder to a bucket/zone fast: upload only what changed, optionally remove what was deleted locally, then clear the CDN cache. The motivating case is a WordPress site exported to static files with Simply Static.
+2. **Manage**: browse, upload, download, delete, rename/move, preview and edit remote files, two panes side by side. **[user]**
 
 First release supports **Bunny Storage** and **S3-compatible storage** (AWS S3, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, MinIO, Bunny's S3 endpoint). **[user]** WebDAV, Azure Blob Storage, Google Cloud Storage and Supabase Storage follow in later releases through the same adapter design. **[my call]** on that later order.
 
@@ -167,7 +167,7 @@ Checksums: for objects uploaded in a single `PutObject` without SSE-KMS/SSE-C, `
 
 Service presets (endpoint templates and quirks) **[my call]**: AWS S3 (`s3.{region}.amazonaws.com`), Cloudflare R2 (`{account}.r2.cloudflarestorage.com`, region `auto`), Backblaze B2 (`s3.{region}.backblazeb2.com`), Wasabi (`s3.{region}.wasabisys.com`), DigitalOcean Spaces (`{region}.digitaloceanspaces.com`), MinIO (custom URL, path-style), Bunny S3 (`{region}-s3.storage.bunnycdn.com`, S3-enabled zones only, public preview). **[builder]** verifies each preset's quirks during implementation.
 
-### 5.4 Slint (UI toolkit), verified in the spike
+### 5.4 Slint (UI toolkit): verified in the spike
 
 - Slint 1.18.1, Rust API. Release exe of the spike: **13 MB**. With all 13,793 reference files in a table: **~15 MB private / ~32 MB working set** with the software renderer; ~45–50 MB private / ~100 MB working set with the GPU (femtovg/OpenGL) renderer. Folder scan 63–73 ms; table fill 8–11 ms.
 - **Explorer file drops:** Slint's `DropArea` does not receive files dropped from other apps (Slint 1.18.1's winit backend never forwards winit's `HoveredFile`/`DroppedFile`). **Working workaround, confirmed by the user:** hook winit window events via `slint::winit_030::WinitWindowAccessor::on_winit_window_event` (feature `unstable-winit-030`), and get the drop position from Win32 `GetCursorPos` minus the window's inner position, divided by the scale factor, to know which pane received it. Keep it in one module so it can be replaced when Slint supports external drops.
@@ -207,7 +207,7 @@ Service presets (endpoint templates and quirks) **[my call]**: AWS S3 (`s3.{regi
 ## 7. Concepts
 
 - **Provider**: a kind of storage service HTTPorter speaks to (Bunny Storage, S3-compatible). Implemented as an adapter (§10.2).
-- **Site**: a saved connection, provider, endpoint/region, bucket or zone, credentials reference, optional CDN link and public base URL, optional default remote folder.
+- **Site**: a saved connection: provider, endpoint/region, bucket or zone, credentials reference, optional CDN link and public base URL, optional default remote folder.
 - **Account**: optional saved account-level credentials used to discover sites (Bunny account key → zones; S3 keys → buckets) and to manage zones/caches.
 - **CDN link**: how a site's files are served publicly, used for "Copy public link" and purging: a Bunny Pull Zone (purge supported), or a plain public base URL (no purge in the first release).
 - **Publish profile**: a local folder + site + remote folder + skip rules + publish options. A site can have several.
@@ -273,7 +273,7 @@ Service presets (endpoint templates and quirks) **[my call]**: AWS S3 (`s3.{regi
 ### 8.4 Remote file operations
 
 1. **Delete** files and folders. The confirmation sheet shows counts and total size from a recursive listing ("Delete 3 folders and 12 files, 1,284 files, 54 MB in total? This can't be undone."). Destructive button, never the default. The remote root can't be deleted from the UI.
-2. **New folder:** S3, a zero-byte `name/` marker object (console convention). Bunny, per B1.
+2. **New folder:** S3: a zero-byte `name/` marker object (console convention). Bunny, per B1.
 3. **Rename / move** (F2, drag within the remote pane, "Move to…"):
    - S3: server-side `CopyObject` (or `UploadPartCopy` > 5 GB) then delete; fast.
    - Bunny: stream download → upload at the new path with checksum, verify, then delete; before a folder rename a sheet states file count, size and an estimated time. Originals are deleted only after every copy succeeds; on failure nothing is deleted and the user sees which copies exist.
@@ -305,7 +305,7 @@ Service presets (endpoint templates and quirks) **[my call]**: AWS S3 (`s3.{regi
 7. **Delete guard:** above **100 files or 10% of remote files** (whichever is smaller), Publish becomes "Review deletions…" and requires typing the bucket/zone name. **[my call]**
 8. **Run order:** uploads → deletes → purge, so the live site never references missing files mid-publish.
 9. **Purge (Bunny pull zone):** "Changed files" purges exact URLs when ≤ **300** changed/deleted files (~36 s at Bunny's rate), otherwise one whole-pull-zone purge. **[my call]** Purge failures don't fail the publish; they show a warning with "Retry purge".
-10. **History:** per publish, time, profile, counts (uploaded, deleted, skipped, failed), bytes, duration, purge result, full list of changed paths; searchable; failed publishes can be resumed or re-run. Last 200 per profile. **[my call]**
+10. **History:** per publish: time, profile, counts (uploaded, deleted, skipped, failed), bytes, duration, purge result, full list of changed paths; searchable; failed publishes can be resumed or re-run. Last 200 per profile. **[my call]**
 11. **Skip rules:** per profile, editable during a scan; glob on relative paths; presets. Defaults: `.env`, `.env.*`, `*.key`, `*.pem`, `.git/`, `.svn/`, `node_modules/`, `Thumbs.db`, `desktop.ini`, `.DS_Store`, `*.tmp`, `~$*`; optional "Source maps" (`*.map`). **[my call]**
 12. **Secrets check:** non-skipped files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, `wp-config.php`) trigger a warning listing them before publishing.
 
@@ -510,8 +510,8 @@ Release scaffolding (LICENSE, license headers, allowed-dependency-license list, 
 
 - **Q2:** the repository stays **private until the 1.0 release**. So Q1 (license) is decided at I5, and release scaffolding goes into I5.
 - **Q4:** the name must **emphasize the HTTP connection**, the user chose **HTTPorter** (HTTP + porter, someone who carries your things). The earlier working name "Burrow" is retired everywhere, including file and folder names.
-- **Q5:** yes, the builder may create a test pull zone and create/delete temporary `httporter-test-*` zones (rename the prefix with the product).
-- **Q3:** yes, an S3-compatible account (R2) is available for live S3 testing.
+- **Q5:** yes: the builder may create a test pull zone and create/delete temporary `httporter-test-*` zones (rename the prefix with the product).
+- **Q3:** yes: an S3-compatible account (R2) is available for live S3 testing.
 - **Design rule:** the UI follows **Apple's Human Interface Guidelines** (macOS app conventions: sidebar, unified toolbar, sheets, alerts, inspector, Quick Look), adapted to Windows (Windows caption buttons, no Apple fonts or SF Symbols, which Apple licenses only for its platforms). Full visual mockups come first as the reference for the build.
 
 ### Questions only the user can answer [open]

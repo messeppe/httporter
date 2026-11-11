@@ -1291,7 +1291,7 @@ mod tests {
         assert_eq!(data.purge_note, copy::zone_is_faster(301));
         assert_eq!(
             data.purge_note,
-            "301 URLs to purge \u{2014} purging the whole zone is faster."
+            "301 URLs to purge. Purging the whole zone is faster."
         );
 
         // A folder's index.html is three URLs: 100 of them are exactly 300, 101 are past it.

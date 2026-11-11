@@ -236,7 +236,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - [ ] **Step 3: Run to see them fail**, `cargo test -p httporter-core` → compile errors.
 - [ ] **Step 4: Implement the modules** (mock state in `Mutex<BTreeMap<RemotePath, Node>>`, where `Node` is a file's bytes or a folder; folders are implied by file paths and by `with_folder`).
 - [ ] **Step 5: Run to see them pass**, `cargo test -p httporter-core` → all pass.
-- [ ] **Step 6: Commit**, `git commit -m "feat(core): provider contracts, entries, errors and mock provider"`
+- [ ] **Step 6: Commit**: `git commit -m "feat(core): provider contracts, entries, errors and mock provider"`
 
 ---
 
@@ -271,7 +271,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - [ ] **Step 2: Run to see them fail**, `cargo test -p httporter-core retry` → compile error.
 - [ ] **Step 3: Implement `retry.rs`** with `tokio::time::sleep` (add `tokio` with feature `time` as a normal dependency).
 - [ ] **Step 4: Run to see them pass**, `cargo test -p httporter-core` → all pass.
-- [ ] **Step 5: Commit**, `git commit -m "feat(core): retry policy with backoff and Retry-After"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(core): retry policy with backoff and Retry-After"`
 
 ---
 
@@ -321,9 +321,9 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 ```
 
 - [ ] **Step 3: Run to see them fail**, `cargo test -p httporter-bunny` → compile errors.
-- [ ] **Step 4: Implement**, `LastChanged` has no zone: parse with `%Y-%m-%dT%H:%M:%S%.f` as UTC. An empty `ContentType` becomes `None`. Split `ReplicatedZones` on `,`, trim, and drop empty parts.
+- [ ] **Step 4: Implement**: `LastChanged` has no zone: parse with `%Y-%m-%dT%H:%M:%S%.f` as UTC. An empty `ContentType` becomes `None`. Split `ReplicatedZones` on `,`, trim, and drop empty parts.
 - [ ] **Step 5: Run to see them pass**, `cargo test -p httporter-bunny`.
-- [ ] **Step 6: Commit**, `git commit -m "feat(bunny): regions and listing model"`
+- [ ] **Step 6: Commit**: `git commit -m "feat(bunny): regions and listing model"`
 
 ---
 
@@ -337,7 +337,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - Produces: `pub struct BunnyConfig { pub zone: String, pub host: String, pub password: String, pub transfer_concurrency: usize, pub delete_concurrency: usize, pub retry: RetryPolicy, pub base_url: Option<String> }` with `BunnyConfig::new(zone, host, password)` (defaults 32, 16, `RetryPolicy::default()`, `None`); `pub struct BunnyStorage` with `BunnyStorage::new(BunnyConfig) -> Result<Self, ProviderError>` implementing `StorageProvider` (list in this task; other methods return `Err(ProviderError::Permanent("not implemented"))` until Task 6). `endpoint()` = `"https://{host}/{zone}/"` (or `"{base_url}/{zone}/"`).
 - Capabilities: checksum `Sha256`, `server_side_copy: false`, `recursive_delete: true`, `batch_delete_max: 1`, `empty_folders: Unknown`, `list_concurrency: 5`, `delete_concurrency: min(cfg, 30)`, `transfer_concurrency_max: 96`, `presign: false`.
 
-- [ ] **Step 1: Add dependencies**, `reqwest` (`default-features = false`, features `rustls-tls, http2, stream, json`), `tokio` (`sync, fs, time`), `async-trait`, `bytes`, `futures-util`, `tokio-util` (`io`); dev: `wiremock`, `tokio` (`macros, rt-multi-thread`), `tempfile`.
+- [ ] **Step 1: Add dependencies**: `reqwest` (`default-features = false`, features `rustls-tls, http2, stream, json`), `tokio` (`sync, fs, time`), `async-trait`, `bytes`, `futures-util`, `tokio-util` (`io`); dev: `wiremock`, `tokio` (`macros, rt-multi-thread`), `tempfile`.
 
 - [ ] **Step 2: Write the failing tests** (`tests/storage_list.rs`; helper `fn storage(server: &MockServer) -> BunnyStorage` with zone `testzone`, password `secret`, `retry: RetryPolicy::immediate(5)`, `base_url: Some(server.uri())`)
 
@@ -391,7 +391,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
   - Network errors become `Transient`. A body that isn't JSON becomes `Permanent("unexpected response from server (not JSON)")`.
   - `http_version` is `"HTTP/2"` or `"HTTP/1.1"` from `response.version()`; `latency` is send-to-body time.
 - [ ] **Step 5: Run to see them pass.**
-- [ ] **Step 6: Commit**, `git commit -m "feat(bunny): storage listing with limits, retries and error mapping"`
+- [ ] **Step 6: Commit**: `git commit -m "feat(bunny): storage listing with limits, retries and error mapping"`
 
 ---
 
@@ -433,7 +433,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
   - **Deletes** use their own semaphore (`delete_concurrency`, capped at 30); **transfers** use theirs (`transfer_concurrency`, capped at 96).
   - **`delete_folder(root)`** returns `Refused("Deleting the whole zone isn't allowed")` without sending a request.
 - [ ] **Step 4: Run to see them pass**, `cargo test -p httporter-bunny`.
-- [ ] **Step 5: Commit**, `git commit -m "feat(bunny): upload with checksum, download and delete"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(bunny): upload with checksum, download and delete"`
 
 ---
 
@@ -448,15 +448,15 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - Produces: documented answers to spec items **B1** (empty folders) and **B2** (case sensitivity); `Capabilities.empty_folders` set accordingly.
 
 - [ ] **Step 1: User step (blocking): create the test zone.** The user creates storage zone `httporter-test-sg` (region Singapore) in the Bunny dashboard. They then create `D:\Projects\httporter\.env.test` with `HTTPORTER_TEST_ZONE`, `HTTPORTER_TEST_REGION=sg` and `HTTPORTER_TEST_PASSWORD`. The file is git-ignored. The agent never opens or prints it.
-- [ ] **Step 2: Write the probe**, `#[ignore]` tests load `.env.test` with `dotenvy` and refuse to run (`panic!`) unless the zone starts with `httporter-test`. Each test name is the finding it reports:
+- [ ] **Step 2: Write the probe**: `#[ignore]` tests load `.env.test` with `dotenvy` and refuse to run (`panic!`) unless the zone starts with `httporter-test`. Each test name is the finding it reports:
   - `probe_upload_list_download_delete`: round-trip of `probe/hello.txt` with checksum.
   - `probe_empty_folder_put`: `PUT /{zone}/probe/empty/` with an empty body, then list `probe/` and record whether `empty` appears.
   - `probe_case_sensitivity`: upload `probe/Case.txt`, then `GET probe/case.txt`; record 200 vs 404.
 
   Every test deletes `probe/` at the end.
-- [ ] **Step 3: Run it**, `cargo test -p httporter-bunny --test live -- --ignored --nocapture`. Expected: each test prints its finding; all pass.
+- [ ] **Step 3: Run it**: `cargo test -p httporter-bunny --test live -- --ignored --nocapture`. Expected: each test prints its finding; all pass.
 - [ ] **Step 4: Record the findings** in `docs/notes/bunny-behavior.md` (date, zone region, exact HTTP statuses). Set `empty_folders` to `Supported` or `Unsupported` to match, and update the Task 5 capability test.
-- [ ] **Step 5: Commit**, `git commit -m "test(bunny): live behavior probe; document empty folders and case sensitivity"`
+- [ ] **Step 5: Commit**: `git commit -m "test(bunny): live behavior probe; document empty folders and case sensitivity"`
 
 ---
 
@@ -487,7 +487,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - [ ] **Step 2: Run to see them fail**, `cargo test -p httporter-platform`.
 - [ ] **Step 3: Implement** (`keyring` with feature `windows-native`; map `keyring::Error::NoEntry` to `Ok(None)` / `Ok(())`).
 - [ ] **Step 4: Run to see them pass.**
-- [ ] **Step 5: Commit**, `git commit -m "feat(platform): credential store on Windows Credential Manager"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(platform): credential store on Windows Credential Manager"`
 
 ---
 
@@ -517,7 +517,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - [ ] **Step 2: Run to see them fail.**
 - [ ] **Step 3: Implement** (`rusqlite` with `bundled`, `chrono` RFC 3339 strings, `dirs`).
 - [ ] **Step 4: Run to see them pass.**
-- [ ] **Step 5: Commit**, `git commit -m "feat(platform): SQLite store for sites"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(platform): SQLite store for sites"`
 
 ---
 
@@ -537,7 +537,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - [ ] **Step 1: Assets**
   - **Fonts:** download Inter 4.1 from the official release `https://github.com/rsms/inter/releases/tag/v4.1`. Copy `extras/ttf/Inter-{Regular,Medium,SemiBold,Bold}.ttf` and `LICENSE.txt` (saved as `OFL.txt`) into `ui/fonts/`.
   - **Icons:** create one SVG per `<symbol>` in `docs/design/mockups/Main.dc.html` and `History.dc.html` (folder, code, doc, image, chev-r, chev-l, chev-u, sort, search, up, down, trash, newfolder, plus, sidebar, columns, inspector, cloud, pc, send, star, pencil, gear, lock, compare, refresh, x, check, warn, eye, globe, key, open, pause, clock, filter). Use the same `viewBox` and paths, with `fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"`. Tint at use with `colorize`.
-- [ ] **Step 2: Theme tokens**, `ui/theme.slint`, `export global Theme { out property <bool> dark: Palette.color-scheme == ColorScheme.dark; … }`, values copied exactly from `docs/design/mockups/app.css`:
+- [ ] **Step 2: Theme tokens**: `ui/theme.slint`, `export global Theme { out property <bool> dark: Palette.color-scheme == ColorScheme.dark; … }`, values copied exactly from `docs/design/mockups/app.css`:
 
   | Token | Light | Dark |
   |---|---|---|
@@ -570,7 +570,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
   - **`app.slint`:** layout as in the mockup, with the toolbar row (sidebar toggle, back/forward capsule, title + subtitle, connection pill, Publish disabled), the sidebar, the main area and the status bar.
   - **Font:** `import "fonts/Inter-Regular.ttf";` (and the other weights), with `default-font-family: "Inter"`.
 - [ ] **Step 6: Run to see it pass**, then `cargo run -p httporter-app --release`, and compare the window with `Main.dc.html` by eye (shell only).
-- [ ] **Step 7: Commit**, `git commit -m "feat(app): Cupertino window shell, theme tokens, Inter and icons"`
+- [ ] **Step 7: Commit**: `git commit -m "feat(app): Cupertino window shell, theme tokens, Inter and icons"`
 
 ---
 
@@ -611,7 +611,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - [ ] **Step 2: Run to see them fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run to see them pass.**
-- [ ] **Step 5: Commit**, `git commit -m "feat(app): size/date formatting, sorting and local listing"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(app): size/date formatting, sorting and local listing"`
 
 ---
 
@@ -637,7 +637,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
     assert!(matches!(kind_for("robots.txt", false), FileKindData::Doc));
     assert!(matches!(kind_for("wp-content", true), FileKindData::Folder));
 }
-#[test] fn remote_rows_format_and_order() { /* entries [index.html 392641, wp-content folder] → rows[0] wp-content size "-", rows[1] "383.4 KB" */ }
+#[test] fn remote_rows_format_and_order() { /* entries [index.html 392641, wp-content folder] → rows[0] wp-content size ", ", rows[1] "383.4 KB" */ }
 #[test] fn crumbs() {
     assert_eq!(remote_crumbs("exampleshop", &RemotePath::parse("wp-content/uploads").unwrap()), vec!["exampleshop", "wp-content", "uploads"]);
     assert_eq!(local_crumbs(Path::new("D:\\site-export")), vec!["D:", "site-export"]);
@@ -655,7 +655,7 @@ git commit -m "feat(core): workspace and RemotePath with per-segment URL encodin
 - [ ] **Step 2: Run to see them fail.**
 - [ ] **Step 3: Implement** `viewmodel.rs` and `pane.slint`; place two `Pane`s in a wrapping row in `app.slint`, as in the mockup (focus ring on the active pane).
 - [ ] **Step 4: Run to see them pass**, then run the app with fake rows and compare with `Main.dc.html`.
-- [ ] **Step 5: Commit**, `git commit -m "feat(app): file pane with virtualized list and view model"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(app): file pane with virtualized list and view model"`
 
 ---
 
@@ -688,7 +688,7 @@ const REG: &[&str] = &["de", "sg"];
 - [ ] **Step 2: Run to see them fail.**
 - [ ] **Step 3: Implement** the form and the Slint components (sidebar "Sites" list with mono tile `B`, subtitle `Bunny · {region name}`, health dot, and "Add Site" button at the bottom). Field errors show under their field in `red`.
 - [ ] **Step 4: Run to see them pass**, then open the sheet in the running app and compare with `AddSite.dc.html`.
-- [ ] **Step 5: Commit**, `git commit -m "feat(app): sidebar sites and Add Site sheet"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(app): sidebar sites and Add Site sheet"`
 
 ---
 
@@ -720,7 +720,7 @@ const REG: &[&str] = &["de", "sg"];
 - [ ] **Step 2: Run to see them fail.**
 - [ ] **Step 3: Implement** `DropTracker`, `pane_at` and `install_drop_hook`. While hovering, the remote pane shows the accent ring and "Release to upload" chip.
 - [ ] **Step 4: Run to see them pass.**
-- [ ] **Step 5: Commit**, `git commit -m "feat(app): Explorer file-drop hook with pane targeting"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(app): Explorer file-drop hook with pane targeting"`
 
 ---
 
@@ -776,7 +776,7 @@ const REG: &[&str] = &["de", "sg"];
   - **Startup:** the local pane starts at the drive list; the first site, if any, is selected.
   - **Explorer drops:** a drop onto the remote pane sets `status-left` to "Uploading arrives in the next build (I2): {n} items dropped on {site}." A drop onto the local pane sets "Drop files on the {site} pane to upload them."
 - [ ] **Step 4: Run to see them pass**, `cargo test --workspace`.
-- [ ] **Step 5: Commit**, `git commit -m "feat(app): session controller wiring sites, browsing and drops"`
+- [ ] **Step 5: Commit**: `git commit -m "feat(app): session controller wiring sites, browsing and drops"`
 
 ---
 
@@ -796,4 +796,4 @@ const REG: &[&str] = &["de", "sg"];
   - Wrong-password check on a duplicate site shows the exact message within 2 s.
   - Memory after browsing the 1,829-file folder ≤ 120 MB.
 - [ ] **Step 5: Screenshot comparison** with `Main.dc.html` (light and dark); list visible differences and their reasons in `docs/acceptance/I1.md`.
-- [ ] **Step 6: Commit**, `git commit -m "docs: I1 acceptance results"`
+- [ ] **Step 6: Commit**: `git commit -m "docs: I1 acceptance results"`

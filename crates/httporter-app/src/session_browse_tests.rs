@@ -577,7 +577,7 @@ async fn a_late_listing_from_a_site_the_user_left_is_dropped() {
 }
 
 /// Ruling P21 (3), the backstop: an answer that was already on its way back when the other site
-/// took effect (so there was nothing left to give up) is dropped by its ticket, whatever it is -
+/// took effect (so there was nothing left to give up) is dropped by its ticket, whatever it is,
 /// neither its rows nor its error nor its health reach the pane or the sidebar.
 #[tokio::test]
 async fn an_answer_that_beat_the_cancel_is_dropped_by_its_ticket() {

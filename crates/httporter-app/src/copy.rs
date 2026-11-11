@@ -30,7 +30,7 @@ use crate::viewmodel::RowData;
 // ---- Sizes, dates and empty cells (format.rs, viewmodel.rs; ruling Q36) ----
 
 /// Shown in place of a folder's size and of a time that is not known (an em dash).
-pub const NO_VALUE: &str = "\u{2014}";
+pub const NO_VALUE: &str = "--";
 
 /// The month abbreviations of the panes' dates ("12 Mar 2026").
 pub const MONTHS: [&str; 12] = [
@@ -490,7 +490,7 @@ pub fn aws_profile_label(name: &str, region: Option<&str>) -> String {
 
 /// An AWS CLI profile with temporary credentials (a session token) in Import's list (review M5).
 pub fn aws_temporary_label(label: &str) -> String {
-    format!("{label}, Temporary credentials, not supported")
+    format!("{label} (temporary credentials, not supported)")
 }
 
 /// Use Profile on a profile with temporary credentials.

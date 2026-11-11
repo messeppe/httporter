@@ -114,7 +114,7 @@ pub fn long_date(t: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// A time that isn't known (yet, or at all).
-pub const NOT_KNOWN: &str = "\u{2014}";
+pub const NOT_KNOWN: &str = "--";
 
 /// Where a Bunny file is kept: "Singapore → Los Angeles, Frankfurt" (the main region, then the
 /// replicas). Codes are matched in any case (ledger 97); an unknown one is shown as it is.
@@ -887,7 +887,7 @@ pub fn move_warning_body(files: u64, bytes: u64, minutes: u64) -> String {
     };
     format!(
         "Bunny can't copy on the server. HTTPorter downloads and re-uploads {files} ({}, {time}), \
-         then deletes the originals, only if every copy succeeds.",
+         then deletes the originals, but only if every copy succeeds.",
         crate::format::format_size(bytes)
     )
 }

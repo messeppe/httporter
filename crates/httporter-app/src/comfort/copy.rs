@@ -18,7 +18,7 @@ pub fn tray_labels(paused: bool) -> [&'static str; 3] {
     ]
 }
 
-/// The tray icon's tooltip: "HTTPorter, Uploading 1,204 of 13,793 · 43 files/s".
+/// The tray icon's tooltip: "HTTPorter: Uploading 1,204 of 13,793 · 43 files/s".
 pub fn tray_tooltip(s: &EngineSnapshot) -> String {
     let done = format_count(s.files_done);
     let total = format_count(s.files_total);
@@ -46,7 +46,7 @@ pub fn tray_tooltip(s: &EngineSnapshot) -> String {
             format!("Stopped \u{b7} {done} of {total} done \u{b7} open HTTPorter to see why")
         }
     };
-    format!("HTTPorter \u{2014} {what}")
+    format!("HTTPorter: {what}")
 }
 
 /// Files a second as the tooltip shows it: whole above 10, one decimal below; none at 0.

@@ -864,8 +864,8 @@ mod tests {
         );
         assert_eq!(quoted("\u{1b}\u{0}\u{7}"), REJECTED);
         assert_eq!(
-            quoted("caf\u{e9} \u{2014} ok"),
-            format!("{REJECTED}: café, ok")
+            quoted("caf\u{e9} \u{b7} ok"),
+            format!("{REJECTED}: café · ok")
         );
     }
 

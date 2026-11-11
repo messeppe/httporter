@@ -1,4 +1,4 @@
-# HTTPorter I4 "Manage+", implementation plan (lean)
+# HTTPorter I4 "Manage+": implementation plan (lean)
 
 **Goal:** every I4 row of `docs/design/mockup-feature-checklist.md` works:
 - **Main window:** view toggle, "Search {site}", Refresh and Purge buttons, sidebar Favorites and Editing, tabs,
@@ -37,7 +37,7 @@
 - **Look:** reuse `Theme`, `CapsuleButton`, `CheckRow`, `AlertCard`, `Modal`, `chips.slint`, `form_controls.slint` and
   `ContextMenuArea`; Apple-HIG look.
 - **Strings:** Slint `@tr()`; Rust user-facing strings only in `copy.rs` files (`lint_tests.rs` checks).
-- **Secrets:** only in Credential Manager, never in SQLite, settings, exports, logs (`redact`), UI or error text.
+- **Secrets:** only in Credential Manager: never in SQLite, settings, exports, logs (`redact`), UI or error text.
 - **Safety:** no `panic = "abort"`. No `.env` except `.env.test`, and only via dotenvy in live tests.
 - **Unwired controls:** disabled, with "Arrives in a later version".
 - **Builds:** one worktree per builder, `CARGO_BUILD_JOBS=2` (T0 and T1 use 3 while alone).
@@ -56,7 +56,7 @@ T1 commits all of this as `todo!()` stubs; everyone codes against it.
 ### 0.1 `httporter-core`
 
 ```rust
-// provider.rs, added to StorageProvider (default bodies are real, in T1)
+// provider.rs: added to StorageProvider (default bodies are real, in T1)
 pub struct ObjectInfo { pub entry: Entry, pub created: Option<DateTime<Utc>>, pub content_type: Option<String>,
     pub metadata: Vec<(String, String)> }                        // S3 x-amz-meta-* without prefix, lower-case
 async fn stat(&self, path: &RemotePath) -> Result<ObjectInfo, ProviderError>; // default: list parent, find, else NotFound
@@ -83,7 +83,7 @@ pub const UI_STATE_KEY: &str = "ui_state";        // the two bools: serde defaul
 // site.rs
 #[derive(Default)] pub struct SiteExtras { pub read_only: bool, pub public_base_url: Option<String>,
     pub presign_expiry_secs: u32 /*0 = 3600*/ }                 // #[serde(default)]
-// sites_file.rs, export / import without secrets (T1 adds serde to ProviderKind, S3Site, S3Preset, DeleteGuard)
+// sites_file.rs: export / import without secrets (T1 adds serde to ProviderKind, S3Site, S3Preset, DeleteGuard)
 pub const SITES_FORMAT: &str = "httporter-sites";  pub const SITES_VERSION: u32 = 1;
 pub struct SitesFile { pub format: String, pub version: u32, pub exported_at: DateTime<Utc>, pub sites: Vec<ExportedSite> }
 pub struct ExportedSite { pub name: String, pub provider: ProviderKind, pub container: String, pub region: String,
@@ -163,14 +163,14 @@ impl Store {   // all Result<_, StoreError>; remove_site also drops the site's f
     pub fn hash_put(&self, path: &Path, size: u64, mtime_ns: u64, sha256: &[u8; 32], md5: &[u8; 16]);
     pub fn hash_prune(&self, unused_since: DateTime<Utc>) -> u64;  pub fn hash_count(&self) -> u64;  pub fn hash_clear(&self);
     pub fn favorites(&self) -> Vec<Favorite>;  pub fn add_favorite(&self, f: &Favorite) -> i64;  pub fn remove_favorite(&self, id: i64); }
-// activity.rs, %APPDATA%\HTTPorter\logs\activity.log, activity.1.log … .9.log, 5 MB each
+// activity.rs: %APPDATA%\HTTPorter\logs\activity.log, activity.1.log … .9.log, 5 MB each
 pub const LOG_FILES: usize = 10;  pub const LOG_FILE_BYTES: u64 = 5 << 20;  pub fn default_log_dir() -> PathBuf;
 pub struct ActivityLog { /* dir, Mutex<(File, u64)> */ }
 impl ActivityLog { pub fn open(dir: &Path) -> io::Result<Self>;
     pub fn append(&self, e: &ActivityEvent);                // redacts path/detail, rotates, never panics
     pub fn read(&self, f: &ActivityFilter, limit: usize) -> Vec<ActivityEvent>;   // newest first, across files
     pub fn export_text(&self, f: &ActivityFilter, to: &Path) -> io::Result<u64>;  pub fn dir(&self) -> &Path; }
-// cache.rs, %LOCALAPPDATA%\HTTPorter\cache\{preview,thumbs,edit,move}
+// cache.rs: %LOCALAPPDATA%\HTTPorter\cache\{preview,thumbs,edit,move}
 pub fn cache_dir(kind: &str) -> PathBuf;  pub fn prune_cache(older_than: Duration) -> u64;  pub fn cache_bytes() -> u64;
 // win/shell.rs, win/clipboard.rs, win/watch.rs
 pub fn open_default(path: &Path) -> Result<(), String>;  pub fn open_url(url: &str) -> Result<(), String>;
@@ -181,7 +181,7 @@ pub struct DirWatcher { /* thread + handle; Drop stops it */ }
 impl DirWatcher { pub fn start(dir: &Path, on_change: Box<dyn Fn(PathBuf) + Send>) -> io::Result<Self>; } // subtree
 ```
 
-### 0.4 App, session and `crates/httporter-app/src/manage/`
+### 0.4 App: session and `crates/httporter-app/src/manage/`
 
 ```rust
 impl Session {   // session/places.rs (T4), the session/store.rs pattern; errors as String
@@ -224,7 +224,7 @@ impl Publisher {   // publish/purge_now.rs (new; T5): waits for pending_checks_f
     pub fn purge_now(self: &Arc<Self>, site: SiteRecord, files: Vec<RemotePath>, folders: Vec<RemotePath>); }
 ```
 
-### 0.5 Slint (T1), `types.slint`, `theme.slint`, `app.slint`
+### 0.5 Slint (T1): `types.slint`, `theme.slint`, `app.slint`
 
 ```slint
 export struct InspectorData { shown: bool, name: string, kind-text: string, is-image: bool, multi: string,
@@ -359,7 +359,7 @@ export struct SiteSettingsData { id: string, read-only: bool, public-url: string
 - `search-available` (AppWindow and Toolbar, default false): the toolbar search field is hidden and disabled
   until T7 sets it, so the Tab order (and the 40+ tab-count tests) does not change before T7.
   `search-placeholder` defaults to `@tr("Search")`. Toolbar has `public function focus-search()`.
-- Pane menus as built, cloud: Quick Look, Open, ‒, Download, Download to…, ‒, New Folder…, Rename…, Move To…,
+- Pane menus as built: cloud: Quick Look, Open, ‒, Download, Download to…, ‒, New Folder…, Rename…, Move To…,
   Delete…, ‒, Copy Public Link, Copy Path, (if `presign-available`) Copy Presigned Link…, Add to Favorites, Purge
   from CDN, ‒, Refresh; local: Quick Look, ‒, Upload, ‒, New Folder…, Show in Explorer, Add to Favorites, ‒,
   Refresh. "Open / Edit" is one "Open" item (`open(context-row)`; a remote file's open is the edit). Rename… and
@@ -393,15 +393,15 @@ items.
 
 | Track | Tasks | Owns |
 |---|---|---|
-|, | **T0** size (at once, ‖ T1) | Cargo manifests (root, bunny, s3, app), `ui/fonts/`, `deny.toml`, `tools/subset_fonts.py` |
-|, | **T1** skeleton (~25 min) | every §0 stub, `app.slint`, `types.slint`, `theme.slint` |
+| -- | **T0** size (at once, ‖ T1) | Cargo manifests (root, bunny, s3, app), `ui/fonts/`, `deny.toml`, `tools/subset_fonts.py` |
+| -- | **T1** skeleton (~25 min) | every §0 stub, `app.slint`, `types.slint`, `theme.slint` |
 | A engine | T2 → T3 | core `provider.rs`, s3, bunny (T2); transfer moves / search / engine / compare / hash / lane (T3) |
 | B data | T4 → T9 | platform store / activity / cache / win, `session/places.rs`, `manage/cache.rs`; then T9 |
 | C1 | T5 | inspector, single pane, grid, thumbnails, toolbar buttons, links, `publish/purge_now.rs` |
 | C2 | T6 | Quick Look, highlight, core `diff.rs`, edit, sidebar Favorites / Editing |
 | C3 | T7 | palette, search, tabs, sync browsing, `session/remote.rs` |
 | C4 | T8 | Settings General / Sites / Advanced, read-only, export / import, M3 M5 M6 M12 |
-|, | **T10** tests + live smoke | **only after the user has used the build** |
+| -- | **T10** tests + live smoke | **only after the user has used the build** |
 
 **Order:**
 - T0 and T1 start together; T0 shares only `Cargo.lock` with T1 and merges when green.
@@ -418,7 +418,7 @@ items.
 
 ---
 
-### T0, Exe size ≤ 24 MB (starts at once)
+### T0: Exe size ≤ 24 MB (starts at once)
 **Files:** root `Cargo.toml`; `Cargo.toml` of bunny, s3 and app; one line per reqwest client builder (bunny
 `client.rs`/`account.rs`, s3 `storage.rs`); `ui/fonts/*.ttf`; `tools/subset_fonts.py`; `deny.toml`.
 
@@ -453,7 +453,7 @@ items.
 **Done:** the criteria above + `cargo deny`; the release build still lists the user's Bunny site; report the bytes
 per step and the I3 attribution.
 
-### T1, Interfaces skeleton
+### T1: Interfaces skeleton
 **Files:** everything named in §0 (new: core `diff/places/sites_file/activity.rs`, transfer `moves/search.rs`, platform
 `activity/cache.rs` and `win/{shell,watch}.rs`, app `session/places.rs`, `manage/*.rs`, `publish/purge_now.rs`, the 8
 Slint shells) plus the edits in §0.5.
@@ -462,7 +462,7 @@ Slint shells) plus the edits in §0.5.
 
 **Done:** the criteria above; report the commit hash.
 
-### T2, Provider additions (Track A)
+### T2: Provider additions (Track A)
 **Files:** core `provider.rs`, `copy.rs`; s3 `storage.rs`, `sigv4.rs`, `xml.rs`, `multipart.rs`; bunny `client.rs`,
 `list.rs`, `model.rs`.
 
@@ -478,7 +478,7 @@ Slint shells) plus the edits in §0.5.
 **Bunny:** `stat` = the parent listing + `DateCreated` (keep the raw field). `copy` / `presign` stay default;
 `cache_control` is ignored (the pull zone sets caching).
 
-### T3, Move, search, persistent hashes, multipart compare, events (Track A, after T2)
+### T3: Move, search, persistent hashes, multipart compare, events (Track A, after T2)
 **Files:** transfer `moves.rs`, `search.rs`, `engine.rs`, `lane.rs`, `hash.rs`, `compare.rs`.
 
 **Build:**
@@ -492,7 +492,7 @@ Slint shells) plus the edits in §0.5.
   `set_cache_control` rule.
 - **`events()`:** one event per job when it reaches Done / Failed / Cancelled.
 
-### T4, Store v4, places, export/import, activity file, cache, Windows helpers (Track B)
+### T4: Store v4, places, export/import, activity file, cache, Windows helpers (Track B)
 **Files:** platform `store.rs`, `activity.rs`, `cache.rs`, `win/*`, platform `Cargo.toml` (windows features
 `Win32_UI_Shell`, `Win32_System_DataExchange`, `Win32_System_Memory`, `Win32_System_IO`); core `sites_file.rs`,
 `activity.rs`; app `session/places.rs`, `manage/cache.rs`.
@@ -508,7 +508,7 @@ Slint shells) plus the edits in §0.5.
 - **`mono_font_family`:** checks `%WINDIR%\Fonts\CascadiaMono*.ttf`.
 - **`fetch_to_cache`:** writes `.part`, then renames.
 
-### T5, Single pane, inspector, grid, thumbnails, toolbar, links, purge (Track C1)
+### T5: Single pane, inspector, grid, thumbnails, toolbar, links, purge (Track C1)
 **Files:** `inspector.slint`, `pane.slint` (grid), `toolbar.slint`, `icons.slint`;
 `manage/{inspector_view,thumbs,links}.rs` + their copy section; `publish/purge_now.rs`; the grid spot in
 `binding.rs` / `viewmodel.rs`.
@@ -547,7 +547,7 @@ size + mtime); 4 at a time on blocking threads; visible rows only.
 
 **`purge_now`:** per §0.4, with the status "Purging CDN… n of m".
 
-### T6, Quick Look, edit with re-upload, sidebar Favorites / Editing (Track C2)
+### T6: Quick Look, edit with re-upload, sidebar Favorites / Editing (Track C2)
 **Files:** `quicklook.slint`, `sidebar.slint`; `manage/{quicklook_view,highlight,edit,places}.rs` + their copy
 section; core `diff.rs`.
 
@@ -599,7 +599,7 @@ section; core `diff.rs`.
 - **Favorites:** folder / cloud rows (the subtitle is the site or the parent path). A click opens it (local:
   `open_local`; remote: select the site + `open_remote`). The menu has Remove.
 
-### T7, Command palette, search, tabs, synchronized browsing (Track C3)
+### T7: Command palette, search, tabs, synchronized browsing (Track C3)
 **Files:** `palette.slint`, `tab_strip.slint`, `search_bar.slint`; `manage/{palette_view,search_view,tabs}.rs` + their
 copy section; `session/remote.rs` (search mode only).
 
@@ -635,7 +635,7 @@ copy section; `session/remote.rs` (search mode only).
 - **Otherwise:** sync turns off with "Synchronized browsing stopped: {x} isn't in {other}". A `mirroring` flag stops
   echoes. Persists in `UiState`.
 
-### T8, Settings General / Sites / Advanced, read-only, export/import, M3 M5 M6 M12 (Track C4)
+### T8: Settings General / Sites / Advanced, read-only, export/import, M3 M5 M6 M12 (Track C4)
 **Files:** `settings_tabs.slint`, `add_site.slint` (M6 / M12 lines only); `manage/settings_tabs.rs` + its copy section;
 `import.rs` (M5); `add_site.rs` / `session/sites.rs` (M6, M12); `transfers.rs` (read-only guard in `submit`).
 
@@ -667,7 +667,7 @@ panes / Single pane; Restore tabs at start; Ask before previewing files over 50 
 - **M12:** an S3 `http://` endpoint to a non-loopback host warns "Not encrypted: files and signed requests travel in
   clear text." Saving is still allowed.
 
-### T9, Activity, rename/move/presign, M8, M11, publish tree/filter, Cache-Control (Track B, after T4)
+### T9: Activity, rename/move/presign, M8, M11, publish tree/filter, Cache-Control (Track B, after T4)
 **Files:** `activity.slint`, `manage_sheets.slint`, `drawer.slint` (Failed tab), `publish_sheet.slint`,
 `profile_sheet.slint`; `manage/{activity_view,move_view}.rs` + their copy section; `drawer_view.rs`;
 `publish/{mod,sheet_view,profile_view,copy}.rs`; `transfers.rs` (M8 only).
@@ -703,7 +703,7 @@ clipboard, one line per file.
   - Publish calls `engine.set_cache_control(site, remote_dir, value)` first; every profile's rule is registered at
     start.
 
-### T10, Tests, gate, live smoke (**only after the user has used the build**)
+### T10: Tests, gate, live smoke (**only after the user has used the build**)
 The user builds, installs and uses the I4 build first; start when the controller says so.
 
 **Unit and mock tests:**
