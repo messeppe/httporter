@@ -7,11 +7,10 @@ welcome and taken seriously.
 
 Please report it **privately**, not in a public issue, pull request or discussion.
 
-- Once the repository is public on GitHub: use **Report a vulnerability** on its **Security**
-  tab (GitHub's private security advisories). Only the maintainers see the report, and the
-  fix can be prepared in a private fork before it is published.
-- Until then, or if that is not possible: contact a maintainer privately and ask for a
-  private channel before sending details.
+- Use **Report a vulnerability** on the repository's **Security** tab (GitHub's private
+  security advisories). Only the maintainers see the report, and the fix can be prepared in a
+  private fork before it is published.
+- Or email **messepee@gmail.com** with "HTTPorter security" in the subject.
 
 Please include what you found, the HTTPorter version (Settings › About), the steps to
 reproduce it, and what an attacker could do with it. Never include real credentials: use a
