@@ -188,7 +188,7 @@ HTTPorter is a free, native Windows app for cloud storage that speaks HTTP APIs:
 Bunny Storage and S3-compatible services (AWS S3, Cloudflare R2, Backblaze B2, Wasabi,
 DigitalOcean Spaces, MinIO and others). It publishes a local folder to a bucket or
 storage zone (only what changed, then clears the CDN cache), and manages remote files in
-two panes.
+two panes, side by side.
 
 Running it
 ----------

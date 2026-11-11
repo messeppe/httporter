@@ -2,8 +2,8 @@
 
 A free, native Windows file manager and uploader for cloud storage that speaks HTTP APIs:
 **Bunny Storage** and **S3-compatible** services (Amazon S3, Cloudflare R2, Backblaze B2,
-Wasabi, DigitalOcean Spaces, MinIO and others). an FTP client made FTP easy; HTTPorter does the
-same for the storage services people use today.
+Wasabi, DigitalOcean Spaces, MinIO and others), the storage services people use today,
+without FTP.
 
 It does two jobs:
 

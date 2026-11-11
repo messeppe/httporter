@@ -17,7 +17,7 @@ Revision 1 (a Bunny-only app on Go + Wails/WebView2) is superseded in full by th
 
 ## 1. What HTTPorter is
 
-HTTPorter is a **free, native desktop file manager and uploader for cloud storage over HTTP APIs, "a universal HTTP uploader"**. **[user]** an FTP client made FTP easy; HTTPorter does the same for the storage services people actually use today, which speak HTTP APIs rather than FTP.
+HTTPorter is a **free, native desktop file manager and uploader for cloud storage over HTTP APIs, "a universal HTTP uploader"**. **[user]** It makes the storage services people actually use today, which speak HTTP APIs rather than FTP, as easy to work with as FTP once was.
 
 It runs as a normal program on the user's own computer: its own window, no server, nothing hosted, no web browser or WebView inside. **[user]** It ships as one main executable `httporter.exe` plus a tiny console companion `httporter.com` used only when HTTPorter is run from a terminal (§8.8.1). **[my call]** Its only network traffic is to the storage services the user connects it to.
 
@@ -30,7 +30,7 @@ First release supports **Bunny Storage** and **S3-compatible storage** (AWS S3, 
 
 ### 1.1 Why it exists
 
-- The user uploaded a 13,793-file, 865 MB static export to Bunny Storage with an FTP client over FTP at **2 files/s** (~2 hours). FTP pays several round trips per file, and an FTP client runs 2 transfers at once by default (10 at most), each needing its own login.
+- The user uploaded a 13,793-file, 865 MB static export to Bunny Storage with a desktop FTP client at **2 files/s** (~2 hours). FTP pays several round trips per file, and the client ran 2 transfers at once by default (10 at most), each needing its own login.
 - A Python script using Bunny's HTTP API with 32 parallel requests uploaded the same export in **~147 s (94 files/s)** with 0 failures.
 - Research found no open-source GUI that uploads through Bunny's HTTP API. Existing options are command-line sync tools, Simply Static Pro's paid deploy, or S3 GUIs that only work with S3-enabled zones (which can't be enabled on an existing Bunny zone).
 - The user wants their own program: beautiful (Apple/Google-quality UI/UX), following best practices, native and light on memory, and released as free software. **[user]**
@@ -60,7 +60,7 @@ First release supports **Bunny Storage** and **S3-compatible storage** (AWS S3, 
 ### Goals
 
 - G1. Publish a local folder to a remote folder, uploading only new or changed files, with an editable preview before anything happens.
-- G2. an FTP client-level file management on every supported service: browse, upload, download, delete, new folder, rename/move, preview, open/edit with auto re-upload.
+- G2. Full desktop-client file management on every supported service: browse, upload, download, delete, new folder, rename/move, preview, open/edit with auto re-upload.
 - G3. Fast: at least the Python script's 94 files/s on the reference workload at default settings; faster where the service's limits allow.
 - G4. Safe: nothing is deleted remotely without the user seeing what and how many. Assume deletes are permanent.
 - G5. Beautiful and pleasant: Apple-inspired Cupertino look, calm layout, purposeful motion, fully keyboard-operable. **[user]**
@@ -72,7 +72,7 @@ First release supports **Bunny Storage** and **S3-compatible storage** (AWS S3, 
 
 ### Non-goals (first release)
 
-- FTP/SFTP/FTPS (an FTP client already does them well).
+- FTP/SFTP/FTPS (existing clients already do them well).
 - WebDAV, Azure, GCS, Supabase adapters (later releases).
 - macOS and Linux builds.
 - Multi-user features (shared accounts, roles, cross-user audit).
@@ -86,7 +86,7 @@ First release supports **Bunny Storage** and **S3-compatible storage** (AWS S3, 
 - Any remote delete the user didn't explicitly see and confirm, with counts.
 - The window freezing or stuttering with thousands of items.
 - Secrets in plain text, in logs, or uploaded by accident (e.g. a `.env` in the publish folder).
-- A dense, dated, toolbar-heavy look's.
+- A dense, dated, toolbar-heavy look.
 - Modal dialogs that block the whole app while work runs.
 - Showing buttons for operations a service can't do (e.g. a fast rename on Bunny) and then failing.
 
@@ -207,7 +207,7 @@ Service presets (endpoint templates and quirks) **[my call]**: AWS S3 (`s3.{regi
 ## 7. Concepts
 
 - **Provider**: a kind of storage service HTTPorter speaks to (Bunny Storage, S3-compatible). Implemented as an adapter (§10.2).
-- **Site**: a saved connection, provider, endpoint/region, bucket or zone, credentials reference, optional CDN link and public base URL, optional default remote folder. Like an FTP client's Site Manager entry.
+- **Site**: a saved connection, provider, endpoint/region, bucket or zone, credentials reference, optional CDN link and public base URL, optional default remote folder.
 - **Account**: optional saved account-level credentials used to discover sites (Bunny account key → zones; S3 keys → buckets) and to manage zones/caches.
 - **CDN link**: how a site's files are served publicly, used for "Copy public link" and purging: a Bunny Pull Zone (purge supported), or a plain public base URL (no purge in the first release).
 - **Publish profile**: a local folder + site + remote folder + skip rules + publish options. A site can have several.
@@ -516,7 +516,7 @@ Release scaffolding (LICENSE, license headers, allowed-dependency-license list, 
 
 ### Questions only the user can answer [open]
 
-- **Q1. License** (decided at I5, before the repository goes public): GPL-3.0-or-later (strong copyleft uses Slint's GPLv3 option) or a permissive license such as MIT/Apache-2.0 (uses Slint's royalty-free license with a "Made with Slint" attribution)? Until then the private repository carries no license and avoids dependencies whose licenses would rule out either choice.
+- **Q1. License** (decided at I5, before the repository goes public): GPL-3.0-or-later (strong copyleft; uses Slint's GPLv3 option) or a permissive license such as MIT/Apache-2.0 (uses Slint's royalty-free license with a "Made with Slint" attribution)? Until then the private repository carries no license and avoids dependencies whose licenses would rule out either choice.
 
 Nothing else blocks planning: Q2–Q5 are answered above.
 
@@ -554,7 +554,7 @@ The approved-for-review mockups live on the design canvas "HTTPorter, UI mockups
 
 | Measurement | Result |
 |---|---|
-| an FTP client FTP upload to Bunny | ~2 files/s |
+| FTP upload to Bunny (desktop client) | ~2 files/s |
 | Python HTTP script, 32 parallel | 13,793 files / 865 MB in ~147 s = 94 files/s, 0 failures |
 | Python script vs local mock server | ~1,300–1,400 files/s (client not the bottleneck) |
 | Bunny full listing, 5 parallel | 1,011 listings in 5.6 s; median 21 ms, p95 34 ms |
